@@ -1,5 +1,5 @@
-import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./config.js?v=3.4-first-release";
-import { sessionStore } from "./api.js?v=3.4-first-release";
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./config.js?v=3.4.2-folder-video-fixes";
+import { sessionStore } from "./api.js?v=3.4.2-folder-video-fixes";
 
 const REALTIME_IMPORT_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
 const TABLES = ["runs", "jobs", "artifacts", "machines", "run_deletions"];

@@ -38,6 +38,7 @@ NOTIFICATION_SETTING_KEYS = {
     "training_failed": "notify_training_failed",
     "video_ready": "notify_video_ready",
 }
+HANDLED_NOTIFICATION_STATUSES = {"sent", "no_channels", "disabled", "skipped"}
 
 
 def _storage_safe(value: str) -> str:
@@ -48,6 +49,10 @@ def _storage_safe(value: str) -> str:
 def _checkpoint_iteration(path: str) -> int | None:
     match = re.search(r"model_(\d+)\.pt$", str(path or ""))
     return int(match.group(1)) if match else None
+
+
+def _folder_key(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip()).lower()
 
 
 def run_artifacts(run: dict) -> list[dict]:
@@ -365,6 +370,9 @@ class RemoteJobExecutor:
                 "convergence_improvement_pct": run.get("convergence_improvement_pct"),
                 "video_status": run.get("video_status"),
                 "returncode": run.get("returncode"),
+                "compacted_at": run.get("compacted_at"),
+                "compacted_deleted_count": run.get("compacted_deleted_count"),
+                "compacted_bytes_freed": run.get("compacted_bytes_freed"),
                 "artifacts": run_artifacts(run),
             }
             # Only include user-editable metadata when the mother has a real value.
@@ -463,6 +471,59 @@ class RemoteWorker:
             updated += 1
         return updated
 
+    def pull_remote_folders(self) -> int:
+        try:
+            rows = self.client.select(
+                "team_folders",
+                query={
+                    "machine_id": f"eq.{self.config.machine_id}",
+                    "select": "name,updated_at",
+                },
+            )
+        except Exception:
+            return 0
+        if not isinstance(rows, list):
+            return 0
+        created = 0
+        for row in rows:
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                self.history.create_folder(name)
+                created += 1
+            except Exception:
+                continue
+        return created
+
+    def push_local_folders(self) -> int:
+        records = []
+        for folder in self.history.get_folders():
+            name = str(folder or "").strip()
+            key = _folder_key(name)
+            if not name or not key:
+                continue
+            records.append(
+                {
+                    "machine_id": self.config.machine_id,
+                    "name": name,
+                    "folder_key": key,
+                }
+            )
+        if not records:
+            return 0
+        try:
+            self.client.upsert("team_folders", records, query={"on_conflict": "machine_id,folder_key"})
+        except Exception:
+            return 0
+        return len(records)
+
+    def sync_folders(self) -> dict:
+        return {
+            "folders_pulled": self.pull_remote_folders(),
+            "folders_pushed": self.push_local_folders(),
+        }
+
     @staticmethod
     def _run_fingerprint(run_record: dict, artifacts: list[dict]) -> str:
         payload = {
@@ -503,6 +564,9 @@ class RemoteWorker:
         started = time.time()
         if pull_metadata:
             self.pull_remote_run_metadata()
+            folder_summary = self.sync_folders()
+        else:
+            folder_summary = {"folders_pulled": 0, "folders_pushed": 0}
         normalized_run_ids = {str(run_id) for run_id in run_ids or set() if str(run_id)}
         targeted = bool(normalized_run_ids)
         tombstones = self.history.deleted_run_tombstones(run_ids=normalized_run_ids) if targeted else None
@@ -546,6 +610,8 @@ class RemoteWorker:
             self._upsert_grouped("runs", runs)
         if artifacts:
             self.client.upsert("artifacts", artifacts, query={"on_conflict": "run_id,kind,local_path"})
+        for run in run_payloads:
+            self._prune_stale_checkpoint_artifacts(run)
         notification_errors = self._dispatch_notification_events(runs, artifacts)
         if notification_errors:
             artifact_errors.extend(notification_errors)
@@ -562,10 +628,49 @@ class RemoteWorker:
             "artifacts": len(artifacts),
             **deletion_summary,
             **alias_summary,
+            **folder_summary,
             "targeted_run_ids": sorted(normalized_run_ids),
             "duration_ms": duration_ms,
         }
         return self.last_sync_summary
+
+    def _prune_stale_checkpoint_artifacts(self, run: dict) -> int:
+        run_id = str(run.get("id") or "").strip()
+        if not run_id:
+            return 0
+        current = {
+            str(artifact.get("local_path") or artifact.get("path") or "").strip()
+            for artifact in (run.get("artifacts") or [])
+            if str(artifact.get("kind") or "") == "checkpoint"
+        }
+        current.discard("")
+        if not current:
+            return 0
+        try:
+            rows = self.client.select(
+                "artifacts",
+                query={
+                    "machine_id": f"eq.{self.config.machine_id}",
+                    "run_id": f"eq.{run_id}",
+                    "kind": "eq.checkpoint",
+                    "select": "id,local_path",
+                    "limit": "1000",
+                },
+            )
+        except Exception:
+            return 0
+        deleted = 0
+        for row in rows if isinstance(rows, list) else []:
+            local_path = str(row.get("local_path") or "").strip()
+            row_id = str(row.get("id") or "").strip()
+            if not row_id or not local_path or local_path in current:
+                continue
+            try:
+                self.client.delete("artifacts", query={"id": f"eq.{row_id}"})
+                deleted += 1
+            except Exception:
+                continue
+        return deleted
 
     def _upsert_grouped(self, table: str, records: list[dict], **kwargs) -> None:
         groups: dict[tuple[str, ...], list[dict]] = {}
@@ -622,6 +727,8 @@ class RemoteWorker:
             )
             for event in events:
                 try:
+                    if self._notification_handled_exists(str(event.get("event_key") or "")):
+                        continue
                     self.client.function_request("notify", event)
                 except Exception as exc:
                     errors.append(f"notify {event.get('event_type')} {run_id}: {exc}")
@@ -828,6 +935,9 @@ class RemoteWorker:
             "convergence_improvement_pct": run.get("convergence_improvement_pct"),
             "video_status": run.get("video_status"),
             "returncode": run.get("returncode"),
+            "compacted_at": run.get("compacted_at"),
+            "compacted_deleted_count": run.get("compacted_deleted_count"),
+            "compacted_bytes_freed": run.get("compacted_bytes_freed"),
         }
         display_name = run.get("display_name") or params.get("display_name")
         folder = run.get("folder") or params.get("folder")
@@ -909,6 +1019,23 @@ class RemoteWorker:
                 query={
                     "event_key": f"eq.{event_key}",
                     "notification_status": "eq.sent",
+                    "select": "event_key,notification_status",
+                    "limit": "1",
+                },
+            )
+        except Exception:
+            return False
+        return isinstance(rows, list) and bool(rows)
+
+    def _notification_handled_exists(self, event_key: str) -> bool:
+        if not event_key:
+            return False
+        try:
+            rows = self.client.select(
+                "run_events",
+                query={
+                    "event_key": f"eq.{event_key}",
+                    "notification_status": f"in.({','.join(sorted(HANDLED_NOTIFICATION_STATUSES))})",
                     "select": "event_key,notification_status",
                     "limit": "1",
                 },
@@ -1048,7 +1175,7 @@ class RemoteWorker:
                     summary["skipped_disabled"] += 1
                     continue
                 event_key = str(event.get("event_key") or "")
-                if self._sent_event_exists(event_key):
+                if self._notification_handled_exists(event_key):
                     summary["skipped_sent"] += 1
                     continue
                 try:

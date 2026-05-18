@@ -151,7 +151,9 @@ def notification_event_key(event_type: str, run: dict, payload: dict | None = No
     if event_type == "training_failed":
         return f"{run_id}:training_failed:{run.get('status') or 'failed'}:{run.get('returncode', 'unknown')}"
     if event_type == "video_ready":
-        video_id = payload.get("storage_path") or payload.get("latest_video") or run.get("latest_video") or "video"
+        video_id = payload.get("storage_path")
+        if not video_id:
+            return ""
         return f"{run_id}:video_ready:{video_id}"
     if event_type == "test_notification":
         recipient = payload.get("recipient_id") or requester_id_for_run(run) or "unknown"
@@ -213,12 +215,11 @@ def video_ready_edge_event(
     artifact = artifact or {}
     storage_path = artifact.get("storage_path")
     local_path = artifact.get("local_path") or artifact.get("path")
-    latest_video = storage_path or local_path or run.get("latest_video")
-    if not latest_video:
+    if not storage_path:
         return None
     payload = {
         **_base_run_payload(run, remote_url=remote_url),
-        "latest_video": latest_video,
+        "latest_video": storage_path,
         "storage_path": storage_path,
         "local_path": local_path,
         "bytes": artifact.get("bytes"),
@@ -264,11 +265,6 @@ def notification_events_for_run(
             if event:
                 event["requester_id"] = requester_id
                 events.append(event)
-    elif not require_video_storage:
-        event = video_ready_edge_event(run, None, machine_id=machine_id, remote_url=remote_url)
-        if event:
-            event["requester_id"] = requester_id
-            events.append(event)
     return events
 
 

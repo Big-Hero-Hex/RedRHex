@@ -13,6 +13,37 @@
 
 目前沒有。安靜得很可疑，但先享受一下。
 
+## V3.4.2 Folder Sync + Notification Reliability
+
+### Added
+
+- Child 可以建立資料夾，也可以用正常的下拉選單把 run 移到不同資料夾。
+- 空資料夾會透過 Supabase `team_folders` 同步，所以 Mother / Child 不需要等有 run 才看得到資料夾。
+
+### Fixed
+
+- Video ready 通知改用上傳後的 storage path 去除重複；`sent`、`no_channels`、`disabled`、`skipped` 都會被視為已處理，不會一直刷通知。
+- Worker 的 folder sync 不會阻塞訓練 / 影片 / ONNX 工作，Mother 的 folder library 會和 Child 對齊。
+
+### Notes
+
+- 這版要在 Supabase 重新套用 `tools/training_panel/supabase/schema.sql`，新增 `team_folders` table 和 policies。
+
+## V3.4.1 Child Video + Dropdown Polish
+
+### Changed
+
+- Video checkpoint 選單會標示 `video ready`、`uploading`、`no video`。
+- Video 按鈕文字改得更直覺：`Refresh Secure Link` 和 `Record Video`。
+- Train 頁面的 folder 改成正常 dropdown，並保留 inline 建立新資料夾。
+- Train 頁面的 reward / terrain preset 選擇改成有邊框的卡片式區塊，文字不再被 dropdown 擠爆。
+
+### Fixed
+
+- Video checkpoint selection 綁定到正在操作的 run，不會因為 auto refresh 跑去改到別的 run。
+- Compact Run 後，Child 不再列出已刪掉 checkpoint 的影片目標，但舊影片 artifact 仍保留在 storage。
+- Related jobs 的文字改成分行與 badge，不再擠在一起變成一串。
+
 ## V3.4 First Release
 
 ### Added

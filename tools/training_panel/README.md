@@ -1,8 +1,8 @@
 # RedRHex Training Panel
 
-Local admin panel and V3.4 remote-control system for launching RSL-RL training runs, tuning rewards/terrain, viewing run history, keeping notes, coordinating team access, and sending requester-scoped notifications.
+Local admin panel and V3.4.2 remote-control system for launching RSL-RL training runs, tuning rewards/terrain, viewing run history, keeping notes, coordinating team access, and sending requester-scoped notifications.
 
-**Version:** 3.4 First Release
+**Version:** 3.4.2 Folder + Video Fixes
 **Published by:** BioRoLa ABAD RHex Team
 **Credits:** Jason Liao and Jacob Yang
 

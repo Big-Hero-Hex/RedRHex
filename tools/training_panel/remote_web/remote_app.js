@@ -1,4 +1,4 @@
-import { DEFAULT_MACHINE_ID, SUPABASE_URL } from "./config.js?v=3.4-first-release";
+import { DEFAULT_MACHINE_ID, SUPABASE_URL } from "./config.js?v=3.4.2-folder-video-fixes";
 import {
   createSignedVideoUrl,
   currentUser,
@@ -11,15 +11,15 @@ import {
   signOut,
   update,
   upsert,
-} from "./api.js?v=3.4-first-release";
-import { createRemoteRealtime } from "./realtime.js?v=3.4-first-release";
+} from "./api.js?v=3.4.2-folder-video-fixes";
+import { createRemoteRealtime } from "./realtime.js?v=3.4.2-folder-video-fixes";
 import {
   compareHistoryRuns,
   historyRunsForSnapshot,
   jobClientRequestId,
   normalizeHistorySort,
   realRunConfirmsJob,
-} from "./history_sync.js?v=3.4-first-release";
+} from "./history_sync.js?v=3.4.2-folder-video-fixes";
 import {
   REWARD_FIELDS,
   TERRAIN_DEFAULT_VALUES,
@@ -54,10 +54,11 @@ import {
   statusLabel,
   statusTone,
   tensorboardSummaryStateForRun,
+  videoAvailabilityForCheckpoint,
   videoArtifactForCheckpoint,
   videoStateForCheckpoint,
   videoStateForRun,
-} from "./core.js?v=3.4-first-release";
+} from "./core.js?v=3.4.2-folder-video-fixes";
 
 const PHONE_MEDIA = window.matchMedia
   ? window.matchMedia("(max-width: 720px)")
@@ -65,8 +66,8 @@ const PHONE_MEDIA = window.matchMedia
 
 const TEXT_AUTOSAVE_DELAY_MS = 350;
 const THEME_KEY = "redrhex_to_go_theme";
-const CHILD_RELEASE_VERSION = "3.4";
-const CHILD_RELEASE_NAME = "First Release";
+const CHILD_RELEASE_VERSION = "3.4.2";
+const CHILD_RELEASE_NAME = "Folder + Video Fixes";
 const VIEW_IDS = ["train", "rewards", "terrain", "history", "connection", "dashboard"];
 const NOTIFICATION_EVENTS = [
   ["notify_training_converged", "Converged", "Reward improvement has flattened."],
@@ -103,10 +104,11 @@ const state = {
     runs: [],
     runDeletions: [],
     artifacts: [],
+    folders: [],
     presets: [],
     terrainPresets: [],
     notificationSettings: null,
-    schema: { artifacts: true, runDeletions: true, rewardPresets: true, terrainPresets: true, warnings: [] },
+    schema: { artifacts: true, runDeletions: true, rewardPresets: true, terrainPresets: true, teamFolders: true, warnings: [] },
   },
   selectedPresetId: localStorage.getItem("redrhex_child_preset") || "baseline",
   draftPreset: null,
@@ -124,6 +126,7 @@ const state = {
     display_name: "",
     folder: "",
   },
+  trainFolderCreating: false,
   selectedRunId: "",
   runSearch: "",
   folderFilter: "all",
@@ -131,6 +134,9 @@ const state = {
   signedVideos: {},
   videoCheckpointByRun: {},
   runDrafts: {},
+  creatingFolder: false,
+  newFolderName: "",
+  runFolderCreatingByRun: {},
   runMetadataAutosaveTimer: null,
   runMetadataSaveInFlight: false,
   runMetadataQueuedRunId: "",
@@ -412,7 +418,83 @@ function currentRunMetadata(run) {
 }
 
 function isRunMetadataElement(element) {
-  return ["run-name", "run-folder", "run-notes"].includes(element?.id);
+  return ["run-name", "run-folder", "run-folder-new", "run-notes"].includes(element?.id);
+}
+
+function normalizeFolderName(name = "") {
+  return String(name || "").trim().replace(/\s+/g, " ");
+}
+
+function folderKey(name = "") {
+  return normalizeFolderName(name).toLowerCase();
+}
+
+function selectValueForFolder(folder = "") {
+  const normalized = normalizeFolderName(folder);
+  if (!normalized) return "";
+  return folders().some((item) => folderKey(item) === folderKey(normalized)) ? normalized : "__new__";
+}
+
+function folderOptionsHtml(selected = "", { includeCreate = true } = {}) {
+  const selectedValue = selectValueForFolder(selected);
+  const folderList = folders();
+  return `
+    <option value="" ${selectedValue === "" ? "selected" : ""}>Uncategorized</option>
+    ${folderList.map((folder) => `<option value="${escapeHtml(folder)}" ${folderKey(selectedValue) === folderKey(folder) ? "selected" : ""}>${escapeHtml(folder)}</option>`).join("")}
+    ${includeCreate ? `<option value="__new__" ${selectedValue === "__new__" ? "selected" : ""}>Create new folder...</option>` : ""}
+  `;
+}
+
+function folderCreateFields({ idPrefix, value = "", hidden = false, placeholder = "New folder name" } = {}) {
+  return `
+    <div class="inline-create-folder ${hidden ? "hidden" : ""}" data-folder-create="${escapeHtml(idPrefix || "")}">
+      <input id="${escapeHtml(idPrefix)}-new" maxlength="120" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value || "")}">
+    </div>
+  `;
+}
+
+function folderSelectValue(selectId, createInputId) {
+  const select = document.querySelector(`#${selectId}`);
+  if (!select) return "";
+  if (select.value === "__new__") {
+    return normalizeFolderName(document.querySelector(`#${createInputId}`)?.value || "");
+  }
+  return normalizeFolderName(select.value || "");
+}
+
+async function ensureTeamFolder(folderName) {
+  const name = normalizeFolderName(folderName);
+  if (!name || !state.machineId) return null;
+  if (folders().some((folder) => folderKey(folder) === folderKey(name))) return { name };
+  const payload = {
+    machine_id: state.machineId,
+    name,
+    folder_key: folderKey(name),
+    created_by: state.user?.id || null,
+    updated_at: new Date().toISOString(),
+  };
+  const rows = await upsert("team_folders", payload, "machine_id,folder_key");
+  const record = rows?.[0] || payload;
+  state.snapshot.folders = [
+    ...(state.snapshot.folders || []).filter((folder) => folderKey(folder.name) !== folderKey(name)),
+    record,
+  ].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  return record;
+}
+
+async function createFolderFromInput() {
+  const input = document.querySelector("#history-folder-new");
+  const name = normalizeFolderName(input?.value || state.newFolderName);
+  if (!name) return setMessage("Type a folder name first.");
+  try {
+    await ensureTeamFolder(name);
+    state.creatingFolder = false;
+    state.newFolderName = "";
+    await refresh({ silent: true });
+    setMessage(`Created folder ${name}.`);
+  } catch (error) {
+    setMessage(friendlyErrorMessage(error));
+  }
 }
 
 function runMetadataStatusText(status) {
@@ -447,8 +529,7 @@ function selectedVideoCheckpoint(run) {
   return run.latest_checkpoint || options[0]?.path || "";
 }
 
-async function ensureSelectedVideoSigned() {
-  const run = selectedRun();
+async function ensureSelectedVideoSigned(run = selectedRun()) {
   if (!run) return;
   const video = videoStateForCheckpoint(run, state.snapshot.artifacts, selectedVideoCheckpoint(run));
   const storagePath = video.artifact?.storage_path;
@@ -830,6 +911,8 @@ function trainView() {
   const terrainPreset = selectedTerrainPresetForTraining();
   const disabled = !canOperate(role());
   const form = state.trainForm;
+  const currentFolder = normalizeFolderName(form.folder || "");
+  const trainFolderCreating = state.trainFolderCreating || Boolean(currentFolder && selectValueForFolder(currentFolder) === "__new__");
   return `
     <section class="split-grid">
       <article class="panel">
@@ -839,27 +922,31 @@ function trainView() {
         <label>Task <input id="task" value="${escapeHtml(form.task)}"></label>
         <div class="input-row">
           <label>Run Name <input id="run-display-name" maxlength="120" placeholder="optional" value="${escapeHtml(form.display_name || "")}"></label>
-          <label>Folder <input id="run-folder-before-launch" maxlength="120" list="run-folder-suggestions" placeholder="Uncategorized" value="${escapeHtml(form.folder || "")}"></label>
+          <label>Folder
+            <select id="run-folder-before-launch">
+              ${folderOptionsHtml(currentFolder)}
+            </select>
+          </label>
         </div>
-        <datalist id="run-folder-suggestions">
-          ${folders().map((folder) => `<option value="${escapeHtml(folder)}"></option>`).join("")}
-        </datalist>
+        ${folderCreateFields({ idPrefix: "run-folder-before-launch", value: currentFolder, hidden: !trainFolderCreating, placeholder: "New launch folder" })}
         <div class="input-row">
           <label>Envs <input id="num-envs" type="number" min="1" max="8192" value="${escapeHtml(form.num_envs)}"></label>
           <label>Iterations <input id="max-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.max_iterations)}"></label>
         </div>
         <label>Device <input id="device" value="${escapeHtml(form.device)}"></label>
         <label>Seed <input id="seed" type="number" placeholder="optional" value="${escapeHtml(form.seed ?? "")}"></label>
-        <label>Reward Preset
-          <select id="train-preset">
-            ${rewardPresetsForView().map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === preset.id ? "selected" : ""}>${escapeHtml(item.name)}${item.draft ? " (draft)" : ""}</option>`).join("")}
-          </select>
-        </label>
-        <label>Terrain Preset
-          <select id="train-terrain-preset">
-            ${state.snapshot.terrainPresets.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === terrainPreset.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
-          </select>
-        </label>
+        <div class="train-preset-pickers">
+          <label class="preset-select-card">Reward Preset
+            <select id="train-preset">
+              ${rewardPresetsForView().map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === preset.id ? "selected" : ""}>${escapeHtml(item.name)}${item.draft ? " (draft)" : ""}</option>`).join("")}
+            </select>
+          </label>
+          <label class="preset-select-card">Terrain Preset
+            <select id="train-terrain-preset">
+              ${state.snapshot.terrainPresets.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === terrainPreset.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
+            </select>
+          </label>
+        </div>
         <div class="button-row wrap">
           <button class="primary" data-action="queue-training" ${disabled ? "disabled" : ""}>Queue Training</button>
           <button data-action="tweak-last-run" ${disabled ? "disabled" : ""}>Tweak From Last Run</button>
@@ -1106,8 +1193,16 @@ function runMatchesSearch(run) {
 }
 
 function folders() {
-  const set = new Set(historyRunsForBrowser().map((run) => run.folder).filter(Boolean));
-  return [...set].sort((a, b) => a.localeCompare(b));
+  const byKey = new Map();
+  for (const folder of state.snapshot.folders || []) {
+    const name = normalizeFolderName(folder.name || folder.folder || "");
+    if (name) byKey.set(folderKey(name), name);
+  }
+  for (const run of historyRunsForBrowser()) {
+    const name = normalizeFolderName(run.folder || "");
+    if (name && !byKey.has(folderKey(name))) byKey.set(folderKey(name), name);
+  }
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b));
 }
 
 function folderLabel(folderKey) {
@@ -1168,7 +1263,7 @@ function folderCard(folder) {
 function historyBrowserContent() {
   if (state.folderFilter === "all") {
     const summaries = folderSummaries();
-    return `<div class="folder-list">${summaries.map(folderCard).join("") || empty("No folders yet. Add a folder name to a run from its details.")}</div>`;
+    return `<div class="folder-list">${summaries.map(folderCard).join("") || empty("No folders yet. Create one above, then move runs into it.")}</div>`;
   }
   const runs = filteredRuns();
   return `
@@ -1242,7 +1337,15 @@ function historyFolderNav({ root, currentLabel, folderCount }) {
           <strong>Folder Library</strong>
           <small>${folderCount} folder${folderCount === 1 ? "" : "s"} · ${runCount} run${runCount === 1 ? "" : "s"}</small>
         </div>
+        <button class="icon-action folder-add" data-action="start-create-folder" title="New folder" aria-label="New folder">+</button>
       </div>
+      ${state.creatingFolder ? `
+        <div class="folder-create-bar">
+          <input id="history-folder-new" maxlength="120" placeholder="New folder name" value="${escapeHtml(state.newFolderName || "")}">
+          <button class="primary" data-action="create-folder">Create</button>
+          <button data-action="cancel-create-folder">Cancel</button>
+        </div>
+      ` : ""}
     `;
   }
   const runCount = filteredRuns().length;
@@ -1539,7 +1642,15 @@ function relatedJobsSection(run) {
     <section id="related-jobs-panel" class="subpanel">
       <h3>Related Jobs</h3>
       ${relatedJobs.length ? `<div class="mini-list">${relatedJobs.map((job) => `
-        <div><strong>${escapeHtml(job.type)}</strong><span class="badge ${statusTone(jobDisplayStatus(job))}">${escapeHtml(jobDisplayStatus(job))}</span><small>${escapeHtml(jobQueueLabel(job, state.snapshot.targetMachine || state.snapshot.machine))}</small>${jobExtraLine(job)}<small>${escapeHtml(formatRelativeTime(job.created_at))}</small></div>
+        <div class="related-job-row">
+          <span class="related-job-main">
+            <strong>${escapeHtml(job.type)}</strong>
+            <span class="badge ${statusTone(jobDisplayStatus(job))}">${escapeHtml(jobDisplayStatus(job))}</span>
+          </span>
+          <small>${escapeHtml(jobQueueLabel(job, state.snapshot.targetMachine || state.snapshot.machine))}</small>
+          ${jobExtraLine(job)}
+          <small>${escapeHtml(formatRelativeTime(job.created_at))}</small>
+        </div>
       `).join("")}</div>` : empty("No remote jobs linked to this run yet.")}
     </section>
   `;
@@ -1570,8 +1681,17 @@ function teamVideoSection(run) {
     ? `Iteration ${selectedIteration}`
     : selectedOption?.label || "Selected checkpoint";
   const checkpointName = checkpoint ? checkpoint.split("/").pop() : "";
+  const optionLabel = (option) => {
+    const availability = videoAvailabilityForCheckpoint(run, state.snapshot.artifacts, option.path);
+    const marker = availability === "ready"
+      ? "video ready"
+      : availability === "uploading"
+        ? "uploading"
+        : "no video";
+    return `${option.label} · ${marker}`;
+  };
   return `
-    <section id="team-video-panel" class="subpanel" data-run-id="${escapeHtml(run.id)}" data-video-state="${escapeHtml(video.state)}" data-storage-path="${escapeHtml(storagePath)}">
+    <section id="team-video-panel" class="subpanel" data-run-id="${escapeHtml(run.id)}" data-checkpoint="${escapeHtml(checkpoint)}" data-video-state="${escapeHtml(video.state)}" data-storage-path="${escapeHtml(storagePath)}">
       <div class="section-head compact">
         <h3>Team Video</h3>
         <span class="badge ${statusTone(video.state)}">${escapeHtml(video.state)}</span>
@@ -1583,21 +1703,21 @@ function teamVideoSection(run) {
       </div>
       <label>Choose checkpoint video
         <select id="video-checkpoint-select" ${options.length ? "" : "disabled"}>
-          ${options.map((option) => `<option value="${escapeHtml(option.path)}" ${option.path === checkpoint ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          ${options.map((option) => `<option value="${escapeHtml(option.path)}" ${option.path === checkpoint ? "selected" : ""}>${escapeHtml(optionLabel(option))}</option>`).join("")}
         </select>
       </label>
       ${video.state === "ready" ? `
-        <p class="video-now">Viewing team video for <strong>${escapeHtml(selectedLabel)}</strong>.</p>
+        <p class="video-now">Viewing <strong>${escapeHtml(selectedLabel)}</strong>.</p>
         ${signed ? `<video controls src="${escapeHtml(signed)}"></video>` : `<p class="muted">Preparing a signed team-only video link...</p>`}
         <div class="button-row">
-          <button data-action="load-video" data-path="${escapeHtml(videoArtifact.storage_path)}">${signed ? "Refresh Secure Link" : "Load Team Video"}</button>
+          <button data-action="load-video" data-run-id="${escapeHtml(run.id)}" data-path="${escapeHtml(videoArtifact.storage_path)}">Refresh Secure Link</button>
           <button data-action="copy-video-path" data-path="${escapeHtml(videoArtifact.storage_path)}">Copy Storage Path</button>
         </div>` : video.state === "uploading" ? `
         <p class="muted">Video for ${escapeHtml(selectedLabel)} exists locally and is uploading to team storage.</p>
         <button data-action="refresh">Refresh Status</button>
       ` : video.state === "recordable" ? `
-        <p class="muted">No team video has been recorded for ${escapeHtml(selectedLabel)} yet.</p>
-        <button class="primary" data-action="check-video" ${runnable ? "" : "disabled"}>Record Video for ${escapeHtml(selectedLabel)}</button>
+        <p class="muted">No video for ${escapeHtml(selectedLabel)} yet.</p>
+        <button class="primary" data-action="check-video" data-run-id="${escapeHtml(run.id)}" ${runnable ? "" : "disabled"}>Record Video</button>
       ` : `<p class="muted">No checkpoint yet, so video recording is not available.</p>`}
     </section>
   `;
@@ -1660,6 +1780,8 @@ function runDetails(run, { context = "desktop" } = {}) {
   const draft = currentRunDraft(run);
   const editable = canEditRun(role());
   const tweakable = canOperate(role()) && canBuildTweakFromRun(run, state.snapshot.presets);
+  const folderValue = normalizeFolderName(draft.folder ?? run.folder ?? "");
+  const folderCreating = Boolean(state.runFolderCreatingByRun[run.id] || (folderValue && selectValueForFolder(folderValue) === "__new__"));
   return `
     <div class="section-head run-detail-head ${context === "inline" ? "inline" : ""}">
       <div>
@@ -1675,7 +1797,15 @@ function runDetails(run, { context = "desktop" } = {}) {
     <section class="subpanel">
       <h3>Run Metadata</h3>
       <label>Name <input id="run-name" data-run-id="${escapeHtml(run.id)}" value="${escapeHtml(draft.display_name ?? run.display_name ?? "")}" ${editable ? "" : "disabled"}></label>
-      <label>Folder <input id="run-folder" data-run-id="${escapeHtml(run.id)}" value="${escapeHtml(draft.folder ?? run.folder ?? "")}" placeholder="e.g. gait tests" ${editable ? "" : "disabled"}></label>
+      <div class="folder-move-row">
+        <label>Folder
+          <select id="run-folder" data-run-id="${escapeHtml(run.id)}" ${editable ? "" : "disabled"}>
+            ${folderOptionsHtml(folderValue)}
+          </select>
+        </label>
+        ${editable ? `<button data-action="save-run" data-run-id="${escapeHtml(run.id)}">Move to Folder</button>` : ""}
+      </div>
+      ${folderCreateFields({ idPrefix: "run-folder", value: folderValue, hidden: !folderCreating, placeholder: "New folder for this run" }).replace('id="run-folder-new"', `id="run-folder-new" data-run-id="${escapeHtml(run.id)}"`)}
       <label>Notes <textarea id="run-notes" data-run-id="${escapeHtml(run.id)}" ${editable ? "" : "disabled"}>${escapeHtml(draft.notes ?? run.notes ?? "")}</textarea></label>
       ${editable ? `<div class="autosave-row"><span id="run-autosave-status" class="autosave-status" data-state="${escapeHtml(state.runMetadataSaveStatus)}">${escapeHtml(runMetadataStatusText(state.runMetadataSaveStatus))}</span></div>` : ""}
     </section>
@@ -1971,6 +2101,7 @@ function setRunMetadataInputs(run) {
   };
   const name = document.querySelector("#run-name");
   const folder = document.querySelector("#run-folder");
+  const folderNew = document.querySelector("#run-folder-new");
   const notes = document.querySelector("#run-notes");
   if (name) {
     name.dataset.runId = run.id;
@@ -1978,7 +2109,12 @@ function setRunMetadataInputs(run) {
   }
   if (folder) {
     folder.dataset.runId = run.id;
-    folder.value = values.folder;
+    folder.value = selectValueForFolder(values.folder);
+  }
+  if (folderNew) {
+    folderNew.dataset.runId = run.id;
+    folderNew.value = values.folder;
+    folderNew.closest(".inline-create-folder")?.classList.toggle("hidden", folder?.value !== "__new__");
   }
   if (notes) {
     notes.dataset.runId = run.id;
@@ -2008,11 +2144,13 @@ function patchTeamVideo(run) {
     panel.outerHTML = teamVideoSection(run);
     return;
   }
-  const video = videoStateForCheckpoint(run, state.snapshot.artifacts, selectedVideoCheckpoint(run));
+  const checkpoint = selectedVideoCheckpoint(run);
+  const video = videoStateForCheckpoint(run, state.snapshot.artifacts, checkpoint);
   const nextStorage = video.artifact?.storage_path || "";
   const videoElement = panel.querySelector("video");
   const signedReady = Boolean(nextStorage && signedVideoEntry(nextStorage)?.url);
-  const shouldReplace = (video.state === "ready" && signedReady && !videoElement) || shouldReplaceVideoPanel({
+  const checkpointChanged = (panel.dataset.checkpoint || "") !== String(checkpoint || "");
+  const shouldReplace = checkpointChanged || (video.state === "ready" && signedReady && !videoElement) || shouldReplaceVideoPanel({
     currentState: panel.dataset.videoState || "",
     currentStorage: panel.dataset.storagePath || "",
     nextState: video.state,
@@ -2294,10 +2432,11 @@ function rememberQueuedJob(job, rows = []) {
 async function queueTraining() {
   state.machineId = document.querySelector("#machine-id")?.value || state.machineId;
   localStorage.setItem("redrhex_machine_id", state.machineId);
+  const launchFolder = folderSelectValue("run-folder-before-launch", "run-folder-before-launch-new");
   state.trainForm = {
     task: document.querySelector("#task")?.value || "Template-Redrhex-Direct-v0",
     display_name: String(document.querySelector("#run-display-name")?.value || "").trim(),
-    folder: String(document.querySelector("#run-folder-before-launch")?.value || "").trim(),
+    folder: launchFolder,
     num_envs: Number(document.querySelector("#num-envs")?.value || 4),
     max_iterations: Number(document.querySelector("#max-iterations")?.value || 8),
     device: document.querySelector("#device")?.value || "cuda:0",
@@ -2315,6 +2454,9 @@ async function queueTraining() {
   }
   const preset = selectedPreset();
   const terrainPreset = selectedTerrainPresetForTraining();
+  if (state.trainForm.folder) {
+    await ensureTeamFolder(state.trainForm.folder);
+  }
   const params = {
     task: state.trainForm.task,
     num_envs: state.trainForm.num_envs,
@@ -2676,9 +2818,10 @@ function collectRunMetadataDraft(run) {
   if (!run) return null;
   const nameInput = document.querySelector("#run-name");
   if (nameInput?.dataset.runId === run.id) {
+    const folderValue = folderSelectValue("run-folder", "run-folder-new");
     return {
       display_name: nameInput.value ?? run.display_name ?? "",
-      folder: document.querySelector("#run-folder")?.value ?? run.folder ?? "",
+      folder: folderValue,
       notes: document.querySelector("#run-notes")?.value ?? run.notes ?? "",
     };
   }
@@ -2739,6 +2882,9 @@ async function saveRun(runId = state.selectedRunId, options = {}) {
   state.runMetadataSaveInFlight = true;
   if (options.autosave) setRunMetadataSaveStatus("saving", run.id);
   try {
+    if (normalized.folder) {
+      await ensureTeamFolder(normalized.folder);
+    }
     await update(
       "runs",
       `id=eq.${encodeURIComponent(run.id)}`,
@@ -2774,8 +2920,8 @@ async function saveRun(runId = state.selectedRunId, options = {}) {
   }
 }
 
-async function queueRunAction(type, message, payload = {}) {
-  const run = selectedRun();
+async function queueRunAction(type, message, payload = {}, runOverride = null) {
+  const run = runOverride || selectedRun();
   if (!run) return;
   const job = buildActionJob({ machineId: state.machineId, type, runId: run.id, role: role(), userId: state.user?.id, payload });
   const rows = await insert("jobs", job);
@@ -2784,14 +2930,14 @@ async function queueRunAction(type, message, payload = {}) {
   setMessage(message);
 }
 
-async function checkOrCreateVideo() {
-  const run = selectedRun();
+async function checkOrCreateVideo(runOverride = null) {
+  const run = runOverride || selectedRun();
   if (!run) return;
   const checkpoint = selectedVideoCheckpoint(run);
   const videoArtifact = videoArtifactForCheckpoint(run, state.snapshot.artifacts, checkpoint);
   if (videoArtifact?.storage_path) {
-    await loadVideo(videoArtifact.storage_path);
-    return setMessage("Loaded the existing video for that checkpoint.");
+    await loadVideo(videoArtifact.storage_path, run.id);
+    return setMessage("Secure video link refreshed.");
   }
   const iteration = checkpointIteration(checkpoint);
   await queueRunAction(
@@ -2801,6 +2947,7 @@ async function checkOrCreateVideo() {
       checkpoint,
       checkpoint_iteration: Number.isFinite(iteration) ? iteration : null,
     },
+    run,
   );
 }
 
@@ -2940,12 +3087,12 @@ async function sendMissedNotifications() {
   }
 }
 
-async function loadArtifactLink(storagePath) {
+async function loadArtifactLink(storagePath, runId = "") {
   state.signedVideos[storagePath] = {
     url: await createSignedVideoUrl(storagePath),
     expiresAt: Date.now() + 55 * 60_000,
   };
-  const run = selectedRun();
+  const run = runById(runId) || selectedRun();
   if (state.view === "history" && run) {
     patchTeamVideo(run);
     patchTensorboardSummary(run);
@@ -2954,8 +3101,8 @@ async function loadArtifactLink(storagePath) {
   }
 }
 
-async function loadVideo(storagePath) {
-  return loadArtifactLink(storagePath);
+async function loadVideo(storagePath, runId = "") {
+  return loadArtifactLink(storagePath, runId);
 }
 
 function openHistoryFolder(folderKey) {
@@ -3047,6 +3194,19 @@ document.addEventListener("click", async (event) => {
       return;
     }
     if (action === "toggle-all-groups") return toggleAllGroups(target.dataset.kind || "reward");
+    if (action === "start-create-folder") {
+      state.creatingFolder = true;
+      patchHistory({ forceList: true });
+      document.querySelector("#history-folder-new")?.focus();
+      return;
+    }
+    if (action === "cancel-create-folder") {
+      state.creatingFolder = false;
+      state.newFolderName = "";
+      patchHistory({ forceList: true });
+      return;
+    }
+    if (action === "create-folder") return await createFolderFromInput();
     if (action === "open-folder") return openHistoryFolder(target.dataset.folder || "all");
     if (action === "open-folder-root") return openHistoryFolder("all");
     if (action === "select-run") {
@@ -3077,13 +3237,13 @@ document.addEventListener("click", async (event) => {
       return render();
     }
     if (action === "save-run") return await saveRun(target.dataset.runId || state.selectedRunId);
-    if (action === "load-video") return await loadVideo(target.dataset.path);
+    if (action === "load-video") return await loadVideo(target.dataset.path, target.dataset.runId || "");
     if (action === "load-summary") return await loadArtifactLink(target.dataset.path);
     if (action === "copy-video-path") {
       await navigator.clipboard.writeText(target.dataset.path || "");
       return setMessage("Video storage path copied.");
     }
-    if (action === "check-video") return await checkOrCreateVideo();
+    if (action === "check-video") return await checkOrCreateVideo(runById(target.dataset.runId) || null);
     if (action === "tweak-run") return tweakFromRun(selectedRun()?.id || "");
     if (action === "job-tensorboard") return await queueTensorBoard();
     if (action === "job-compact-run") return await compactSelectedRun();
@@ -3096,16 +3256,18 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
-  if (["task", "run-display-name", "run-folder-before-launch", "num-envs", "max-iterations", "device", "seed"].includes(event.target.id)) {
+  if (["task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed"].includes(event.target.id)) {
+    state.trainFolderCreating = document.querySelector("#run-folder-before-launch")?.value === "__new__";
     state.trainForm = {
       task: document.querySelector("#task")?.value || "Template-Redrhex-Direct-v0",
       display_name: String(document.querySelector("#run-display-name")?.value || "").trim(),
-      folder: String(document.querySelector("#run-folder-before-launch")?.value || "").trim(),
+      folder: folderSelectValue("run-folder-before-launch", "run-folder-before-launch-new"),
       num_envs: Number(document.querySelector("#num-envs")?.value || 4),
       max_iterations: Number(document.querySelector("#max-iterations")?.value || 8),
       device: document.querySelector("#device")?.value || "cuda:0",
       seed: document.querySelector("#seed")?.value || "",
     };
+    document.querySelector('[data-folder-create="run-folder-before-launch"]')?.classList.toggle("hidden", !state.trainFolderCreating);
   }
   if (event.target.id === "train-preset") {
     state.selectedPresetId = event.target.value;
@@ -3128,11 +3290,26 @@ document.addEventListener("change", (event) => {
     }
   }
   if (event.target.id === "video-checkpoint-select") {
-    const run = selectedRun();
+    const panel = event.target.closest("#team-video-panel");
+    const run = runById(panel?.dataset.runId) || selectedRun({ fallback: false });
     if (run) {
       state.videoCheckpointByRun[run.id] = event.target.value;
       patchTeamVideo(run);
-      ensureSelectedVideoSigned().then(() => patchTeamVideo(run)).catch((error) => setMessage(friendlyErrorMessage(error)));
+      ensureSelectedVideoSigned(run).then(() => patchTeamVideo(run)).catch((error) => setMessage(friendlyErrorMessage(error)));
+    }
+  }
+  if (event.target.id === "run-folder") {
+    const run = runById(event.target.dataset.runId) || selectedRun({ fallback: false });
+    if (run) {
+      state.runFolderCreatingByRun[run.id] = event.target.value === "__new__";
+      const createRow = document.querySelector('[data-folder-create="run-folder"]');
+      createRow?.classList.toggle("hidden", !state.runFolderCreatingByRun[run.id]);
+      if (state.runFolderCreatingByRun[run.id]) {
+        document.querySelector("#run-folder-new")?.focus();
+        return;
+      }
+      updateRunMetadataDraft(run.id);
+      scheduleRunMetadataAutosave(run.id);
     }
   }
   if (event.target.id === "folder-filter") {
@@ -3163,14 +3340,20 @@ document.addEventListener("input", (event) => {
   if (event.target.id === "run-display-name") {
     state.trainForm.display_name = String(event.target.value || "").trim();
   }
-  if (event.target.id === "run-folder-before-launch") {
+  if (event.target.id === "run-folder-before-launch" || event.target.id === "run-folder-before-launch-new") {
     state.trainForm.folder = String(event.target.value || "").trim();
+    if (event.target.id === "run-folder-before-launch-new") {
+      state.trainForm.folder = normalizeFolderName(event.target.value || "");
+    }
+  }
+  if (event.target.id === "history-folder-new") {
+    state.newFolderName = event.target.value;
   }
   if (event.target.id === "run-search") {
     state.runSearch = event.target.value;
     renderRunListOnly();
   }
-  if (["run-name", "run-folder", "run-notes"].includes(event.target.id)) {
+  if (["run-name", "run-folder", "run-folder-new", "run-notes"].includes(event.target.id)) {
     const run = runById(event.target.dataset.runId) || selectedRun({ fallback: false });
     if (run) {
       updateRunMetadataDraft(run.id);
@@ -3217,7 +3400,8 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("focusout", (event) => {
-  if (["run-name", "run-folder", "run-notes"].includes(event.target.id)) {
+  if (event.target.id === "run-folder" && event.target.value === "__new__") return;
+  if (["run-name", "run-folder", "run-folder-new", "run-notes"].includes(event.target.id)) {
     const runId = event.target.dataset.runId || state.selectedRunId;
     updateRunMetadataDraft(runId);
     flushRunMetadataAutosave(runId).catch((error) => {
@@ -3234,7 +3418,13 @@ document.addEventListener("focusout", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (["run-name", "run-folder", "run-notes"].includes(event.target.id)) {
+  if (event.target.id === "history-folder-new" && event.key === "Enter") {
+    event.preventDefault();
+    createFolderFromInput();
+    return;
+  }
+  if (["run-name", "run-folder", "run-folder-new", "run-notes"].includes(event.target.id)) {
+    if (event.target.id === "run-folder" && event.target.value === "__new__") return;
     const shouldSave = event.target.id === "run-notes"
       ? (event.ctrlKey || event.metaKey) && event.key === "Enter"
       : event.key === "Enter";

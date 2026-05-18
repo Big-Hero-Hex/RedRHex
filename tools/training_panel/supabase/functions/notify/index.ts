@@ -51,6 +51,8 @@ const EVENT_SETTING_KEYS: Record<NotificationEventType, keyof NotificationSettin
   test_notification: "",
 };
 
+const HANDLED_NOTIFICATION_STATUSES = new Set(["sent", "no_channels", "disabled", "skipped"]);
+
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -320,7 +322,7 @@ Deno.serve(async (request) => {
   );
 
   const existing = await existingEvent(event.event_key);
-  if (existing?.notified_at && existing.notification_status === "sent") {
+  if (existing?.notified_at && HANDLED_NOTIFICATION_STATUSES.has(existing.notification_status || "")) {
     return jsonResponse({ ok: true, deduped: true, results: existing.channel_results ?? {}, status: existing.notification_status });
   }
 

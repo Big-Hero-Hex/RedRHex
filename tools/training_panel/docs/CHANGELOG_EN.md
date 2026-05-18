@@ -13,6 +13,37 @@ Format:
 
 Nothing yet. Nice and suspiciously calm.
 
+## V3.4.2 Folder Sync + Notification Reliability
+
+### Added
+
+- Child can create folders and move runs between folders with normal dropdown controls.
+- Empty folders now sync through Supabase `team_folders`, so Mother and Child can share folder libraries before any run is moved into them.
+
+### Fixed
+
+- Video-ready notifications now de-dupe by uploaded storage path and stay quiet after `sent`, `no_channels`, `disabled`, or `skipped`.
+- Worker folder sync is non-blocking and keeps Mother’s explicit folder list aligned with Child.
+
+### Notes
+
+- Re-apply `tools/training_panel/supabase/schema.sql` in Supabase for the new `team_folders` table and policies.
+
+## V3.4.1 Child Video + Dropdown Polish
+
+### Changed
+
+- Video selection labels now show `video ready`, `uploading`, or `no video` per checkpoint.
+- Video actions now use clearer wording: `Refresh Secure Link` and `Record Video`.
+- Train page folder selection is a normal dropdown with an inline “create new folder” path.
+- Terrain/reward preset selection on Train uses bordered cards so text no longer fights the dropdown.
+
+### Fixed
+
+- Video checkpoint selection is scoped to the run being edited, so refreshes no longer make the text/button follow the wrong selected run.
+- Compacted runs hide deleted checkpoint choices while preserving old video artifacts in storage.
+- Related job descriptions now render as separate readable lines instead of squeezed-together fragments.
+
 ## V3.4 First Release
 
 ### Added

@@ -59,6 +59,9 @@ create table if not exists public.runs (
   latest_checkpoint text,
   latest_video text,
   onnx_path text,
+  compacted_at timestamptz,
+  compacted_deleted_count integer,
+  compacted_bytes_freed bigint,
   created_by uuid references auth.users(id),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -72,6 +75,9 @@ alter table public.runs add column if not exists convergence_iteration integer;
 alter table public.runs add column if not exists convergence_improvement_pct numeric;
 alter table public.runs add column if not exists video_status text;
 alter table public.runs add column if not exists returncode integer;
+alter table public.runs add column if not exists compacted_at timestamptz;
+alter table public.runs add column if not exists compacted_deleted_count integer;
+alter table public.runs add column if not exists compacted_bytes_freed bigint;
 
 create table if not exists public.run_deletions (
   machine_id text not null references public.machines(machine_id) on delete cascade,
@@ -140,6 +146,21 @@ set name = excluded.name,
     values = excluded.values,
     built_in = true,
     updated_at = now();
+
+create table if not exists public.team_folders (
+  id uuid primary key default gen_random_uuid(),
+  machine_id text not null references public.machines(machine_id) on delete cascade,
+  name text not null,
+  folder_key text not null,
+  created_by uuid references auth.users(id),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.team_folders add column if not exists machine_id text references public.machines(machine_id) on delete cascade;
+alter table public.team_folders add column if not exists name text;
+alter table public.team_folders add column if not exists folder_key text;
+alter table public.team_folders add column if not exists created_by uuid references auth.users(id);
 
 create table if not exists public.jobs (
   id uuid primary key default gen_random_uuid(),
@@ -296,6 +317,11 @@ create trigger set_notification_settings_updated_at
   before update on public.notification_settings
   for each row execute function public.set_redrhex_updated_at();
 
+drop trigger if exists set_team_folders_updated_at on public.team_folders;
+create trigger set_team_folders_updated_at
+  before update on public.team_folders
+  for each row execute function public.set_redrhex_updated_at();
+
 create or replace function public.claim_next_job_for_machine(p_machine_id text, p_gpu_locked boolean default false)
 returns setof public.jobs
 language plpgsql
@@ -338,6 +364,7 @@ alter table public.proxy_sessions enable row level security;
 alter table public.notification_settings enable row level security;
 alter table public.reward_presets enable row level security;
 alter table public.terrain_presets enable row level security;
+alter table public.team_folders enable row level security;
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('redrhex-videos', 'redrhex-videos', false, 1073741824, array['video/mp4', 'image/png'])
@@ -362,6 +389,10 @@ drop policy if exists "terrain presets readable by authenticated users" on publi
 drop policy if exists "operators can create terrain presets" on public.terrain_presets;
 drop policy if exists "operators can update custom terrain presets" on public.terrain_presets;
 drop policy if exists "operators can delete custom terrain presets" on public.terrain_presets;
+drop policy if exists "team folders readable by authenticated users" on public.team_folders;
+drop policy if exists "operators can create team folders" on public.team_folders;
+drop policy if exists "operators can update team folders" on public.team_folders;
+drop policy if exists "operators can delete team folders" on public.team_folders;
 drop policy if exists "run_events readable by authenticated users" on public.run_events;
 drop policy if exists "machine can insert run events" on public.run_events;
 drop policy if exists "machine can update own run events" on public.run_events;
@@ -375,6 +406,7 @@ drop policy if exists "machine can upsert own row" on public.machines;
 drop policy if exists "machine can upsert own runs" on public.runs;
 drop policy if exists "machine can upsert own run deletions" on public.run_deletions;
 drop policy if exists "machine can upsert own artifacts" on public.artifacts;
+drop policy if exists "machine can upsert own team folders" on public.team_folders;
 drop policy if exists "authenticated users can read redrhex videos" on storage.objects;
 
 create policy "profiles readable by authenticated users" on public.profiles
@@ -508,6 +540,46 @@ create policy "operators can delete custom terrain presets" on public.terrain_pr
     )
   );
 
+create policy "team folders readable by authenticated users" on public.team_folders
+  for select to authenticated using (true);
+
+create policy "operators can create team folders" on public.team_folders
+  for insert to authenticated
+  with check (
+    exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid()
+        and p.role in ('operator', 'admin')
+    )
+  );
+
+create policy "operators can update team folders" on public.team_folders
+  for update to authenticated
+  using (
+    exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid()
+        and p.role in ('operator', 'admin')
+    )
+  )
+  with check (
+    exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid()
+        and p.role in ('operator', 'admin')
+    )
+  );
+
+create policy "operators can delete team folders" on public.team_folders
+  for delete to authenticated
+  using (
+    exists (
+      select 1 from public.profiles p
+      where p.id = auth.uid()
+        and p.role in ('operator', 'admin')
+    )
+  );
+
 -- run_events: missing SELECT policy (RLS enabled above but no policy = deny all).
 create policy "run_events readable by authenticated users" on public.run_events
   for select to authenticated using (true);
@@ -559,6 +631,10 @@ create policy "machine can upsert own artifacts" on public.artifacts
   for all using (machine_id = (auth.jwt() ->> 'sub'))
   with check (machine_id = (auth.jwt() ->> 'sub'));
 
+create policy "machine can upsert own team folders" on public.team_folders
+  for all using (machine_id = (auth.jwt() ->> 'sub'))
+  with check (machine_id = (auth.jwt() ->> 'sub'));
+
 create policy "authenticated users can read redrhex videos" on storage.objects
   for select to authenticated
   using (bucket_id = 'redrhex-videos');
@@ -574,6 +650,8 @@ create index if not exists idx_run_events_run_id    on public.run_events(run_id)
 create unique index if not exists idx_run_events_event_key_unique on public.run_events(event_key) where event_key is not null;
 create index if not exists idx_run_events_recipient_id on public.run_events(recipient_id);
 create index if not exists idx_reward_presets_builtin on public.reward_presets(built_in);
+create unique index if not exists idx_team_folders_machine_key on public.team_folders(machine_id, folder_key);
+create index if not exists idx_team_folders_machine_name on public.team_folders(machine_id, name);
 create unique index if not exists idx_notification_settings_user_machine on public.notification_settings(user_id, machine_id);
 create index if not exists idx_team_activity_created_at on public.team_activity_events(created_at desc);
 create index if not exists idx_team_activity_actor_id   on public.team_activity_events(actor_id);

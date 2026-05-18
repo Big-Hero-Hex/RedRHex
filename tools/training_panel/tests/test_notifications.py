@@ -75,6 +75,14 @@ def test_convergence_video_and_test_payload_builders():
     assert "email" not in test["payload"]
 
 
+def test_video_ready_requires_uploaded_storage_path():
+    assert video_ready_edge_event(
+        run_record(),
+        {"kind": "video", "local_path": "/tmp/local.mp4", "bytes": 1234},
+        machine_id="lab-pc",
+    ) is None
+
+
 def test_notification_events_skip_local_mother_runs_without_requester():
     assert notification_events_for_run(run_record(created_by=None, params={}), machine_id="lab-pc") == []
 
@@ -99,10 +107,11 @@ def test_edge_function_is_discord_only():
     assert "REDRHEX_NOTIFICATION_EMAIL_TO" not in source
 
 
-def test_edge_function_retries_previously_skipped_events():
+def test_edge_function_dedupes_already_handled_events():
     source = Path("tools/training_panel/supabase/functions/notify/index.ts").read_text(encoding="utf-8")
 
-    assert 'existing?.notified_at && existing.notification_status === "sent"' in source
+    assert 'new Set(["sent", "no_channels", "disabled", "skipped"])' in source
+    assert "HANDLED_NOTIFICATION_STATUSES.has(existing.notification_status || \"\")" in source
     assert "existing?.notified_at)" not in source
 
 

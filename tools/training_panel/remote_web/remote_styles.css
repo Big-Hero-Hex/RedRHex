@@ -971,6 +971,27 @@ video {
   gap: 8px;
 }
 
+.train-preset-pickers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.preset-select-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px;
+  background: var(--panel-soft);
+}
+
+.preset-select-card select {
+  width: 100%;
+  min-width: 0;
+}
+
 .reward-snapshot div {
   display: flex;
   justify-content: space-between;
@@ -1219,11 +1240,17 @@ video {
 .terrain-control {
   display: grid;
   gap: 5px;
+  min-width: 0;
 }
 
 .terrain-control small {
   color: var(--muted);
   text-align: right;
+}
+
+.terrain-control .terrain-input {
+  width: 100%;
+  min-width: 0;
 }
 
 .terrain-input[type="checkbox"] {
@@ -1278,6 +1305,38 @@ video {
 
 .video-now strong {
   color: var(--text);
+}
+
+.related-job-row {
+  display: grid;
+  gap: 4px;
+}
+
+.related-job-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.folder-add {
+  justify-self: end;
+}
+
+.folder-create-bar,
+.folder-move-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: end;
+}
+
+.inline-create-folder {
+  margin-top: -3px;
+}
+
+.inline-create-folder.hidden {
+  display: none;
 }
 
 .check-list {
@@ -1755,7 +1814,22 @@ video {
     text-align: left;
   }
 
+  .terrain-control .terrain-input {
+    min-height: 52px;
+    font-size: 16px;
+  }
+
   .terrain-input[type="checkbox"] {
     justify-self: start;
+  }
+
+  .folder-create-bar,
+  .folder-move-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .train-preset-pickers {
+    grid-template-columns: 1fr;
   }
 }

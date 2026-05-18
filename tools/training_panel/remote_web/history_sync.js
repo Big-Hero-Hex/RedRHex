@@ -1,4 +1,4 @@
-import { jobDisplayStatus } from "./status_catalog.js?v=3.4-first-release";
+import { jobDisplayStatus } from "./status_catalog.js?v=3.4.2-folder-video-fixes";
 
 export const PENDING_SYNTHETIC_JOB_MAX_AGE_MS = 30 * 60 * 1000;
 

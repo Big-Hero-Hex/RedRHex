@@ -1,4 +1,4 @@
-import { HEARTBEAT_STALE_MS } from "./config.js?v=3.4-first-release";
+import { HEARTBEAT_STALE_MS } from "./config.js?v=3.4.2-folder-video-fixes";
 import {
   convergenceLabel as catalogConvergenceLabel,
   jobDisplayStatus as catalogJobDisplayStatus,
@@ -7,7 +7,7 @@ import {
   statusDescription as catalogStatusDescription,
   statusLabel as catalogStatusLabel,
   statusTone as catalogStatusTone,
-} from "./status_catalog.js?v=3.4-first-release";
+} from "./status_catalog.js?v=3.4.2-folder-video-fixes";
 
 export const BUILT_IN_REWARD_PRESETS = [
   {
@@ -573,7 +573,26 @@ export function checkpointArtifactsForRun(run = {}, artifacts = []) {
       if (!path) return;
       byPath.set(path, { ...artifact, iteration: checkpointIteration(path) });
     });
-  return [...byPath.values()].sort((left, right) => {
+  let values = [...byPath.values()];
+  if ((run.compacted_at || run.compacted_deleted_count || run.compacted_bytes_freed) && run.latest_checkpoint) {
+    const keptPath = String(run.latest_checkpoint);
+    const keptIteration = checkpointIteration(keptPath);
+    values = values.filter((artifact) => {
+      const path = String(artifact.local_path || artifact.path || "");
+      const iteration = checkpointIteration(path);
+      return path === keptPath || (Number.isFinite(keptIteration) && iteration === keptIteration);
+    });
+    if (!values.length) {
+      values = [{
+        run_id: run.id,
+        kind: "checkpoint",
+        local_path: keptPath,
+        path: keptPath,
+        iteration: keptIteration,
+      }];
+    }
+  }
+  return values.sort((left, right) => {
     const leftIteration = Number.isFinite(left.iteration) ? left.iteration : -1;
     const rightIteration = Number.isFinite(right.iteration) ? right.iteration : -1;
     if (leftIteration !== rightIteration) return rightIteration - leftIteration;
@@ -588,6 +607,10 @@ export function checkpointOptionsForRun(run = {}, artifacts = []) {
     const label = Number.isFinite(iteration) ? `Iteration ${iteration}` : path.split("/").pop() || "Checkpoint";
     return { path, iteration, label };
   });
+}
+
+export function videoAvailabilityForCheckpoint(run = {}, artifacts = [], checkpoint = "") {
+  return videoStateForCheckpoint(run, artifacts, checkpoint).state;
 }
 
 export function videoArtifactForCheckpoint(run = {}, artifacts = [], checkpoint = "") {

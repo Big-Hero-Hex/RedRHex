@@ -1,5 +1,5 @@
-import { SUPABASE_ANON_KEY, SUPABASE_URL, VIDEO_BUCKET } from "./config.js?v=3.4-first-release";
-import { BUILT_IN_REWARD_PRESETS, BUILT_IN_TERRAIN_PRESETS } from "./core.js?v=3.4-first-release";
+import { SUPABASE_ANON_KEY, SUPABASE_URL, VIDEO_BUCKET } from "./config.js?v=3.4.2-folder-video-fixes";
+import { BUILT_IN_REWARD_PRESETS, BUILT_IN_TERRAIN_PRESETS } from "./core.js?v=3.4.2-folder-video-fixes";
 
 const TOKEN_KEY = "redrhex_child_access_token";
 const REFRESH_KEY = "redrhex_child_refresh_token";
@@ -177,7 +177,7 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
   const notificationQuery = userId
     ? `user_id=eq.${encodedUser}&machine_id=eq.${encodedMachine}&select=*&limit=1`
     : "select=*&limit=0";
-  const [machines, jobs, runs, deletionsResult, artifactsResult, presetsResult, terrainPresetsResult, profilesResult, notificationResult] = await Promise.all([
+  const [machines, jobs, runs, deletionsResult, artifactsResult, presetsResult, terrainPresetsResult, teamFoldersResult, profilesResult, notificationResult] = await Promise.all([
     select("machines", `select=*&order=heartbeat_at.desc`),
     select("jobs", `select=*&order=created_at.desc&limit=60`),
     select("runs", `select=*&order=created_at.desc&limit=120`),
@@ -185,6 +185,7 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
     optionalSelect("artifacts", `select=*&order=created_at.desc&limit=500`),
     optionalSelect("reward_presets", `select=*&order=built_in.desc,updated_at.desc,name.asc`),
     optionalSelect("terrain_presets", `select=*&order=built_in.desc,updated_at.desc,name.asc`),
+    optionalSelect("team_folders", `select=*&order=name.asc`),
     optionalSelect("profiles", `select=id,email,display_name,role`),
     optionalSelect("notification_settings", notificationQuery),
   ]);
@@ -199,6 +200,7 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
     runs: runs.filter((run) => !run.machine_id || run.machine_id === machineId || machineId === ""),
     runDeletions: deletionsResult.rows.filter((item) => !item.machine_id || item.machine_id === machineId || machineId === ""),
     artifacts: artifacts.filter((artifact) => !artifact.machine_id || artifact.machine_id === machineId || machineId === ""),
+    folders: teamFoldersResult.rows.filter((folder) => !folder.machine_id || folder.machine_id === machineId || machineId === ""),
     profiles: profilesResult.rows,
     notificationSettings: notificationResult.rows[0] || null,
     presets,
@@ -209,11 +211,13 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
       runDeletions: deletionsResult.ok,
       rewardPresets: presetsResult.ok,
       terrainPresets: terrainPresetsResult.ok,
+      teamFolders: teamFoldersResult.ok,
       warnings: [
         deletionsResult.ok ? "" : `Run deletion tombstones unavailable: ${deletionsResult.error}`,
         artifactsResult.ok ? "" : `Artifacts table unavailable: ${artifactsResult.error}`,
         presetsResult.ok ? "" : `Reward presets table unavailable: ${presetsResult.error}`,
         terrainPresetsResult.ok ? "" : `Terrain presets table unavailable: ${terrainPresetsResult.error}`,
+        teamFoldersResult.ok ? "" : `Team folders table unavailable: ${teamFoldersResult.error}`,
         profilesResult.ok ? "" : `Profiles table unavailable: ${profilesResult.error}`,
         notificationResult.ok ? "" : `Notification settings unavailable: ${notificationResult.error}`,
       ].filter(Boolean),
