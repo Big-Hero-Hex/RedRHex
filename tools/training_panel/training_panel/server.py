@@ -45,6 +45,16 @@ def _is_within(path: Path, root: Path) -> bool:
     return resolved == resolved_root or resolved_root in resolved.parents
 
 
+def _sync_active_terrain_override_file(paths: PanelPaths, values: dict) -> None:
+    """Keep train.py's global terrain override file aligned with the active preset."""
+    override_file = paths.terrain_override_file
+    if values:
+        override_file.parent.mkdir(parents=True, exist_ok=True)
+        override_file.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    elif override_file.exists():
+        override_file.unlink()
+
+
 class PanelState:
     def __init__(self, paths: PanelPaths):
         self.paths = paths
@@ -370,6 +380,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                     subject_id=preset_id,
                     payload={"terrain_preset_id": preset_id},
                 )
+                if self.state.terrain_presets.get_active_preset_id() == preset_id:
+                    _sync_active_terrain_override_file(self.state.paths, dict(preset.get("values") or {}))
                 return self._json(preset)
             if parsed.path.startswith("/api/terrain/presets/") and parsed.path.endswith("/delete"):
                 preset_id = route_id2(parsed.path)
@@ -384,6 +396,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                         subject_id=preset_id,
                         payload={"terrain_preset_id": preset_id},
                     )
+                    active = self.state.terrain_presets.get_preset(self.state.terrain_presets.get_active_preset_id()) or {}
+                    _sync_active_terrain_override_file(self.state.paths, dict(active.get("values") or {}))
                 return self._json({"deleted": deleted})
             if parsed.path == "/api/terrain/presets/activate":
                 preset_id = str(payload.get("preset_id") or "")
@@ -397,6 +411,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                     subject_id=preset_id,
                     payload={"terrain_preset_id": preset_id},
                 )
+                preset = self.state.terrain_presets.get_preset(preset_id) or {}
+                _sync_active_terrain_override_file(self.state.paths, dict(preset.get("values") or {}))
                 return self._json({"active_preset_id": preset_id})
             if parsed.path == "/api/training/stop":
                 run_id = str(payload.get("run_id") or "")

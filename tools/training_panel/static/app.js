@@ -275,10 +275,10 @@ function terrainPresetIdForTraining() {
 function terrainOverridesForTraining() {
   const presetId = terrainPresetIdForTraining();
   const preset = state.terrainPresets.find((item) => item.id === presetId);
-  if (state.selectedTerrainPresetId === presetId && $("#terrain-categories")?.children.length) {
-    const values = currentTerrainEditorValues();
-    if (Object.keys(values).length) return values;
-  }
+  // Training should use the selected preset's saved override values only.
+  // The editor renders default terrain values for context; reading every visible
+  // input here would turn a no-override preset into a full default-generator
+  // override payload.
   return preset?.values || state.activeTerrainPresetOverrides || {};
 }
 
