@@ -29,7 +29,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REDRHEX_USD_PATH = os.path.normpath(os.path.join(
     _THIS_DIR, "..", "..", "..", "..", "..", "..", "RedRhex.usd"
 ))
-from isaaclab.actuators import DCMotorCfg, ImplicitActuatorCfg
+from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
@@ -113,8 +113,8 @@ REDRHEX_CFG = ArticulationCfg(
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,              # 保持重力（不能飛！）
             retain_accelerations=False,         # 不保留加速度（節省記憶體）
-            linear_damping=0.1,                 # 線性阻尼：減緩直線運動，數值越大移動越慢
-            angular_damping=0.2,                # 角阻尼：減緩旋轉運動
+            linear_damping=0.05,                 # 線性阻尼：減緩直線運動，數值越大移動越慢
+            angular_damping=0.1,                # 角阻尼：減緩旋轉運動
             max_linear_velocity=10.0,           # 最大移動速度（公尺/秒）
             max_angular_velocity=20.0,          # 最大旋轉速度（弧度/秒），要夠大才能讓腿轉動
             max_depenetration_velocity=1.0,     # 穿透恢復速度：當物體意外重疊時，分開的速度
@@ -205,19 +205,16 @@ REDRHEX_CFG = ArticulationCfg(
         # - 力矩 = 50 × (10 - 0) = 500 牛頓米
         # - 阻尼(damping)越大，馬達推力越強
         # - 如果阻尼太低，腿會轉不動！
-        "main_drive": DCMotorCfg(
+        "main_drive": ImplicitActuatorCfg(
             # 這 6 個關節是主驅動關節
             joint_names_expr=[
                 "Revolute_15", "Revolute_7", "Revolute_12",
                 "Revolute_18", "Revolute_23", "Revolute_24",
             ],
-            effort_limit=100.0,      # 最大力矩限制（牛頓米）- 馬達能出的最大力
-            effort_limit_sim=100.0,
-            velocity_limit=30.0,     # 最大轉速限制（弧度/秒）
-            velocity_limit_sim=30.0,
+            effort_limit=15.0,       # 最大力矩限制（牛頓米）- 馬達能出的最大力
+            velocity_limit=15.0,     # 最大轉速限制（弧度/秒）
             stiffness=0.0,           # 剛性 = 0，表示純速度控制（不追蹤位置）
-            damping=50.0,            # ★ 阻尼值：決定馬達推力強度！數值越大越有力
-            saturation_effort=100.0,
+            damping=1.0,             # ★ 阻尼值：決定馬達推力強度！數值越大越有力
         ),
         
         # =================================================================
@@ -225,18 +222,15 @@ REDRHEX_CFG = ArticulationCfg(
         # =================================================================
         # 控制方式：位置控制（告訴馬達要擺到什麼角度）
         # 用途：調整機器人轉彎、側移、保持平衡
-        "abad": DCMotorCfg(
+        "abad": ImplicitActuatorCfg(
             joint_names_expr=[
                 "Revolute_14", "Revolute_6", "Revolute_11",
                 "Revolute_17", "Revolute_22", "Revolute_21",
             ],
             effort_limit=8.0,        # 力矩限制（較小，因為只需微調）
-            effort_limit_sim=8.0,
             velocity_limit=5.0,      # 速度限制（不需要快速擺動）
-            velocity_limit_sim=5.0,
             stiffness=40.0,          # 較高剛性：讓關節能精準到達目標位置
             damping=4.0,             # 中等阻尼：防止過度震盪
-            saturation_effort=8.0,
         ),
         
         # =================================================================
@@ -254,8 +248,8 @@ REDRHEX_CFG = ArticulationCfg(
                 "Revolute_5", "Revolute_8", "Revolute_13",
                 "Revolute_25", "Revolute_26", "Revolute_27",
             ],
-            effort_limit_sim=50.0,   # 高力矩：能抵抗外力維持位置
-            velocity_limit_sim=1.0,  # 極低速度限制：防止快速移動
+            effort_limit=50.0,       # 高力矩：能抵抗外力維持位置
+            velocity_limit=1.0,      # 極低速度限制：防止快速移動
             stiffness=200.0,         # 超高剛性：像彈簧一樣強力拉回原位
             damping=20.0,            # 高阻尼：吸收任何震動
         ),
@@ -368,7 +362,7 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     sim: SimulationCfg = SimulationCfg(
         # 模擬時間步長：每秒 120 次物理計算
         # 越小越精確，但計算量越大
-        dt=1 / 250,
+        dt=1 / 120,
         
         # 渲染間隔：每 2 次物理計算才更新一次畫面（節省效能）
         render_interval=2,
@@ -1670,8 +1664,8 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     robot_mass_kg = 14.0        # 整機質量（用於 CoT 計算）
     energy_velocity_yaw_radius = 0.18  # m，將 yaw rate 換算成等效線速度
     energy_min_command_motion = 0.05   # m/s，低於此值不啟用位移型節能 reward（例如 pure yaw）
-    main_drive_torque_estimate_damping = 50.0
-    main_drive_torque_estimate_limit = 100.0
+    main_drive_torque_estimate_damping = 1.0
+    main_drive_torque_estimate_limit = 15.0
     abad_torque_estimate_stiffness = 40.0
     abad_torque_estimate_damping = 4.0
     abad_torque_estimate_limit = 8.0

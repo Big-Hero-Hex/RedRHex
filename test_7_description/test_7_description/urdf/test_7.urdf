@@ -783,7 +783,7 @@
   </link>
   <link name="left_feet_3">
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.056770902465522896 -0.06389571088452764 0.003535511319261171"/>
+      <origin rpy="0 0 0" xyz="-0.05677090246552301 -0.06389571088452771 0.003535511319261206"/>
       <mass value="0.05603663809191365"/>
       <inertia ixx="0.000134" ixy="-2.6e-05" ixz="-0.0" iyy="2.8e-05" iyz="0.0" izz="0.000156"/>
     </inertial>
@@ -803,7 +803,7 @@
   </link>
   <link name="left_feet_2">
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.05677090246552303 -0.06389571088452778 0.0035355113192612198"/>
+      <origin rpy="0 0 0" xyz="-0.056770902465523035 -0.06389571088452775 0.0035355113192611365"/>
       <mass value="0.05603663809191365"/>
       <inertia ixx="0.000134" ixy="-2.6e-05" ixz="-0.0" iyy="2.8e-05" iyz="0.0" izz="0.000156"/>
     </inertial>
@@ -823,7 +823,7 @@
   </link>
   <link name="left_feet_1">
     <inertial>
-      <origin rpy="0 0 0" xyz="-0.05677090246552319 -0.06389571088452783 0.0035353558362659562"/>
+      <origin rpy="0 0 0" xyz="-0.056770902465523104 -0.06389571088452775 0.0035353558362659562"/>
       <mass value="0.05603663809191365"/>
       <inertia ixx="0.000134" ixy="-2.6e-05" ixz="-0.0" iyy="2.8e-05" iyz="0.0" izz="0.000156"/>
     </inertial>
@@ -919,13 +919,13 @@
     <origin rpy="0 0 0" xyz="0.052 0.0325 0.0075"/>
     <parent link="top_bottom_connector_5"/>
     <child link="motor_holder_5"/>
-    <axis xyz="1.0 0.0 0.0"/>
+    <axis xyz="1.0 -0.0 0.0"/>
   </joint>
   <joint name="Revolute 18" type="continuous">
     <origin rpy="0 0 0" xyz="-0.023 0.0 -0.030252"/>
     <parent link="motor_holder_5"/>
     <child link="left_feet_connect_5"/>
-    <axis xyz="0.0 0.0 -1.0"/>
+    <axis xyz="0.0 -0.0 -1.0"/>
   </joint>
   <joint name="Rigid 19" type="fixed">
     <origin rpy="0 0 0" xyz="0.1702 0.001 -0.082"/>
@@ -941,42 +941,42 @@
     <origin rpy="0 0 0" xyz="-0.052 0.0325 0.0075"/>
     <parent link="top_bottom_connector_7"/>
     <child link="motor_holder_7"/>
-    <axis xyz="1.0 0.0 0.0"/>
+    <axis xyz="-1.0 0.0 -0.0"/>
   </joint>
   <joint name="Revolute 22" type="continuous">
     <origin rpy="0 0 0" xyz="0.004 0.0325 0.0075"/>
     <parent link="top_bottom_connector_6"/>
     <child link="motor_holder_6"/>
-    <axis xyz="1.0 0.0 0.0"/>
+    <axis xyz="-1.0 0.0 -0.0"/>
   </joint>
   <joint name="Revolute 23" type="continuous">
     <origin rpy="0 0 0" xyz="0.023 0.0 -0.030252"/>
     <parent link="motor_holder_6"/>
     <child link="left_feet_connect_6"/>
-    <axis xyz="0.0 0.0 -1.0"/>
+    <axis xyz="0.0 -0.0 -1.0"/>
   </joint>
   <joint name="Revolute 24" type="continuous">
     <origin rpy="0 0 0" xyz="0.023 0.0 -0.03025"/>
     <parent link="motor_holder_7"/>
     <child link="left_feet_connect_4"/>
-    <axis xyz="0.0 0.0 -1.0"/>
+    <axis xyz="0.0 -0.0 -1.0"/>
   </joint>
   <joint name="Revolute 25" type="continuous">
     <origin rpy="0 0 0" xyz="-0.0845 0.0 -0.0165"/>
     <parent link="left_feet_connect_5"/>
     <child link="left_feet_3"/>
-    <axis xyz="0.0 0.0 -1.0"/>
+    <axis xyz="-0.0 0.0 1.0"/>
   </joint>
   <joint name="Revolute 26" type="continuous">
     <origin rpy="0 0 0" xyz="-0.0845 0.0 -0.0165"/>
     <parent link="left_feet_connect_6"/>
     <child link="left_feet_2"/>
-    <axis xyz="0.0 0.0 -1.0"/>
+    <axis xyz="-0.0 0.0 1.0"/>
   </joint>
   <joint name="Revolute 27" type="continuous">
     <origin rpy="0 0 0" xyz="-0.0845 0.0 -0.0165"/>
     <parent link="left_feet_connect_4"/>
     <child link="left_feet_1"/>
-    <axis xyz="0.0 0.0 -1.0"/>
+    <axis xyz="-0.0 0.0 1.0"/>
   </joint>
 </robot>
