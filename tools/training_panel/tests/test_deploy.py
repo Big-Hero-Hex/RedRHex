@@ -1,10 +1,12 @@
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.deploy import (
     build_policy_manifest,
+    deploy_defaults,
     run_deploy_validation,
     validate_contract,
     validate_export_integrity,
@@ -73,6 +75,16 @@ class DeployReadinessTests(unittest.TestCase):
             self.assertEqual(safety.status, "pass")
             self.assertGreaterEqual(len(safety.details["cases"]), 5)
 
+    def test_deploy_defaults_expose_validation_runtime_dependencies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            defaults = deploy_defaults(self.make_paths(Path(tmp)))
+            self.assertEqual(defaults["deploy_runtime_python"], sys.executable)
+            self.assertIn("deploy_runtime_dependencies", defaults)
+            for name in ("onnx", "onnxruntime", "mujoco", "torch"):
+                self.assertIn(name, defaults["deploy_runtime_dependencies"])
+                self.assertIn("installed", defaults["deploy_runtime_dependencies"][name])
+                self.assertIn("version", defaults["deploy_runtime_dependencies"][name])
+
     def test_deploy_validation_writes_report_even_when_fake_onnx_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -90,6 +102,7 @@ class DeployReadinessTests(unittest.TestCase):
             self.assertTrue(markdown_path.is_file())
             self.assertEqual(report.pipeline_id, "test_pipeline")
             self.assertTrue(any(stage.name == "export_integrity" for stage in report.stages))
+            self.assertEqual(report.runtime["python"], sys.executable)
 
 
 if __name__ == "__main__":

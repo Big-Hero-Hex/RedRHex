@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import importlib.util
 import json
 import os
 import shutil
@@ -16,7 +18,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .commands import export_onnx_argv
+from .commands import export_onnx_argv, shell_for_isaaclab
 from .config import PanelPaths, timestamp_id
 from .history import latest_onnx
 
@@ -159,6 +161,7 @@ class DeploymentReport:
     artifacts: dict[str, str] = field(default_factory=dict)
     operator_checklist: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
+    runtime: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -173,10 +176,12 @@ class DeploymentReport:
             "artifacts": dict(self.artifacts),
             "operator_checklist": list(self.operator_checklist),
             "assumptions": list(self.assumptions),
+            "runtime": _json_safe(self.runtime),
         }
 
 
 def deploy_defaults(paths: PanelPaths) -> dict[str, Any]:
+    deps = _deploy_runtime_dependencies()
     return {
         "target": DEPLOY_TARGET,
         "target_runtime": TARGET_RUNTIME,
@@ -188,7 +193,17 @@ def deploy_defaults(paths: PanelPaths) -> dict[str, Any]:
         "expected_action_dim": FALLBACK_CONTRACT.ACTION_DIM,
         "rtol": DEFAULT_RTOL,
         "atol": DEFAULT_ATOL,
+        "deploy_runtime_python": sys.executable,
+        "onnx_installed": deps["onnx"]["installed"],
+        "onnx_version": deps["onnx"].get("version", ""),
         "mujoco_model_path": str(default_mujoco_model_path(paths)),
+        "mujoco_installed": deps["mujoco"]["installed"],
+        "mujoco_version": deps["mujoco"].get("version", ""),
+        "onnxruntime_installed": deps["onnxruntime"]["installed"],
+        "onnxruntime_version": deps["onnxruntime"].get("version", ""),
+        "torch_installed": deps["torch"]["installed"],
+        "torch_version": deps["torch"].get("version", ""),
+        "deploy_runtime_dependencies": deps,
         "report_version": REPORT_VERSION,
     }
 
@@ -245,6 +260,29 @@ def stage_counts(stages: list[dict[str, Any]]) -> dict[str, int]:
 
 def _iso_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def _module_status(name: str) -> dict[str, Any]:
+    if importlib.util.find_spec(name) is None:
+        return {"installed": False, "version": ""}
+    try:
+        module = importlib.import_module(name)
+        return {"installed": True, "version": str(getattr(module, "__version__", ""))}
+    except Exception as exc:
+        return {"installed": False, "version": "", "error": str(exc)}
+
+
+def _deploy_runtime_dependencies() -> dict[str, dict[str, Any]]:
+    return {
+        "onnx": _module_status("onnx"),
+        "onnxruntime": _module_status("onnxruntime"),
+        "mujoco": _module_status("mujoco"),
+        "torch": _module_status("torch"),
+    }
+
+
+def _deploy_runtime_info() -> dict[str, Any]:
+    return {"python": sys.executable, "dependencies": _deploy_runtime_dependencies()}
 
 
 def _json_safe(value: Any) -> Any:
@@ -1171,17 +1209,13 @@ def run_export_stage(paths: PanelPaths, run: dict[str, Any], *, device: str = "c
             f"Isaac Lab launcher not found: {paths.isaaclab_launcher}",
             next_steps=["Set ISAACLAB_ROOT so isaaclab.sh can be found."],
         )
-    argv = [str(paths.isaaclab_launcher), "-p", *export_onnx_argv(checkpoint=checkpoint, device=device)]
-    env = os.environ.copy()
-    env["REDRHEX_ROOT"] = str(paths.repo_root)
-    env["ISAACLAB_ROOT"] = str(paths.isaaclab_root)
-    env["ISAACSIM_ROOT"] = str(paths.isaacsim_root)
+    script_argv = export_onnx_argv(checkpoint=checkpoint, device=device)
+    shell = shell_for_isaaclab(paths, script_argv)
     start = time.monotonic()
-    print(f"[deploy] launching ONNX export: {' '.join(argv)}", flush=True)
+    print(f"[deploy] launching ONNX export via Isaac: {paths.isaaclab_launcher} -p {' '.join(script_argv)}", flush=True)
     completed = subprocess.run(
-        argv,
+        ["bash", "-lc", shell],
         cwd=str(paths.repo_root),
-        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -1202,7 +1236,7 @@ def run_export_stage(paths: PanelPaths, run: dict[str, Any], *, device: str = "c
         status=status,
         duration_s=duration,
         summary=summary,
-        details={"returncode": completed.returncode, "output_tail": output[-8000:]},
+        details={"returncode": completed.returncode, "command": shell, "output_tail": output[-8000:]},
         artifacts={"policy_onnx": onnx_path or ""},
         next_steps=[] if status == "pass" else ["Open the deploy process log and fix the Isaac/RSL-RL export error."],
     )
@@ -1265,6 +1299,7 @@ def render_report_markdown(report: DeploymentReport, json_path: Path) -> str:
         f"- Status: `{report.overall_status}`",
         f"- Readiness: `{report.readiness_level}`",
         f"- JSON: `{json_path}`",
+        f"- Runtime Python: `{report.runtime.get('python') or 'unknown'}`",
         "",
         "## Stages",
     ]
@@ -1295,6 +1330,7 @@ def run_deploy_validation(
 ) -> DeploymentReport:
     pipeline_id = pipeline_id or timestamp_id()
     created_at = _iso_now()
+    runtime = _deploy_runtime_info()
     stages: list[ValidationStageResult] = []
     if export_first:
         stages.append(run_export_stage(paths, run, device=device))
@@ -1312,6 +1348,7 @@ def run_deploy_validation(
                 stages=stages,
                 operator_checklist=operator_checklist(),
                 assumptions=assumptions(),
+                runtime=runtime,
             )
             json_path, md_path = write_report(report)
             report.artifacts.update({"json_report": str(json_path), "markdown_report": str(md_path)})
@@ -1396,6 +1433,7 @@ def run_deploy_validation(
         stages=stages,
         operator_checklist=operator_checklist(),
         assumptions=assumptions(),
+        runtime=runtime,
     )
     json_path, md_path = write_report(report)
     report.artifacts.update({"json_report": str(json_path), "markdown_report": str(md_path)})
@@ -1430,6 +1468,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": f"Run not found: {args.run_id}"}, indent=2), file=sys.stderr)
         return 2
     try:
+        runtime = _deploy_runtime_info()
+        print(f"[deploy] validation runtime python: {runtime['python']}", flush=True)
+        print(
+            "[deploy] validation runtime dependencies: "
+            + json.dumps(runtime["dependencies"], sort_keys=True),
+            flush=True,
+        )
         report = run_deploy_validation(
             paths,
             run,

@@ -10,6 +10,14 @@ This guide defines the v1 policy deployment gate used by the local Training Pane
 
 MuJoCo and ROS mock checks are useful evidence, but v1 keeps them advisory or optional when local dependencies are missing.
 
+## Runtime Environment
+
+Deploy readiness validation runs in the panel Python environment, normally `/home/lab_user1/miniconda3/bin/python`. Install deploy-only validation dependencies there: `onnx`, `onnxruntime`, `mujoco`, and `torch`.
+
+Isaac-dependent actions still use the Isaac launcher environment. Training, play, Isaac video recording, and standalone ONNX export use `isaaclab.sh -p`; `Export ONNX + Validate` first launches export through that Isaac path, then returns to the panel Python for ONNX Runtime, parity, safety, and MuJoCo validation.
+
+The Deploy defaults API and deploy process log print the exact validation Python executable and dependency status. When a stage is skipped for a missing module, check that panel runtime first, not `env_isaaclab_bin`.
+
 ## Stage Meaning
 
 - **Export Integrity** verifies `model_*.pt`, `exported/policy.pt`, `exported/policy.onnx`, `params/env.yaml`, and `params/agent.yaml`, then records file sizes and SHA-256 hashes.
@@ -83,8 +91,9 @@ If a policy fails validation or behaves unexpectedly:
 
 ## Troubleshooting
 
-- Missing `onnx`: install the `onnx` package to enable checker and shape inference.
-- Missing `onnxruntime`: install `onnxruntime` locally or `onnxruntime-gpu` on Jetson.
+- Missing `onnx`: install the `onnx` package in the panel Python to enable checker and shape inference.
+- Missing `onnxruntime`: install `onnxruntime` in the panel Python locally or `onnxruntime-gpu` on Jetson. MuJoCo rollouts require ONNX Runtime because they execute the exported policy in the simulation loop.
+- Dependency appears installed but stage still skips: open `/api/deploy/defaults` or the deploy process log and confirm `deploy_runtime_python` is the panel Python. Readiness validation does not use `env_isaaclab_bin`.
 - Torch/ONNX mismatch: re-export from the same checkpoint and verify normalizer export.
 - Contract warning for base linear velocity: bench checks can use zero velocity, but real locomotion needs an estimator.
 - ROS mock skipped: build `ros2_ws` with `colcon build` and source `install/setup.bash`.

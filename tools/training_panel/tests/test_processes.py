@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -200,7 +201,10 @@ class ProcessRegistryTests(unittest.TestCase):
             record = history.get_run("run_one")
             self.assertEqual(record["deploy_status"], "running")
             self.assertEqual(record["deploy_process_id"], result["id"])
+            self.assertIn(sys.executable, record["deploy_command"])
             self.assertIn("tools.training_panel.deploy_pipeline", record["deploy_command"])
+            self.assertNotIn("conda activate", record["deploy_command"])
+            self.assertNotIn("env_isaaclab_bin", record["deploy_command"])
             self.assertFalse(record["deploy_options"]["include_mujoco"])
 
     def test_start_next_queued_training_respects_isaac_settle_window(self):

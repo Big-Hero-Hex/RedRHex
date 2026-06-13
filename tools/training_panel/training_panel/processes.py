@@ -8,6 +8,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -579,7 +580,7 @@ class ProcessRegistry:
     ) -> dict:
         deploy_id = f"deploy_{timestamp_id()}"
         argv = [
-            "python",
+            sys.executable,
             "-m",
             "tools.training_panel.deploy_pipeline",
             "--run-id",
@@ -601,7 +602,12 @@ class ProcessRegistry:
             argv.append("--use-tensorrt")
         if mujoco_model_path:
             argv.extend(["--mujoco-model-path", str(mujoco_model_path)])
-        shell = shell_for_command(self.paths, argv)
+        shell = "\n".join(
+            [
+                f"cd {shlex.quote(str(self.paths.repo_root))}",
+                "exec " + " ".join(shlex.quote(arg) for arg in argv),
+            ]
+        )
         log_file = self.paths.process_log_dir / f"{deploy_id}.log"
         spawned = self._spawn_shell(deploy_id, shell, log_file)
         proc = spawned.proc
