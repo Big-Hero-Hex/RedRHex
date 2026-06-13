@@ -284,7 +284,19 @@ It shows:
 
 Use it for team review, not blame. Data is a flashlight, not a hammer.
 
-## 16. Troubleshooting
+## 16. Deploy Readiness
+
+Use `Deploy` after a run has a checkpoint.
+
+- `Validate Existing ONNX` checks the current `exported/policy.onnx`.
+- `Export ONNX + Validate` exports from the latest checkpoint first, then runs the same readiness checks.
+- Reports are saved in the selected run's `deploy/` folder.
+- The v1 target is Jetson ROS2 through `redrhex_rl_controller`.
+- The panel never enables real motors; ROS mock checks use disabled motor output defaults.
+
+Read the full workflow in `docs/DEPLOY_READINESS_GUIDE.md` before Jetson or hardware bring-up.
+
+## 17. Troubleshooting
 
 ### Port Already In Use
 
@@ -341,7 +353,7 @@ Check Mother `Control Center`:
 - Supabase heartbeat fresh
 - Cloudflare tunnel if using remote console/TensorBoard
 
-## 17. Maintenance Checklist
+## 18. Maintenance Checklist
 
 Before a demo:
 

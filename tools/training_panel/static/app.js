@@ -45,6 +45,11 @@ const state = {
   selectedTerrainPresetId: null,
   terrainDefaults: {},
   terrainSchema: [],
+  deployDefaults: null,
+  deploySelectedRunId: "",
+  deployData: null,
+  deployDebug: null,
+  deployDebugTimer: null,
   remoteStatus: null,
   activityEvents: [],
   activityAnalytics: null,
@@ -206,12 +211,17 @@ function setView(name) {
     rewards: ["Rewards", "Tune reward weights with presets and see which settings each run used."],
     terrain: ["Terrain", "Tune terrain generator, curriculum, and sub-terrain mix with presets."],
     history: ["History", "Review runs, notes, checkpoints, TensorBoard, and playbacks."],
+    deploy: ["Deploy", "Validate exported policies before Jetson ROS2 bring-up."],
     convergence: ["Convergence", "Define reward plateau detection and automatic result-video behavior."],
     activity: ["Activity", "See team run requests, panel actions, and lightweight usage analytics."],
     access: ["Control Center", "Manage local access, V3.0 remote worker status, and remote launch acceptance."],
   };
   $("#view-title").textContent = titles[name][0];
   $("#view-subtitle").textContent = titles[name][1];
+  if (name === "deploy") {
+    syncDeploySelection();
+    loadDeployForSelectedRun().catch(handleActionError);
+  }
 }
 
 function rewardPresetsForRender() {
@@ -694,11 +704,11 @@ function activeProcessForRun(runId, kind = "") {
 }
 
 function activeMediaProcess() {
-  return state.activeProcesses.find((process) => ["play", "video", "onnx"].includes(process.kind)) || null;
+  return state.activeProcesses.find((process) => ["play", "video", "onnx", "deploy"].includes(process.kind)) || null;
 }
 
 function activeGpuProcess() {
-  return state.activeProcesses.find((process) => ["training", "play", "video", "onnx"].includes(process.kind)) || null;
+  return state.activeProcesses.find((process) => ["training", "play", "video", "onnx", "deploy"].includes(process.kind)) || null;
 }
 
 function mediaLockMessage(process) {
@@ -1068,6 +1078,297 @@ function renderRunDetails() {
   renderVideoPanel(run);
 }
 
+function setDeployStatus(message) {
+  const status = $("#deploy-status");
+  if (status) status.textContent = message || "";
+}
+
+function deployBadgeClass(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "pass" || normalized === "ready") return "status-badge status-completed";
+  if (normalized === "warn" || normalized === "review") return "status-badge status-queued";
+  if (normalized === "fail" || normalized === "blocked") return "status-badge status-failed";
+  return "status-badge muted-pill";
+}
+
+function deployStageClass(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "pass") return "deploy-stage-pass";
+  if (normalized === "warn") return "deploy-stage-warn";
+  if (normalized === "fail") return "deploy-stage-fail";
+  return "deploy-stage-skipped";
+}
+
+function syncDeploySelection() {
+  if (state.deploySelectedRunId && findRun(state.deploySelectedRunId)) return;
+  if (state.selectedRun && findRun(state.selectedRun.id)) {
+    state.deploySelectedRunId = state.selectedRun.id;
+    return;
+  }
+  const firstReady = state.runs.find((run) => run.latest_checkpoint || run.onnx_path);
+  state.deploySelectedRunId = firstReady ? firstReady.id : (state.runs[0]?.id || "");
+}
+
+async function loadDeployDefaults() {
+  try {
+    state.deployDefaults = await api("/api/deploy/defaults");
+  } catch {
+    state.deployDefaults = null;
+  }
+  renderDeployPanel();
+}
+
+async function loadDeployForSelectedRun() {
+  syncDeploySelection();
+  const runId = state.deploySelectedRunId;
+  if (!runId) {
+    state.deployData = null;
+    renderDeployPanel();
+    return;
+  }
+  state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
+  renderDeployPanel();
+}
+
+function renderDeployRunOptions() {
+  const select = $("#deploy-run-select");
+  if (!select) return;
+  syncDeploySelection();
+  select.innerHTML = state.runs
+    .map((run) => {
+      const label = `${run.display_name || run.id} · ${onnxSummary(run) || checkpointSummary(run)}`;
+      return `<option value="${escapeHtml(run.id)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  select.value = state.deploySelectedRunId || "";
+}
+
+function renderDeployArtifactStatus(run) {
+  const target = $("#deploy-artifact-status");
+  if (!target) return;
+  if (!run) {
+    target.innerHTML = `<article class="empty-panel">Select a run to inspect deploy artifacts.</article>`;
+    return;
+  }
+  const rows = [
+    ["Checkpoint", run.latest_checkpoint ? "ready" : "missing"],
+    ["ONNX", run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing")],
+    ["Last report", run.deploy_latest_report ? `${run.deploy_latest_report.readiness_level || "review"} (${run.deploy_latest_report.overall_status || "unknown"})` : "none"],
+  ];
+  target.innerHTML = rows
+    .map(([key, value]) => `<span class="deploy-artifact-key">${escapeHtml(key)}</span><span>${escapeHtml(value)}</span>`)
+    .join("");
+}
+
+function activeDeployProcessForRun(runId) {
+  return activeProcessForRun(runId, "deploy");
+}
+
+function renderDeployReport(data) {
+  const latest = data?.latest;
+  const report = latest?.report;
+  const stageList = $("#deploy-stage-list");
+  const meta = $("#deploy-report-meta");
+  const json = $("#deploy-report-json");
+  const badge = $("#deploy-readiness-badge");
+  if (!report) {
+    if (stageList) stageList.innerHTML = `<article class="empty-panel">No deploy readiness report for this run yet.</article>`;
+    if (meta) meta.textContent = "";
+    if (json) json.textContent = "";
+    if (badge) {
+      badge.textContent = "No Report";
+      badge.className = "status-badge muted-pill";
+    }
+    return;
+  }
+  if (badge) {
+    badge.textContent = `${report.readiness_level || "review"} · ${report.overall_status || "unknown"}`;
+    badge.className = deployBadgeClass(report.overall_status);
+  }
+  if (stageList) {
+    stageList.innerHTML = (report.stages || [])
+      .map(
+        (stage) => `
+          <article class="deploy-stage ${deployStageClass(stage.status)}">
+            <div>
+              <strong>${escapeHtml(stage.title || stage.name)}</strong>
+              <small>${escapeHtml(stage.summary || "")}</small>
+            </div>
+            <span class="status-badge">${escapeHtml(stage.status || "unknown")}</span>
+          </article>
+        `
+      )
+      .join("");
+  }
+  if (meta) {
+    const counts = latest.stage_counts || {};
+    meta.innerHTML = [
+      ["Pipeline", report.pipeline_id],
+      ["Completed", report.completed_at],
+      ["Report", latest.path],
+      ["Stages", `pass ${counts.pass || 0} · warn ${counts.warn || 0} · fail ${counts.fail || 0} · skipped ${counts.skipped || 0}`],
+    ]
+      .map(([key, value]) => `<span class="debug-kv"><strong>${escapeHtml(key)}:</strong> ${escapeHtml(value || "")}</span>`)
+      .join("");
+  }
+  if (json) json.textContent = JSON.stringify(report, null, 2);
+}
+
+function renderDeployPanel() {
+  const panel = $("#deploy");
+  if (!panel) return;
+  renderDeployRunOptions();
+  const run = findRun(state.deploySelectedRunId);
+  const defaults = state.deployDefaults || {};
+  const target = $("#deploy-target");
+  if (target) target.value = defaults.target || "Jetson ROS2";
+  const model = $("#deploy-mujoco-model");
+  if (model && !model.value) model.value = defaults.mujoco_model_path || "";
+  const includeMujoco = $("#deploy-include-mujoco");
+  if (includeMujoco && state.deployDefaults && !includeMujoco.dataset.initialized) {
+    includeMujoco.checked = Boolean(defaults.include_mujoco_default);
+    includeMujoco.dataset.initialized = "1";
+  }
+  const includeRos = $("#deploy-include-ros");
+  if (includeRos && state.deployDefaults && !includeRos.dataset.initialized) {
+    includeRos.checked = Boolean(defaults.include_ros_mock_default);
+    includeRos.dataset.initialized = "1";
+  }
+  renderDeployArtifactStatus(run);
+  renderDeployReport(state.deployData);
+  const active = run ? activeDeployProcessForRun(run.id) : null;
+  const gpuProcess = activeGpuProcess();
+  const validateButton = $("#deploy-validate-existing");
+  const exportButton = $("#deploy-export-validate");
+  const stopButton = $("#deploy-stop");
+  if (validateButton) validateButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
+  if (exportButton) exportButton.disabled = !run || !run.latest_checkpoint || Boolean(gpuProcess && !active);
+  if (stopButton) {
+    stopButton.hidden = !active;
+    stopButton.disabled = !active;
+  }
+  if (active) {
+    state.deployDebug = { type: "deploy", id: active.run_id };
+    startDeployDebugPolling();
+    setDeployStatus(`Deploy readiness running: ${active.run_id}`);
+  }
+}
+
+function deployPayload(exportFirst) {
+  return {
+    export_first: Boolean(exportFirst),
+    device: $("#deploy-device")?.value || "cuda:0",
+    include_ros_mock: Boolean($("#deploy-include-ros")?.checked),
+    include_mujoco: Boolean($("#deploy-include-mujoco")?.checked),
+    use_cuda: Boolean($("#deploy-use-cuda")?.checked),
+    use_tensorrt: Boolean($("#deploy-use-tensorrt")?.checked),
+    mujoco_model_path: $("#deploy-mujoco-model")?.value || "",
+  };
+}
+
+async function startDeployValidation(exportFirst) {
+  syncDeploySelection();
+  const runId = state.deploySelectedRunId;
+  if (!runId) {
+    setDeployStatus("Select a run first.");
+    return;
+  }
+  const result = await api(`/api/runs/${encodeURIComponent(runId)}/deploy/start`, {
+    method: "POST",
+    body: JSON.stringify(deployPayload(exportFirst)),
+  });
+  state.deployDebug = { type: "deploy", id: result.id };
+  setDeployStatus(`Started deploy readiness: ${result.id}`);
+  await loadRuns();
+  await refreshDeployDebug();
+  startDeployDebugPolling();
+}
+
+async function stopDeployValidation() {
+  const active = activeDeployProcessForRun(state.deploySelectedRunId);
+  if (!active) return;
+  await api(`/api/deploy/${encodeURIComponent(active.run_id)}/stop`, { method: "POST", body: "{}" });
+  setDeployStatus(`Stop requested for ${active.run_id}.`);
+  await loadRuns();
+}
+
+function deployDebugEndpoint() {
+  const active = activeDeployProcessForRun(state.deploySelectedRunId);
+  const id = active?.run_id || state.deployDebug?.id;
+  return id ? `/api/deploy/${encodeURIComponent(id)}/debug` : "";
+}
+
+function renderDeployDebug(debug) {
+  const live = debug && isLiveDebug(debug);
+  const liveEl = $("#deploy-console-live");
+  if (liveEl) {
+    liveEl.textContent = live ? "Live" : (debug ? "Snapshot" : "Idle");
+    liveEl.className = live ? "status-badge live-pill" : "status-badge muted-pill";
+  }
+  const status = $("#deploy-debug-status");
+  if (status) {
+    status.innerHTML = debug
+      ? [
+          ["Process", debug.run_id || debug.id],
+          ["PID", debug.pid || ""],
+          ["Return", debug.returncode ?? ""],
+          ["Log", debug.log_file || debug.process_log || ""],
+        ]
+          .map(([key, value]) => `<span class="debug-kv"><strong>${escapeHtml(key)}:</strong> ${escapeHtml(value)}</span>`)
+          .join("")
+      : "";
+  }
+  const log = $("#deploy-debug-log");
+  if (log) {
+    log.textContent = debug ? (debug.log_tail || debug.process_log_tail || debug.debug_hint || "") : "";
+    log.scrollTop = log.scrollHeight;
+  }
+}
+
+async function refreshDeployDebug() {
+  const endpoint = deployDebugEndpoint();
+  if (!endpoint) {
+    renderDeployDebug(null);
+    return;
+  }
+  try {
+    const debug = await api(endpoint);
+    renderDeployDebug(debug);
+    if (!isLiveDebug(debug)) {
+      stopDeployDebugPolling();
+      await loadDeployForSelectedRun();
+    }
+  } catch {
+    renderDeployDebug(null);
+  }
+}
+
+function startDeployDebugPolling() {
+  stopDeployDebugPolling();
+  state.deployDebugTimer = setTimeout(async () => {
+    await refreshDeployDebug();
+    const active = activeDeployProcessForRun(state.deploySelectedRunId);
+    if (active) startDeployDebugPolling();
+  }, DEBUG_POLL_MS);
+}
+
+function stopDeployDebugPolling() {
+  if (state.deployDebugTimer) clearTimeout(state.deployDebugTimer);
+  state.deployDebugTimer = null;
+}
+
+async function copyDeployReport() {
+  const text = $("#deploy-report-json")?.textContent || "";
+  await copyText(text);
+  setDeployStatus("Deploy report JSON copied.");
+}
+
+async function copyDeployDebugOutput() {
+  const text = [$("#deploy-debug-status")?.textContent || "", "", $("#deploy-debug-log")?.textContent || ""].join("\n");
+  await copyText(text);
+  setDeployStatus("Deploy console output copied.");
+}
+
 function hasActiveRun() {
   return (
     Object.keys(state.activeProcessMap).length > 0 ||
@@ -1115,6 +1416,7 @@ async function loadRuns() {
   renderRuns();
   renderRunDetails();
   renderFolderSidebar();
+  renderDeployPanel();
   scheduleRunsRefresh();
 }
 
@@ -3388,7 +3690,7 @@ async function loadActivity() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadActivity()]);
+  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadActivity(), loadDeployDefaults()]);
   await loadRuns();
   await loadFolders();
   if (state.selectedRun) setDebugTarget({ type: "run", id: state.selectedRun.id });
@@ -3580,6 +3882,18 @@ $("#play-run").addEventListener("click", () => {
   }
 });
 $("#tensorboard-run").addEventListener("click", () => state.selectedRun && handleRunAction("tensorboard", state.selectedRun.id));
+$("#deploy-run-select").addEventListener("change", (event) => {
+  state.deploySelectedRunId = event.target.value;
+  loadDeployForSelectedRun().catch(handleActionError);
+});
+$("#deploy-refresh").addEventListener("click", () => loadDeployForSelectedRun().catch(handleActionError));
+$("#deploy-validate-existing").addEventListener("click", () => startDeployValidation(false).catch(handleActionError));
+$("#deploy-export-validate").addEventListener("click", () => startDeployValidation(true).catch(handleActionError));
+$("#deploy-stop").addEventListener("click", () => stopDeployValidation().catch(handleActionError));
+$("#deploy-debug-refresh").addEventListener("click", () => refreshDeployDebug().catch(handleActionError));
+$("#deploy-copy-report").addEventListener("click", () => copyDeployReport().catch(handleActionError));
+$("#deploy-copy-debug").addEventListener("click", () => copyDeployDebugOutput().catch(handleActionError));
+
 
 // Rewards page event listeners
 const presetActivateBtn = $("#preset-activate-btn");

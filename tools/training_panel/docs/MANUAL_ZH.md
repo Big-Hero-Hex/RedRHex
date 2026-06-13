@@ -290,7 +290,19 @@ Mother 的 `Activity` 是團隊 mission control。
 
 這頁是拿來做團隊回顧，不是拿來審判。資料是手電筒，不是槌子。
 
-## 16. 疑難排解
+## 16. Deploy Readiness
+
+有 checkpoint 之後，可以到 Mother 的 `Deploy` 頁面做部署前檢查。
+
+- `Validate Existing ONNX`：檢查目前的 `exported/policy.onnx`。
+- `Export ONNX + Validate`：先從最新 checkpoint 匯出，再跑同一套 readiness checks。
+- 報告會存到該 run 的 `deploy/` 資料夾。
+- V1 目標是 Jetson ROS2 + `redrhex_rl_controller`。
+- Panel 不會啟用真機馬達；ROS mock 檢查一律使用 disabled motor output 預設。
+
+上 Jetson 或真機前，先看完整文件：`docs/DEPLOY_READINESS_GUIDE.md`。
+
+## 17. 疑難排解
 
 ### Port Already In Use
 
@@ -347,7 +359,7 @@ nvidia-smi
 - Supabase heartbeat 是否新
 - 如果要外網 console/TensorBoard，Cloudflare tunnel 是否正常
 
-## 17. 維護清單
+## 18. 維護清單
 
 Demo 前：
 

@@ -163,6 +163,46 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(record["params"]["folder"], "tests")
             self.assertEqual(record["params"]["client_request_id"], "child-123")
 
+    def test_start_deploy_validation_records_process_metadata(self):
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            run_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_one"
+            (run_dir / "exported").mkdir(parents=True)
+            checkpoint = run_dir / "model_10.pt"
+            checkpoint.write_text("model", encoding="utf-8")
+            onnx = run_dir / "exported" / "policy.onnx"
+            onnx.write_text("onnx", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "created_at": "2026-06-01T10:00:00",
+                    "log_dir": str(run_dir),
+                    "latest_checkpoint": str(checkpoint),
+                    "onnx_path": str(onnx),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=FakeProcess())), patch("threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                result = registry.start_deploy_validation("run_one", include_mujoco=False)
+
+            self.assertTrue(result["id"].startswith("deploy_"))
+            record = history.get_run("run_one")
+            self.assertEqual(record["deploy_status"], "running")
+            self.assertEqual(record["deploy_process_id"], result["id"])
+            self.assertIn("tools.training_panel.deploy_pipeline", record["deploy_command"])
+            self.assertFalse(record["deploy_options"]["include_mujoco"])
+
     def test_start_next_queued_training_respects_isaac_settle_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

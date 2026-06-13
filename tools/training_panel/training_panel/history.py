@@ -784,6 +784,22 @@ class HistoryStore:
                 "tmux_session": run.get("onnx_tmux_session"),
                 "debug_hint": "This run is showing the ONNX export process log.",
             }
+        if run.get("deploy_status") in ("running", "failed") and run.get("deploy_process_log"):
+            deploy_log = Path(run["deploy_process_log"])
+            return {
+                "id": run_id,
+                "display_name": run.get("display_name"),
+                "status": f"deploy {run.get('deploy_status')}",
+                "pid": run.get("deploy_pid"),
+                "returncode": run.get("deploy_returncode"),
+                "command": run.get("deploy_command"),
+                "log_dir": run.get("log_dir"),
+                "process_log": str(deploy_log),
+                "process_log_tail": tail_file(deploy_log),
+                "attach_command": run.get("deploy_process_attach_command"),
+                "tmux_session": run.get("deploy_tmux_session"),
+                "debug_hint": "This run is showing the deploy readiness process log.",
+            }
         if run.get("video_status") in ("recording", "failed") and run.get("video_process_log"):
             video_log = Path(run["video_process_log"])
             return {

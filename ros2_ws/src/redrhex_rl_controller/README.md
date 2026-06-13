@@ -2,6 +2,12 @@
 
 這個 workspace 是把 IsaacLab / RSL-RL 匯出的 `policy.onnx` 部署到 Jetson Orin Nano 的 MVP。設計精神參考 DeepRobotics Lite3_rl_deploy：把 robot interface、state machine、policy runner、action scaling、hardware backend 分層；但 RedRhex 的 observation/action/gating 完全以本 repo 的 IsaacLab task 為準。
 
+Local Training Panel 現在有 `Deploy` 頁面可以在上 Jetson 前產生 readiness report。它會檢查 export artifact、ONNX graph、ONNX Runtime、Torch/ONNX parity、observation/action contract、safety faults，並可選擇 ROS mock 與 MuJoCo advisory checks。完整流程見：
+
+```text
+tools/training_panel/docs/DEPLOY_READINESS_GUIDE.md
+```
+
 ## 架構
 
 ```text

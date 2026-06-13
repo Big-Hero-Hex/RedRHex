@@ -11,6 +11,7 @@ Local admin panel and V3.4.2 remote-control system for launching RSL-RL training
 - [Manual EN](docs/MANUAL_EN.md)
 - [Manual 中文](docs/MANUAL_ZH.md)
 - [RedRHex To Go 中文手冊](docs/REDRHEX_TO_GO_MANUAL_ZH.md)
+- [Deploy Readiness Guide](docs/DEPLOY_READINESS_GUIDE.md)
 - [Changelog EN](docs/CHANGELOG_EN.md)
 - [更新紀錄 中文](docs/CHANGELOG_ZH.md)
 
@@ -227,6 +228,7 @@ History actions:
 - `TensorBoard` opens a pending browser tab immediately, starts TensorBoard for that run's log directory, then points the tab at the launched port.
 - `Play` starts `scripts/rsl_rl/play.py` with the latest checkpoint and selects that process in the Process Console.
 - `Export ONNX` exports the latest checkpoint to `exported/policy.onnx` and selects that export process in the Process Console.
+- `Deploy` validates exported policies for Jetson ROS2 readiness with staged export integrity, ONNX, runtime, contract, safety, optional ROS mock, and MuJoCo advisory checks. Reports are saved under each run's `deploy/` folder.
 - `Compact Run` deletes old top-level `model_*.pt` checkpoints after confirmation, keeping the highest-iteration checkpoint and preserving videos, TensorBoard logs, params, notes, and exported policy files.
 - `Recorded Result` embeds the latest MP4 and records one high-quality default video. After a successful panel-launched training run, the panel automatically records the same high-quality result.
 - `Resume` sends the latest checkpoint back to the Train form so you can choose new env/iteration values before continuing training.

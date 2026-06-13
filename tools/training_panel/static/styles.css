@@ -2414,3 +2414,107 @@ pre {
   max-height: 220px;
   overflow: auto;
 }
+
+.deploy-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.deploy-console-panel {
+  grid-column: 1 / -1;
+}
+
+.deploy-control-panel label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.deploy-control-panel input,
+.deploy-control-panel select {
+  min-width: 0;
+}
+
+.deploy-artifact-status {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 10px;
+  padding: 10px;
+  margin: 8px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 13px;
+}
+
+.deploy-artifact-key {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.deploy-stage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.deploy-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.deploy-stage strong,
+.deploy-stage small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.deploy-stage small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.deploy-stage-pass {
+  border-left-color: var(--green);
+}
+
+.deploy-stage-warn {
+  border-left-color: var(--amber);
+}
+
+.deploy-stage-fail {
+  border-left-color: var(--red);
+}
+
+.deploy-stage-skipped {
+  border-left-color: var(--muted);
+}
+
+.deploy-report-json,
+.deploy-debug-log {
+  width: 100%;
+  min-height: 220px;
+  max-height: 460px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.deploy-debug-log {
+  min-height: 300px;
+}
+
+@media (max-width: 980px) {
+  .deploy-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

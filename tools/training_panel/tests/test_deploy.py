@@ -1,0 +1,96 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from tools.training_panel.training_panel.config import PanelPaths
+from tools.training_panel.training_panel.deploy import (
+    build_policy_manifest,
+    run_deploy_validation,
+    validate_contract,
+    validate_export_integrity,
+    validate_safety_faults,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class DeployReadinessTests(unittest.TestCase):
+    def make_paths(self, root: Path) -> PanelPaths:
+        return PanelPaths(
+            repo_root=REPO_ROOT,
+            isaaclab_root=root / "IsaacLab",
+            isaacsim_root=root / "isaacsim",
+            conda_sh=root / "conda.sh",
+            conda_env="env",
+        )
+
+    def make_run(self, root: Path) -> dict:
+        run_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "deploy_run"
+        exported = run_dir / "exported"
+        params = run_dir / "params"
+        exported.mkdir(parents=True)
+        params.mkdir(parents=True)
+        checkpoint = run_dir / "model_10.pt"
+        checkpoint.write_text("checkpoint", encoding="utf-8")
+        (exported / "policy.onnx").write_text("fake onnx", encoding="utf-8")
+        (exported / "policy.pt").write_text("fake torchscript", encoding="utf-8")
+        (params / "env.yaml").write_text("env: test\n", encoding="utf-8")
+        (params / "agent.yaml").write_text("agent: test\n", encoding="utf-8")
+        return {
+            "id": "deploy_run",
+            "display_name": "Deploy Run",
+            "log_dir": str(run_dir),
+            "latest_checkpoint": str(checkpoint),
+            "onnx_path": str(exported / "policy.onnx"),
+        }
+
+    def test_manifest_and_export_integrity_include_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = build_policy_manifest(self.make_paths(root), self.make_run(root))
+            self.assertEqual(manifest.run_id, "deploy_run")
+            self.assertEqual(manifest.expected_obs_dim, 56)
+            self.assertEqual(manifest.expected_action_dim, 12)
+            self.assertIn("policy_onnx", manifest.hashes)
+            self.assertGreater(manifest.sizes["policy_onnx"], 0)
+
+            stage = validate_export_integrity(manifest)
+            self.assertEqual(stage.status, "pass")
+            self.assertIn("policy_onnx", stage.artifacts)
+
+    def test_contract_and_safety_stages_run_without_optional_runtime_deps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            manifest = build_policy_manifest(paths, self.make_run(root))
+
+            contract = validate_contract(paths, manifest)
+            self.assertIn(contract.status, {"pass", "warn"})
+            self.assertEqual(contract.details["expected_obs_dim"], 56)
+
+            safety = validate_safety_faults(paths, manifest)
+            self.assertEqual(safety.status, "pass")
+            self.assertGreaterEqual(len(safety.details["cases"]), 5)
+
+    def test_deploy_validation_writes_report_even_when_fake_onnx_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = self.make_run(root)
+            report = run_deploy_validation(
+                self.make_paths(root),
+                run,
+                pipeline_id="test_pipeline",
+                include_ros_mock=False,
+                include_mujoco=False,
+            )
+            report_path = Path(report.artifacts["json_report"])
+            markdown_path = Path(report.artifacts["markdown_report"])
+            self.assertTrue(report_path.is_file())
+            self.assertTrue(markdown_path.is_file())
+            self.assertEqual(report.pipeline_id, "test_pipeline")
+            self.assertTrue(any(stage.name == "export_integrity" for stage in report.stages))
+
+
+if __name__ == "__main__":
+    unittest.main()

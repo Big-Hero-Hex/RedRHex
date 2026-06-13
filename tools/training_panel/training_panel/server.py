@@ -15,6 +15,7 @@ from tools.training_panel import __version__
 from .activity import ActivityStore
 from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams
 from .config import PanelPaths
+from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
 from .history import HistoryStore
 from .presets import PresetStore
 from .processes import ProcessRegistry, ProcessStartError
@@ -126,11 +127,24 @@ class PanelHandler(BaseHTTPRequestHandler):
             )
         if parsed.path == "/api/training/defaults":
             return self._json(TrainingParams().to_dict())
+        if parsed.path == "/api/deploy/defaults":
+            return self._json(deploy_defaults(self.state.paths))
         if parsed.path == "/api/video/presets":
             return self._json({"presets": [params.to_dict() for params in VIDEO_PRESETS.values()]})
         if parsed.path == "/api/runs":
-            self.state.processes.reconcile_stale_history()
-            return self._json({"runs": self.state.history.list_runs()})
+            return self._json(self._runs_payload())
+        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/deploy"):
+            run_id = route_id(parsed.path)
+            run = self.state.history.get_run(run_id)
+            if not run:
+                return self._json({"error": "Run not found"}, status=404)
+            return self._json({"run_id": run_id, "reports": list_deploy_reports(run), "latest": latest_deploy_report(run)})
+        if parsed.path.startswith("/api/deploy/") and parsed.path.endswith("/debug"):
+            pipeline_id = route_id(parsed.path)
+            debug = self.state.processes.get_process_debug(pipeline_id)
+            if not debug:
+                return self._json({"error": "Deploy process not found"}, status=404)
+            return self._json(debug)
         if parsed.path == "/api/tweaks/last-run":
             self.state.processes.reconcile_stale_history()
             reward_presets = self.state.presets.list_presets()
@@ -533,6 +547,45 @@ class PanelHandler(BaseHTTPRequestHandler):
                 )
                 self._record_activity("onnx_export_start", summary=f"Started ONNX export for {run_id}", subject_id=run_id, payload=result)
                 return self._json(result, status=201)
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/deploy/start"):
+                run_id = route_id(parsed.path)
+                run = self.state.history.get_run(run_id)
+                if not run:
+                    return self._json({"error": "Run not found"}, status=404)
+                export_first = bool(payload.get("export_first", False))
+                if export_first and not run.get("latest_checkpoint"):
+                    return self._json({"error": "No checkpoint found for run"}, status=404)
+                if not export_first and not run.get("onnx_path"):
+                    return self._json({"error": "No exported policy.onnx found for run"}, status=404)
+                active_media = self.state.processes.running_isaac_processes()
+                if active_media:
+                    return self._json(
+                        {"error": "Stop the active Isaac/deploy process before starting deploy readiness.", "processes": active_media},
+                        status=409,
+                    )
+                result = self.state.processes.start_deploy_validation(
+                    run_id=run_id,
+                    export_first=export_first,
+                    device=str(payload.get("device") or "cuda:0"),
+                    include_ros_mock=bool(payload.get("include_ros_mock", False)),
+                    include_mujoco=bool(payload.get("include_mujoco", True)),
+                    use_cuda=bool(payload.get("use_cuda", False)),
+                    use_tensorrt=bool(payload.get("use_tensorrt", False)),
+                    mujoco_model_path=str(payload.get("mujoco_model_path") or "") or None,
+                )
+                self._record_activity(
+                    "deploy_readiness_start",
+                    summary=f"Started deploy readiness for {run_id}",
+                    subject_id=run_id,
+                    payload={**result, "export_first": export_first},
+                )
+                return self._json(result, status=201)
+            if parsed.path.startswith("/api/deploy/") and parsed.path.endswith("/stop"):
+                pipeline_id = route_id(parsed.path)
+                stopped = self.state.processes.stop(pipeline_id)
+                if stopped:
+                    self._record_activity("deploy_readiness_stop", summary=f"Stopped deploy readiness {pipeline_id}", subject_id=pipeline_id)
+                return self._json({"stopped": stopped, "pipeline_id": pipeline_id})
             if parsed.path == "/api/open-location":
                 return self._json(self._open_location(str(payload.get("path") or "")))
             if parsed.path == "/api/tensorboard/start":
@@ -871,6 +924,19 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _runs_payload(self) -> dict:
+        self.state.processes.reconcile_stale_history()
+        runs = self.state.history.list_runs()
+        for run in runs:
+            latest = latest_deploy_report(run)
+            if latest:
+                run["deploy_latest_report"] = {
+                    key: value
+                    for key, value in latest.items()
+                    if key in {"path", "pipeline_id", "created_at", "completed_at", "overall_status", "readiness_level", "stage_counts"}
+                }
+        return {"runs": runs}
 
     def _not_found(self) -> None:
         self._json({"error": "not found"}, status=404)

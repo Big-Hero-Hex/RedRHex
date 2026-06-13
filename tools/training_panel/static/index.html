@@ -20,6 +20,7 @@
         <button class="nav-button" data-view="rewards">Rewards</button>
         <button class="nav-button" data-view="terrain">Terrain</button>
         <button class="nav-button" data-view="history">History</button>
+        <button class="nav-button" data-view="deploy">Deploy</button>
         <button class="nav-button" data-view="convergence">Convergence</button>
         <button class="nav-button" data-view="activity">Activity</button>
         <button class="nav-button" data-view="access">Control Center</button>
@@ -382,6 +383,83 @@
             <div id="notes-status" class="status-line"></div>
           </div>
           </div><!-- /details-panel-wrap -->
+        </div>
+      </section>
+
+      <section id="deploy" class="view">
+        <div class="deploy-layout">
+          <section class="setting-panel deploy-control-panel">
+            <div class="section-header">
+              <h3>Policy Readiness</h3>
+              <span id="deploy-readiness-badge" class="status-badge muted-pill">No Report</span>
+            </div>
+            <label>
+              Run
+              <select id="deploy-run-select"></select>
+            </label>
+            <div id="deploy-artifact-status" class="deploy-artifact-status"></div>
+            <label>
+              Target
+              <input id="deploy-target" value="Jetson ROS2" readonly />
+            </label>
+            <label>
+              Device
+              <input id="deploy-device" value="cuda:0" />
+            </label>
+            <label>
+              MuJoCo Model
+              <input id="deploy-mujoco-model" />
+            </label>
+            <label class="check-row">
+              <input id="deploy-include-mujoco" type="checkbox" checked />
+              MuJoCo advisory rollout
+            </label>
+            <label class="check-row">
+              <input id="deploy-include-ros" type="checkbox" />
+              ROS mock/fake sensor launch
+            </label>
+            <label class="check-row">
+              <input id="deploy-use-cuda" type="checkbox" />
+              Runtime CUDA provider
+            </label>
+            <label class="check-row">
+              <input id="deploy-use-tensorrt" type="checkbox" />
+              Runtime TensorRT provider
+            </label>
+            <div class="form-actions compact-actions">
+              <button type="button" id="deploy-validate-existing" class="primary-button">Validate Existing ONNX</button>
+              <button type="button" id="deploy-export-validate" class="ghost-button">Export ONNX + Validate</button>
+              <button type="button" id="deploy-stop" class="danger-button" hidden>Stop Deploy</button>
+            </div>
+            <div id="deploy-status" class="status-line"></div>
+          </section>
+
+          <section class="setting-panel deploy-report-panel">
+            <div class="section-header">
+              <h3>Readiness Stages</h3>
+              <button type="button" id="deploy-refresh" class="ghost-button small-button">Refresh</button>
+            </div>
+            <div id="deploy-stage-list" class="deploy-stage-list"></div>
+            <div class="section-header">
+              <h3>Report</h3>
+              <button type="button" id="deploy-copy-report" class="ghost-button small-button">Copy JSON</button>
+            </div>
+            <div id="deploy-report-meta" class="debug-status"></div>
+            <pre id="deploy-report-json" class="deploy-report-json"></pre>
+          </section>
+
+          <section class="setting-panel deploy-console-panel">
+            <div class="section-header">
+              <h3>Deploy Console</h3>
+              <span id="deploy-console-live" class="status-badge muted-pill">Idle</span>
+            </div>
+            <div class="form-actions compact-actions">
+              <button type="button" id="deploy-debug-refresh" class="ghost-button small-button">Refresh Output</button>
+              <button type="button" id="deploy-copy-debug" class="ghost-button small-button">Copy Output</button>
+            </div>
+            <div id="deploy-debug-status" class="debug-status"></div>
+            <pre id="deploy-debug-log" class="deploy-debug-log"></pre>
+          </section>
         </div>
       </section>
 

@@ -29,6 +29,7 @@ from .commands import (
     training_argv,
 )
 from .config import PanelPaths, timestamp_id
+from .deploy import latest_deploy_report
 from .history import HistoryStore, latest_checkpoint, latest_onnx, latest_video, tail_file
 from .terrain import read_terrain_values_from_yaml
 
@@ -42,7 +43,7 @@ EXTERNAL_ID_PREFIXES = (
     EXTERNAL_TRAINING_ID_PREFIX,
     EXTERNAL_TENSORBOARD_ID_PREFIX,
 )
-GPU_PROCESS_KINDS = {"training", "play", "video", "onnx"}
+GPU_PROCESS_KINDS = {"training", "play", "video", "onnx", "deploy"}
 DEFAULT_ISAAC_SETTLE_SECONDS = 5.0
 
 
@@ -555,6 +556,93 @@ class ProcessRegistry:
         thread.start()
         return {
             "id": onnx_id,
+            "source_run_id": run_id,
+            "pid": proc.pid,
+            "process_log": str(log_file),
+            "command": shell,
+            "tmux_session": spawned.tmux_session,
+            "attach_command": spawned.attach_command,
+            "exit_file": spawned.exit_file,
+        }
+
+    def start_deploy_validation(
+        self,
+        run_id: str,
+        *,
+        export_first: bool = False,
+        device: str = "cuda:0",
+        include_ros_mock: bool = False,
+        include_mujoco: bool = True,
+        use_cuda: bool = False,
+        use_tensorrt: bool = False,
+        mujoco_model_path: str | None = None,
+    ) -> dict:
+        deploy_id = f"deploy_{timestamp_id()}"
+        argv = [
+            "python",
+            "-m",
+            "tools.training_panel.deploy_pipeline",
+            "--run-id",
+            run_id,
+            "--pipeline-id",
+            deploy_id,
+            "--device",
+            device,
+        ]
+        if export_first:
+            argv.append("--export-first")
+        if include_ros_mock:
+            argv.append("--include-ros-mock")
+        if not include_mujoco:
+            argv.append("--no-mujoco")
+        if use_cuda:
+            argv.append("--use-cuda")
+        if use_tensorrt:
+            argv.append("--use-tensorrt")
+        if mujoco_model_path:
+            argv.extend(["--mujoco-model-path", str(mujoco_model_path)])
+        shell = shell_for_command(self.paths, argv)
+        log_file = self.paths.process_log_dir / f"{deploy_id}.log"
+        spawned = self._spawn_shell(deploy_id, shell, log_file)
+        proc = spawned.proc
+        self._register(
+            deploy_id,
+            "deploy",
+            spawned,
+            log_file,
+            datetime.now().isoformat(timespec="seconds"),
+            shell,
+            source_run_id=run_id,
+        )
+        self.history.update_run(
+            run_id,
+            deploy_status="running",
+            deploy_process_id=deploy_id,
+            deploy_pid=proc.pid,
+            deploy_process_log=str(log_file),
+            deploy_command=shell,
+            deploy_process_attach_command=spawned.attach_command,
+            deploy_tmux_session=spawned.tmux_session,
+            deploy_exit_file=spawned.exit_file,
+            deploy_error=None,
+            deploy_options={
+                "export_first": bool(export_first),
+                "device": device,
+                "include_ros_mock": bool(include_ros_mock),
+                "include_mujoco": bool(include_mujoco),
+                "use_cuda": bool(use_cuda),
+                "use_tensorrt": bool(use_tensorrt),
+                "mujoco_model_path": str(mujoco_model_path or ""),
+            },
+        )
+        thread = threading.Thread(
+            target=self._monitor_deploy,
+            args=(run_id, deploy_id, proc),
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "id": deploy_id,
             "source_run_id": run_id,
             "pid": proc.pid,
             "process_log": str(log_file),
@@ -1431,6 +1519,25 @@ class ProcessRegistry:
             onnx_path=onnx_path,
             has_onnx=bool(onnx_path),
             onnx_error=None if returncode == 0 and onnx_path else "ONNX export finished but policy.onnx was not produced.",
+        )
+        self.start_next_queued_training()
+
+    def _monitor_deploy(self, source_run_id: str, deploy_id: str, proc: subprocess.Popen) -> None:
+        returncode = proc.wait()
+        self._mark_isaac_process_finished()
+        run = self.history.get_run(source_run_id) or {}
+        latest = latest_deploy_report(run) if run else None
+        report = latest.get("report") if latest else None
+        self.history.update_run(
+            source_run_id,
+            deploy_status="completed" if latest else "failed",
+            deploy_returncode=returncode,
+            deploy_process_id=deploy_id,
+            deploy_report_path=latest.get("path") if latest else None,
+            deploy_overall_status=report.get("overall_status") if isinstance(report, dict) else None,
+            deploy_readiness_level=report.get("readiness_level") if isinstance(report, dict) else None,
+            deploy_completed_at=datetime.now().isoformat(timespec="seconds"),
+            deploy_error=None if latest else "Deploy validation finished but no readiness report was produced.",
         )
         self.start_next_queued_training()
 
