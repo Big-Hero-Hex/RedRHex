@@ -1,0 +1,37 @@
+redrhex_rl_controller:
+  ros__parameters:
+    policy.onnx_path: "/home/jetson/RedRHex/policy.onnx"
+    policy.use_cuda: false
+    policy.use_tensorrt: false
+    policy.expected_obs_dim: 56
+    policy.expected_action_dim: 12
+    policy.policy_hz: 0.0
+    policy.enable_policy_on_start: false
+
+    observation.base_lin_vel_source: "zero"
+    observation.abad_feedback_source: "commanded"
+
+    safety.estop_on_start: true
+    safety.enable_motor_output_on_start: false
+    safety.require_lowlevel_heartbeat: false
+    safety.max_abs_roll_rad: 0.7
+    safety.max_abs_pitch_rad: 0.7
+    safety.cmd_timeout_s: 0.25
+    safety.sensor_timeout_s: 0.10
+    safety.heartbeat_timeout_s: 0.10
+    safety.action_clip: 1.0
+    safety.main_drive_vel_limit_rad_s: 1.0
+    safety.main_drive_slew_rate_rad_s2: 4.0
+    safety.abad_pos_limit_rad: 0.15
+    safety.abad_slew_rate_rad_s: 1.0
+    safety.init_stand_max_main_drive_vel_rad_s: 0.5
+    safety.init_stand_min_time_s: 2.0
+    safety.init_stand_pose_tol_rad: 0.25
+    safety.max_motor_temperature_c: 70.0
+    safety.max_motor_current_a: 3.0
+
+    decoder.enable_forward_bias: true
+    decoder.main_sign_correction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    decoder.abad_sign_correction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    decoder.main_zero_offset_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    decoder.abad_zero_offset_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

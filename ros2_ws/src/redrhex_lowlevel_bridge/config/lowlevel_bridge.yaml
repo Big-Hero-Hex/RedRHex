@@ -1,0 +1,31 @@
+redrhex_lowlevel_bridge:
+  ros__parameters:
+    bridge.backend: "mock"
+    bridge.publish_rate_hz: 50.0
+
+    serial.port: "/dev/ttyUSB0"
+    serial.baudrate: 115200
+    serial.timeout_s: 0.01
+
+    rinbo.allow_enable: false
+    rinbo.command_topic: "/motor/command"
+    rinbo.preview_topic: "/redrhex/rinbo_motor_command_preview"
+    rinbo.motor_state_topic: "/motor/state"
+    rinbo.power_state_topic: "/power/state"
+    rinbo.main_max_pwm: 150.0
+    rinbo.main_pwm_per_rad_s: 120.0
+    rinbo.main_pwm_slew_per_s: 600.0
+    rinbo.main_encoder_counts_per_rev: 54984.83
+    rinbo.main_direction_positive_rinbo_order: [true, true, true, false, false, false]
+    rinbo.servo_zero_encoder_rinbo_order: [740, 2565, 3283, 1944, 2071, 989]
+    rinbo.servo_counts_per_rad: 1000.0
+    rinbo.servo_min_encoder: 0
+    rinbo.servo_max_encoder: 4095
+    rinbo.servo_control_mode: 2
+    rinbo.require_power_state_when_enabled: true
+    rinbo.max_main_channel_current_a: 3.0
+    rinbo.max_bus_current_a: 12.0
+    rinbo.min_bus_voltage_v: 0.0
+    rinbo.max_bus_voltage_v: 0.0
+    rinbo.current_trip_latch: true
+    rinbo.command_timeout_s: 0.10

@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>redrhex_lowlevel_bridge</name>
+  <version>0.1.0</version>
+  <description>RedRhex low-level bridge abstraction for mock, BioRoLa/Rinbo ROS, and serial backends.</description>
+  <maintainer email="jason@example.com">Jason Liao</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>redrhex_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+</package>
