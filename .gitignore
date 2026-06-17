@@ -65,6 +65,11 @@ _build
 **/logs/*
 **/recordings/*
 
+# ROS/colcon generated output
+**/ros2_ws/build/
+**/ros2_ws/install/
+**/ros2_ws/log/
+
 # Pre-Trained Checkpoints
 /.pretrained_checkpoints/
 

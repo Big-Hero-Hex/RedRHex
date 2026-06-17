@@ -1,8 +1,5 @@
-"""Explicit deployment state machine for RedRhex."""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -19,88 +16,59 @@ class RedRhexState(str, Enum):
     RECOVER = "RECOVER"
 
 
-@dataclass
-class StateMachineInputs:
-    policy_loaded: bool = False
-    sensors_ready: bool = False
-    motor_feedback_ready: bool = False
-    lowlevel_alive: bool = False
-    estop: bool = False
-    safety_ok: bool = True
-    fall_detected: bool = False
-    init_stand_done: bool = False
-    warmup_done: bool = False
-    enable_policy: bool = False
-    recover_requested: bool = False
-    reasons: list[str] = field(default_factory=list)
-
-
 class RedRhexStateMachine:
-    def __init__(self, require_motor_feedback: bool = False, require_lowlevel_heartbeat: bool = False) -> None:
+    def __init__(self) -> None:
         self.state = RedRhexState.BOOT
-        self.previous_state = RedRhexState.BOOT
-        self.require_motor_feedback = bool(require_motor_feedback)
-        self.require_lowlevel_heartbeat = bool(require_lowlevel_heartbeat)
-        self.last_transition_reason = "node startup"
+        self.reason = "node boot"
+        self.stand_complete = False
 
-    def transition(self, new_state: RedRhexState, reason: str) -> None:
-        if new_state != self.state:
-            self.previous_state = self.state
-            self.state = new_state
-            self.last_transition_reason = reason
+    def force_stop(self, reason: str) -> None:
+        self.state = RedRhexState.PROTECTIVE_STOP
+        self.reason = reason
 
-    def update(self, inputs: StateMachineInputs) -> RedRhexState:
-        if inputs.estop or not inputs.safety_ok:
-            if inputs.fall_detected:
-                self.transition(RedRhexState.FALL_DETECTED, "fall detected")
-            else:
-                detail = "; ".join(inputs.reasons) if inputs.reasons else "safety violation"
-                self.transition(RedRhexState.PROTECTIVE_STOP, detail)
+    def recover_to_sensor_check(self) -> None:
+        self.state = RedRhexState.SENSOR_CHECK
+        self.reason = "manual recover"
+        self.stand_complete = False
+
+    def update(
+        self,
+        sensors_ready: bool,
+        safety_ok: bool,
+        enable_motors: bool,
+        enable_policy: bool,
+        init_stand_complete: bool,
+        fall_detected: bool = False,
+        safety_reason: str = "",
+    ) -> RedRhexState:
+        if fall_detected:
+            self.state = RedRhexState.FALL_DETECTED
+            self.reason = "fall detected"
             return self.state
-
+        if not safety_ok:
+            self.state = RedRhexState.PROTECTIVE_STOP
+            self.reason = safety_reason or "safety not ok"
+            return self.state
         if self.state == RedRhexState.BOOT:
-            if inputs.policy_loaded:
-                self.transition(RedRhexState.SENSOR_CHECK, "policy loaded")
+            self.state = RedRhexState.SENSOR_CHECK
+            self.reason = "boot complete"
+        if not sensors_ready:
+            self.state = RedRhexState.SENSOR_CHECK
+            self.reason = "waiting sensors"
             return self.state
-
-        if self.state == RedRhexState.SENSOR_CHECK:
-            motor_ok = inputs.motor_feedback_ready or not self.require_motor_feedback
-            bridge_ok = inputs.lowlevel_alive or not self.require_lowlevel_heartbeat
-            if inputs.sensors_ready and motor_ok and bridge_ok:
-                self.transition(RedRhexState.MOTOR_IDLE, "sensors and bridge ready")
+        if not enable_motors:
+            self.state = RedRhexState.MOTOR_IDLE
+            self.reason = "motor output disabled"
             return self.state
-
-        if self.state == RedRhexState.MOTOR_IDLE:
-            self.transition(RedRhexState.INIT_STAND, "enter init stand")
+        self.stand_complete = self.stand_complete or init_stand_complete
+        if not self.stand_complete:
+            self.state = RedRhexState.INIT_STAND
+            self.reason = "moving to init stand"
             return self.state
-
-        if self.state == RedRhexState.INIT_STAND:
-            if inputs.init_stand_done:
-                self.transition(RedRhexState.WARMUP, "init stand complete")
+        if not enable_policy:
+            self.state = RedRhexState.POLICY_READY
+            self.reason = "policy ready, waiting enable_policy"
             return self.state
-
-        if self.state == RedRhexState.WARMUP:
-            if inputs.warmup_done:
-                self.transition(RedRhexState.POLICY_READY, "warmup complete")
-            return self.state
-
-        if self.state == RedRhexState.POLICY_READY:
-            if inputs.enable_policy:
-                self.transition(RedRhexState.POLICY_RUN, "policy enabled")
-            return self.state
-
-        if self.state == RedRhexState.POLICY_RUN:
-            if not inputs.enable_policy:
-                self.transition(RedRhexState.POLICY_READY, "policy disabled")
-            return self.state
-
-        if self.state in (RedRhexState.PROTECTIVE_STOP, RedRhexState.FALL_DETECTED):
-            if inputs.recover_requested and inputs.safety_ok and not inputs.estop:
-                self.transition(RedRhexState.RECOVER, "manual recover requested")
-            return self.state
-
-        if self.state == RedRhexState.RECOVER:
-            self.transition(RedRhexState.INIT_STAND, "recover requires init stand")
-            return self.state
-
+        self.state = RedRhexState.POLICY_RUN
+        self.reason = "policy running"
         return self.state

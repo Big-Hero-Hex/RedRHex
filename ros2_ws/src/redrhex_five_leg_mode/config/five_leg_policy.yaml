@@ -32,6 +32,10 @@ redrhex_rl_controller:
     safety.control_deadline_factor: 2.0
     safety.control_deadline_miss_limit: 5
 
+    five_leg.disabled_main_indices: [5]
+    five_leg.init_stand_ready_after_s: 6.0
+    five_leg.require_init_stand_pose: false
+
     decoder.enable_forward_bias: true
     decoder.main_sign_correction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     decoder.abad_sign_correction: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

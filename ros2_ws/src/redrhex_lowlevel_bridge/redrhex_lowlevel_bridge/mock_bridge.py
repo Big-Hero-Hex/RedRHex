@@ -1,55 +1,40 @@
-"""Mock bridge used for bench and ROS graph tests."""
-
 from __future__ import annotations
 
 import time
-
-from redrhex_msgs.msg import RedRhexMotorState
 
 from .bridge_base import LowLevelBridgeBase
 
 
 class MockLowLevelBridge(LowLevelBridgeBase):
-    def __init__(self, print_every_n: int = 50) -> None:
-        self.print_every_n = max(1, int(print_every_n))
+    def __init__(self, node) -> None:
+        self.node = node
         self.connected = False
-        self.sequence = 0
         self.last_command = None
-        self.last_rx_time = time.monotonic()
+        self.last_command_time = 0.0
 
     def connect(self) -> None:
         self.connected = True
-        self.last_rx_time = time.monotonic()
-        print("[MockLowLevelBridge] connected")
+        self.node.get_logger().info("Mock low-level bridge connected. No hardware command will be sent.")
 
     def send_motor_command(self, cmd) -> None:
-        self.sequence += 1
         self.last_command = cmd
-        self.last_rx_time = time.monotonic()
-        if self.sequence % self.print_every_n == 1:
-            first = cmd.joint_names[0] if cmd.joint_names else "none"
-            print(
-                "[MockLowLevelBridge] command "
-                f"seq={self.sequence} enable={cmd.enable} mode={cmd.mode} "
-                f"joints={len(cmd.joint_names)} first={first}"
-            )
-
-    def read_motor_state(self):
-        if self.last_command is None:
-            return None
-        state = RedRhexMotorState()
-        state.joint_names = list(self.last_command.joint_names)
-        state.position_rad = list(self.last_command.target_position_rad)
-        state.velocity_rad_s = list(self.last_command.target_velocity_rad_s)
-        state.effort_nm = [0.0] * len(state.joint_names)
-        state.current_a = [0.0] * len(state.joint_names)
-        state.temperature_c = [30.0] * len(state.joint_names)
-        state.fault = [False] * len(state.joint_names)
-        return state
+        self.last_command_time = time.monotonic()
+        max_vel = max([abs(v) for v in cmd.target_velocity_rad_s[:6]] or [0.0])
+        max_abad = max([abs(v) for v in cmd.target_position_rad[6:]] or [0.0])
+        self.node.get_logger().info(
+            f"mock cmd enable={cmd.enable} max_main_vel={max_vel:.3f} rad/s max_abad={max_abad:.3f} rad",
+            throttle_duration_sec=1.0,
+        )
 
     def is_alive(self) -> bool:
         return self.connected
 
+    def diagnostics(self) -> dict[str, str]:
+        return {
+            "backend": "mock",
+            "connected": str(self.connected),
+            "last_command_age_s": f"{time.monotonic() - self.last_command_time:.3f}" if self.last_command else "never",
+        }
+
     def shutdown(self) -> None:
         self.connected = False
-        print("[MockLowLevelBridge] shutdown")

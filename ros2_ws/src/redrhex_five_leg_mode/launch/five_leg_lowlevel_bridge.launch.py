@@ -21,10 +21,10 @@ def generate_launch_description():
                     [FindPackageShare("redrhex_lowlevel_bridge"), "config", "lowlevel_bridge.yaml"]
                 ),
             ),
-            DeclareLaunchArgument("bridge_backend", default_value="mock"),
-            DeclareLaunchArgument("rinbo_allow_enable", default_value="false"),
-            DeclareLaunchArgument("rinbo_main_max_pwm", default_value="150.0"),
-            DeclareLaunchArgument("rinbo_disabled_legs", default_value=""),
+            DeclareLaunchArgument("bridge_backend", default_value="biorola_ros"),
+            DeclareLaunchArgument("rinbo_allow_enable", default_value="true"),
+            DeclareLaunchArgument("rinbo_main_max_pwm", default_value="80.0"),
+            DeclareLaunchArgument("rinbo_disabled_legs", default_value="l3"),
             Node(
                 package="redrhex_lowlevel_bridge",
                 executable="redrhex_lowlevel_bridge",

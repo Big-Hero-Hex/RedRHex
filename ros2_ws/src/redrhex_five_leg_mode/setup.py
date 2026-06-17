@@ -1,7 +1,7 @@
 from glob import glob
 from setuptools import find_packages, setup
 
-package_name = "redrhex_lowlevel_bridge"
+package_name = "redrhex_five_leg_mode"
 
 setup(
     name=package_name,
@@ -17,14 +17,11 @@ setup(
     zip_safe=True,
     maintainer="Jason Liao",
     maintainer_email="jason@example.com",
-    description="RedRhex low-level bridge abstraction.",
+    description="Five-leg RedRhex policy mode for running with Rinbo L3 disabled.",
     license="MIT",
     entry_points={
         "console_scripts": [
-            "redrhex_lowlevel_bridge = redrhex_lowlevel_bridge.lowlevel_bridge_node:main",
-            "biorola_bringup_plan = redrhex_lowlevel_bridge.biorola_bringup_plan:main",
-            "rinbo_power_tool = redrhex_lowlevel_bridge.rinbo_power_tool:main",
-            "rinbo_bringup_check = redrhex_lowlevel_bridge.rinbo_bringup_check:main",
+            "five_leg_rl_controller = redrhex_five_leg_mode.five_leg_controller_node:main",
         ],
     },
 )
