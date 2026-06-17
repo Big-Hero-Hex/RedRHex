@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>redrhex_five_leg_mode</name>
+  <version>0.1.0</version>
+  <description>Five-leg RedRhex policy mode for running with Rinbo L3 disabled.</description>
+  <maintainer email="jason@example.com">Jason Liao</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>redrhex_rl_controller</depend>
+  <depend>redrhex_lowlevel_bridge</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

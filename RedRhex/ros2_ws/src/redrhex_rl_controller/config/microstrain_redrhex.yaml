@@ -1,0 +1,16 @@
+microstrain_inertial_driver:
+  ros__parameters:
+    port: "/dev/ttyTHS1"
+    baudrate: 921600
+    set_baud: false
+    poll_port: false
+    device_setup: true
+    save_settings: false
+    frame_id: "base_link"
+    use_enu_frame: true
+    timestamp_source: 2
+    filter_pps_source: 0
+    filter_declination_source: 1
+    filter_declination: 0.0
+    filter_sensor2vehicle_frame_selector: 1
+    filter_sensor2vehicle_frame_transformation_euler: [3.12065, 0.0, 0.0]
