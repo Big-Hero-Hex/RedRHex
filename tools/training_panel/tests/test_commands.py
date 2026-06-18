@@ -97,6 +97,27 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(params.terrain_overrides["terrain_curriculum_enable"], False)
         self.assertEqual(params.terrain_overrides["terrain_curriculum_levels"], [0.0])
 
+    def test_training_params_accept_nested_v2_reward_overrides(self):
+        params = TrainingParams.from_dict(
+            {
+                "task": "Template-Redrhex-Direct-v0",
+                "num_envs": 4,
+                "max_iterations": 8,
+                "device": "cuda:0",
+                "reward_overrides": {
+                    "rew_scale_alive": "0.25",
+                    "v2_reward_scales": {
+                        "velocity_tracking": "5.5",
+                        "energy_per_distance": 0.002,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(params.reward_overrides["rew_scale_alive"], 0.25)
+        self.assertEqual(params.reward_overrides["v2_reward_scales"]["velocity_tracking"], 5.5)
+        self.assertEqual(params.reward_overrides["v2_reward_scales"]["energy_per_distance"], 0.002)
+
     def test_training_params_preserve_tweak_metadata_without_changing_argv(self):
         params = TrainingParams.from_dict(
             {

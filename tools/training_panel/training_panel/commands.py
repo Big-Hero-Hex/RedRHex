@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .config import PanelPaths
+from .reward_overrides import normalize_reward_overrides
 
 
 DEFAULT_TASK = "Template-Redrhex-Direct-v0"
@@ -98,7 +99,7 @@ class TrainingParams:
             resume=bool(data.get("resume", False)),
             checkpoint=str(data["checkpoint"]) if data.get("checkpoint") else None,
             reward_preset_id=str(data.get("reward_preset_id") or "baseline"),
-            reward_overrides={str(k): float(v) for k, v in raw_overrides.items()},
+            reward_overrides=normalize_reward_overrides(raw_overrides),
             terrain_preset_id=str(data.get("terrain_preset_id") or "baseline"),
             terrain_overrides={str(k): _normalize_override_value(v) for k, v in raw_terrain_overrides.items()},
             tweak_source_run_id=str(data["tweak_source_run_id"]) if data.get("tweak_source_run_id") else None,

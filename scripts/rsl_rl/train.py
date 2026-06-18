@@ -181,16 +181,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # Apply reward scale overrides written by the training panel (if any)
+    # Apply reward scale overrides written by the training panel or Reward Agent Lab (if any)
     _override_file = Path(__file__).parents[2] / "tools" / "training_panel" / "active_reward_override.json"
     if _override_file.exists():
         import json as _json
+        from tools.training_panel.training_panel.reward_overrides import apply_reward_overrides
+
         _overrides = _json.loads(_override_file.read_text(encoding="utf-8"))
-        _applied = []
-        for _key, _val in _overrides.items():
-            if hasattr(env_cfg, _key):
-                setattr(env_cfg, _key, float(_val))
-                _applied.append(f"{_key}={_val}")
+        _applied = apply_reward_overrides(env_cfg, _overrides)
         if _applied:
             print(f"[INFO] Training panel reward overrides applied: {', '.join(_applied)}")
 
