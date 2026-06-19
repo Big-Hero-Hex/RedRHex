@@ -88,3 +88,25 @@ class ExperimentStore:
         data = _read_json(self.paths.session_dir(session_id) / "trials.json", {"trials": []})
         trials = data.get("trials") if isinstance(data, dict) else []
         return list(trials) if isinstance(trials, list) else []
+
+    def save_candidates(self, session_id: str, candidates: list[dict[str, Any]]) -> None:
+        _write_json(self.paths.session_dir(session_id) / "candidates.json", {"candidates": candidates})
+
+    def load_candidates(self, session_id: str) -> list[dict[str, Any]]:
+        data = _read_json(self.paths.session_dir(session_id) / "candidates.json", {"candidates": []})
+        candidates = data.get("candidates") if isinstance(data, dict) else []
+        return list(candidates) if isinstance(candidates, list) else []
+
+    def save_evaluations(self, session_id: str, evaluations: list[dict[str, Any]]) -> None:
+        _write_json(self.paths.session_dir(session_id) / "evaluations.json", {"evaluations": evaluations})
+
+    def load_evaluations(self, session_id: str) -> list[dict[str, Any]]:
+        data = _read_json(self.paths.session_dir(session_id) / "evaluations.json", {"evaluations": []})
+        evaluations = data.get("evaluations") if isinstance(data, dict) else []
+        return list(evaluations) if isinstance(evaluations, list) else []
+
+    def save_report(self, session_id: str, report_name: str, report: dict[str, Any]) -> Path:
+        safe_name = _safe_session_id(report_name)
+        path = self.paths.session_dir(session_id) / "reports" / f"{safe_name}.json"
+        _write_json(path, report)
+        return path
