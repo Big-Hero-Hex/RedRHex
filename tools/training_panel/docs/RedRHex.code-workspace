@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"name": "RedRHex",
+			"path": "../../.."
+		},
+		{
+			"name": "test_7_description",
+			"path": "../../../../../Downloads/test_7_description"
+		}
+	],
+	"settings": {
+		"github.copilot.chat.codeGeneration.useInstructionFiles": true
+	}
+}

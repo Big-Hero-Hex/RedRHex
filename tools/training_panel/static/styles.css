@@ -6,6 +6,7 @@
   --text: #1f2523;
   --muted: #64706f;
   --line: #d4dde1;
+  --line-strong: #aebcc1;
   --red: #b7362d;
   --red-dark: #8f241e;
   --green: #16735f;
@@ -15,6 +16,7 @@
   --amber: #8a5a00;
   --amber-bg: #fff0cc;
   --failed-bg: #fae6e4;
+  --failed-border: #ecc6c1;
   --code-bg: #232d30;
   --code-text: #f4f9fa;
   --sidebar-bg: #202b2d;
@@ -34,6 +36,7 @@ html[data-theme="dark"] {
   --text: #edf3ef;
   --muted: #9dacaa;
   --line: #34413f;
+  --line-strong: #526360;
   --red: #e35d52;
   --red-dark: #ff8d84;
   --green: #6fd3b7;
@@ -43,6 +46,7 @@ html[data-theme="dark"] {
   --amber: #f2c56d;
   --amber-bg: #3b2d10;
   --failed-bg: #45201f;
+  --failed-border: #68312d;
   --code-bg: #0d1211;
   --code-text: #e7f2ef;
   --sidebar-bg: #151d1b;
@@ -338,6 +342,14 @@ textarea {
   box-shadow: 0 8px 18px rgba(183, 54, 45, 0.16);
 }
 
+.danger-button:disabled,
+.primary-button:disabled,
+.ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  box-shadow: none;
+}
+
 html[data-theme="dark"] .danger-button:hover {
   background: #5a2927;
 }
@@ -350,6 +362,18 @@ html[data-theme="dark"] .danger-button:hover {
 .status-line a {
   color: var(--blue);
   font-weight: 800;
+}
+
+.gpu-lock-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--failed-border);
+  border-radius: 8px;
+  background: var(--failed-bg);
+  color: var(--text);
 }
 
 .split {
@@ -598,6 +622,19 @@ html[data-theme="dark"] .status-unknown {
     background-color 140ms ease;
 }
 
+.run-card.deleting,
+.run-card.busy {
+  opacity: 0.72;
+}
+
+.run-card.deleting {
+  border-color: var(--failed-border);
+}
+
+.run-card.busy {
+  border-color: var(--line-strong);
+}
+
 .run-card:hover {
   border-color: var(--blue);
   box-shadow: 0 10px 26px rgba(25, 35, 39, 0.12);
@@ -661,6 +698,11 @@ html[data-theme="dark"] .status-unknown {
 .run-actions button {
   padding: 7px 10px;
   background: var(--surface-2);
+}
+
+.run-actions .danger-button {
+  background: var(--failed-bg);
+  color: var(--red-dark);
 }
 
 .small-button {
@@ -794,6 +836,64 @@ html[data-theme="dark"] .status-unknown {
   display: inline-flex;
   align-items: stretch;
   min-width: min(310px, 100%);
+}
+
+.confirm-dialog {
+  width: min(640px, calc(100vw - 32px));
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+}
+
+.confirm-dialog::backdrop {
+  background: rgba(15, 23, 24, 0.48);
+}
+
+.confirm-dialog-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 22px 60px rgba(18, 28, 31, 0.28);
+}
+
+.confirm-dialog-card h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.confirm-dialog-card pre {
+  max-height: min(44vh, 420px);
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.confirm-dialog-input-wrap {
+  display: grid;
+  gap: 7px;
+  font-weight: 800;
+}
+
+.confirm-dialog-input-wrap input {
+  width: 100%;
+}
+
+.confirm-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .bulk-move-group select {
@@ -2359,62 +2459,6 @@ pre {
   color: var(--red-dark);
 }
 
-.terminal-body {
-  display: block;
-  min-height: 100vh;
-}
-
-.terminal-main {
-  min-height: 100vh;
-  padding: 24px;
-}
-
-.terminal-header {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 18px;
-}
-
-.terminal-header p {
-  color: var(--muted);
-  margin-top: 4px;
-  word-break: break-word;
-}
-
-.terminal-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
-}
-
-.terminal-grid {
-  display: grid;
-  grid-template-rows: auto minmax(360px, 1fr);
-  gap: 16px;
-}
-
-.terminal-grid article {
-  min-width: 0;
-}
-
-.terminal-grid pre {
-  max-height: none;
-  margin-top: 6px;
-}
-
-#terminal-output {
-  min-height: 62vh;
-  overflow: auto;
-}
-
-#terminal-command {
-  max-height: 220px;
-  overflow: auto;
-}
-
 .deploy-layout {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
@@ -2445,13 +2489,45 @@ pre {
   margin: 8px 0 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface-2);
+  background: var(--surface-subtle);
   font-size: 13px;
 }
 
 .deploy-artifact-key {
   color: var(--muted);
   font-weight: 700;
+}
+
+.deploy-runtime-status {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.mujoco-playback-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.mujoco-playback-panel .compact-header {
+  margin-bottom: 0;
+}
+
+.mujoco-playback-panel video {
+  width: 100%;
+  max-height: 260px;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #05070a;
+}
+
+.mujoco-playback-panel video:not([src]) {
+  display: none;
 }
 
 .deploy-stage-list {
@@ -2517,4 +2593,60 @@ pre {
   .deploy-layout {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.terminal-body {
+  display: block;
+  min-height: 100vh;
+}
+
+.terminal-main {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.terminal-header {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.terminal-header p {
+  color: var(--muted);
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.terminal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.terminal-grid {
+  display: grid;
+  grid-template-rows: auto minmax(360px, 1fr);
+  gap: 16px;
+}
+
+.terminal-grid article {
+  min-width: 0;
+}
+
+.terminal-grid pre {
+  max-height: none;
+  margin-top: 6px;
+}
+
+#terminal-output {
+  min-height: 62vh;
+  overflow: auto;
+}
+
+#terminal-command {
+  max-height: 220px;
+  overflow: auto;
 }

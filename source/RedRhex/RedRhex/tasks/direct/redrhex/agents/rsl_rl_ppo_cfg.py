@@ -19,7 +19,7 @@ from .. import redrhex_symmetry
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """RedRhex reform PPO config with history actor and asymmetric critic."""
+    """Default RedRhex PPO baseline with policy/history observations only."""
 
     num_steps_per_env = 24
     max_iterations = 2500
@@ -30,7 +30,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     clip_actions = 1.0
     obs_groups = {
         "policy": ["policy", "history"],
-        "critic": ["policy", "history", "critic"],
+        "critic": ["policy", "history"],
     }
 
     policy = RslRlPpoActorCriticCfg(
@@ -109,7 +109,7 @@ class PPORunnerPrivilegedTeacherCfg(RslRlOnPolicyRunnerCfg):
 
 @configclass
 class PPORunnerForwardFastCfg(RslRlOnPolicyRunnerCfg):
-    """Forward-only fast convergence PPO config."""
+    """Forward-only fast convergence PPO config without privileged critic dependency."""
 
     num_steps_per_env = 24
     max_iterations = 1500
@@ -120,7 +120,7 @@ class PPORunnerForwardFastCfg(RslRlOnPolicyRunnerCfg):
     clip_actions = 1.0
     obs_groups = {
         "policy": ["policy", "history"],
-        "critic": ["policy", "history", "critic"],
+        "critic": ["policy", "history"],
     }
 
     policy = RslRlPpoActorCriticCfg(

@@ -10,7 +10,15 @@ from unittest.mock import Mock, patch
 from tools.training_panel.training_panel.commands import TrainingParams, VideoParams
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.history import HistoryStore
-from tools.training_panel.training_panel.processes import EXTERNAL_TRAINING_ID_PREFIX, ProcessInfo, ProcessRegistry, SpawnedProcess
+from tools.training_panel.training_panel.processes import (
+    CudaPreflightError,
+    EXTERNAL_GPU_ID_PREFIX,
+    EXTERNAL_TRAINING_ID_PREFIX,
+    EXTERNAL_VIDEO_ID_PREFIX,
+    ProcessInfo,
+    ProcessRegistry,
+    SpawnedProcess,
+)
 
 
 class ProcessRegistryTests(unittest.TestCase):
@@ -92,6 +100,45 @@ class ProcessRegistryTests(unittest.TestCase):
             record = history.get_run(run["id"])
             self.assertEqual(record["status"], "running")
             self.assertEqual([process["kind"] for process in registry.running_isaac_processes()], ["training"])
+
+    def test_cuda_preflight_blocks_training_before_history_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, cuda_preflight=True)
+            params = TrainingParams.from_dict({"task": "Template-Redrhex-Direct-v0", "num_envs": 4, "max_iterations": 8, "device": "cuda:0"})
+            with (
+                patch.object(ProcessRegistry, "_loaded_nvidia_kernel_version", return_value="580.126.09"),
+                patch.object(ProcessRegistry, "_nvidia_userspace_version", return_value="580.159.03"),
+            ):
+                with self.assertRaises(CudaPreflightError):
+                    registry.queue_training(params)
+
+            self.assertEqual(history.list_runs(), [])
+
+    def test_cuda_preflight_does_not_check_cpu_training(self):
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, cuda_preflight=True)
+            params = TrainingParams.from_dict({"task": "Template-Redrhex-Direct-v0", "num_envs": 4, "max_iterations": 8, "device": "cpu"})
+            with (
+                patch.object(ProcessRegistry, "_loaded_nvidia_kernel_version", side_effect=AssertionError("should not check cuda")),
+                patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=FakeProcess())),
+                patch("threading.Thread") as thread_cls,
+            ):
+                thread_cls.return_value.start = Mock()
+                run = registry.queue_training(params)
+
+            self.assertEqual(history.get_run(run["id"])["status"], "running")
 
     def test_queue_training_waits_behind_active_gpu_process(self):
         class FakeProcess:
@@ -206,6 +253,82 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertNotIn("conda activate", record["deploy_command"])
             self.assertNotIn("env_isaaclab_bin", record["deploy_command"])
             self.assertFalse(record["deploy_options"]["include_mujoco"])
+
+    def test_start_mujoco_playback_records_process_metadata(self):
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            run_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_one"
+            (run_dir / "exported").mkdir(parents=True)
+            onnx = run_dir / "exported" / "policy.onnx"
+            onnx.write_text("onnx", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "created_at": "2026-06-01T10:00:00",
+                    "log_dir": str(run_dir),
+                    "onnx_path": str(onnx),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=FakeProcess())), patch("threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                result = registry.start_mujoco_playback("run_one", mode="record", scenario="forward_mid")
+
+            self.assertTrue(result["id"].startswith("mujoco_record_"))
+            record = history.get_run("run_one")
+            self.assertEqual(record["mujoco_playback_status"], "running")
+            self.assertEqual(record["mujoco_playback_mode"], "record")
+            self.assertEqual(record["mujoco_playback_scenario"], "forward_mid")
+            self.assertEqual(record["mujoco_process_id"], result["id"])
+            self.assertIn("tools.training_panel.mujoco_playback", record["mujoco_command"])
+            self.assertIn("--mode record", record["mujoco_command"])
+            self.assertEqual(registry.running_isaac_processes(), [])
+
+    def test_monitor_mujoco_records_video_report(self):
+        class DoneProcess:
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            run_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_one"
+            artifact_dir = run_dir / "deploy" / "mujoco_playback_mujoco_record_test"
+            artifact_dir.mkdir(parents=True)
+            video = artifact_dir / "mujoco_forward_mid.mp4"
+            video.write_bytes(b"mp4")
+            report = artifact_dir / "mujoco_playback_report.json"
+            report.write_text(
+                json.dumps({"status": "completed", "summary": "ok", "video_path": str(video)}),
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "created_at": "2026-06-01T10:00:00",
+                    "log_dir": str(run_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            registry._monitor_mujoco("run_one", "mujoco_record_test", DoneProcess())
+
+            record = history.get_run("run_one")
+            self.assertEqual(record["mujoco_playback_status"], "completed")
+            self.assertEqual(record["latest_mujoco_video"], str(video))
+            self.assertEqual(record["mujoco_video_report"], str(report))
 
     def test_start_next_queued_training_respects_isaac_settle_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -745,6 +868,23 @@ class ProcessRegistryTests(unittest.TestCase):
             command = "tensorboard --logdir /repo/logs/rsl_rl/redrhex_wheg/2026_run --port 6008"
             self.assertEqual(registry._source_run_id_from_tensorboard_command(command), "2026_run")
 
+    def test_external_tensorboard_ignores_tmux_wrapper_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            log_dir = paths.rsl_rl_log_root / "2026_run"
+            log_dir.mkdir(parents=True)
+            wrapper = f"bash -lc /usr/bin/tmux new-session -d -s tb -- tensorboard --logdir {log_dir}"
+            child = f"python tensorboard --logdir {log_dir} --port 6006"
+            output = f"111 111 Ss {wrapper}\n222 222 Sl {child}\n"
+            with patch(
+                "tools.training_panel.training_panel.processes.subprocess.check_output",
+                return_value=output,
+            ):
+                processes = registry._external_tensorboard_processes()
+            self.assertEqual([process["pid"] for process in processes], [222])
+
     def test_source_run_id_from_training_process_uses_panel_record_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -762,6 +902,58 @@ class ProcessRegistryTests(unittest.TestCase):
             registry = ProcessRegistry(paths, history)
             command = "python scripts/rsl_rl/train.py --task Template-Redrhex-Direct-v0"
             self.assertEqual(registry._source_run_id_from_training_process(123, 123, command), "panel_train")
+
+    def test_source_run_id_from_training_process_prefers_exact_panel_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.ensure_dirs()
+            history = HistoryStore(paths)
+            command = (
+                f"{paths.isaaclab_launcher} -p scripts/rsl_rl/train.py --task Template-Redrhex-Direct-v0 "
+                "--num_envs 4096 --max_iterations 100000 --device cuda:0"
+            )
+            old_log = paths.process_log_dir / "panel_old.log"
+            new_log = paths.process_log_dir / "panel_new.log"
+            old_log.write_text("old training output\n", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "panel_old",
+                    "source": "training_panel",
+                    "status": "interrupted",
+                    "process_log": str(old_log),
+                    "command": command,
+                }
+            )
+            history.add_run(
+                {
+                    "id": "panel_new",
+                    "source": "training_panel",
+                    "status": "queued",
+                    "process_log": str(new_log),
+                    "command": command,
+                }
+            )
+            observed = f"bash -lc set +e exec > >(tee -a {old_log}) 2>&1 {command}"
+            registry = ProcessRegistry(paths, history)
+
+            self.assertEqual(registry._source_run_id_from_training_process(999, 999, observed), "panel_old")
+            self.assertEqual(registry._matching_training_log(999, 999, observed), old_log)
+
+    def test_source_run_id_from_training_process_rejects_ambiguous_command_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            command = (
+                f"{paths.isaaclab_launcher} -p scripts/rsl_rl/train.py --task Template-Redrhex-Direct-v0 "
+                "--num_envs 4 --max_iterations 10 --device cuda:0"
+            )
+            history.add_run({"id": "panel_one", "source": "training_panel", "command": command})
+            history.add_run({"id": "panel_two", "source": "training_panel", "command": command})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._source_run_id_from_training_process(999, 999, command))
 
     def test_external_training_process_maps_to_history_and_debug_log(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -801,6 +993,153 @@ class ProcessRegistryTests(unittest.TestCase):
                 debug = registry.get_process_debug(training["run_id"])
             self.assertIsNotNone(debug)
             self.assertIn("training is still running", debug["log_tail"])
+
+    def test_external_training_process_without_history_still_blocks_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            output = (
+                f"333 333 Sl python {paths.repo_root}/scripts/rsl_rl/train.py "
+                "--task Template-Redrhex-Direct-v0 --num_envs 4 --max_iterations 8 --device cuda:0\n"
+            )
+            with patch(
+                "tools.training_panel.training_panel.processes.subprocess.check_output",
+                return_value=output,
+            ):
+                processes = registry.list_processes()
+
+            self.assertEqual([process["run_id"] for process in processes], [f"{EXTERNAL_TRAINING_ID_PREFIX}333"])
+            self.assertIsNone(processes[0]["source_run_id"])
+            self.assertEqual([process["kind"] for process in processes], ["training"])
+
+    def test_external_gpu_python_process_from_isaaclab_blocks_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            command = f"{paths.isaaclab_root}/python scripts/tutorials/00_sim/create_empty.py --headless"
+            output = f"17627 17619 Rl {command}\n"
+            with (
+                patch.object(ProcessRegistry, "_gpu_device_pids", return_value={17627}),
+                patch("tools.training_panel.training_panel.processes.subprocess.check_output", return_value=output),
+            ):
+                processes = registry.list_processes()
+
+            self.assertEqual([process["run_id"] for process in processes], [f"{EXTERNAL_GPU_ID_PREFIX}17619"])
+            self.assertEqual(processes[0]["kind"], "gpu")
+            self.assertIsNone(processes[0]["source_run_id"])
+
+    def test_external_video_process_is_classified_as_video_not_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "run_one"
+            log_dir.mkdir(parents=True)
+            (log_dir / "model_9.pt").write_text("checkpoint", encoding="utf-8")
+            command = (
+                f"python scripts/rsl_rl/play.py --task Template-Redrhex-Direct-v0 --video "
+                f"--checkpoint {log_dir / 'model_9.pt'}"
+            )
+            output = f"444 444 Ss {command}\n"
+            registry = ProcessRegistry(paths, history)
+            with patch(
+                "tools.training_panel.training_panel.processes.subprocess.check_output",
+                return_value=output,
+            ):
+                processes = registry.list_processes()
+            self.assertEqual([process["kind"] for process in processes], ["video"])
+            self.assertEqual(processes[0]["run_id"], f"{EXTERNAL_VIDEO_ID_PREFIX}444")
+            self.assertEqual(processes[0]["source_run_id"], "run_one")
+
+    def test_panel_owned_tmux_child_is_not_duplicated_as_external_process(self):
+        class FakeProcess:
+            pid = 222
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history)
+            log_file = paths.process_log_dir / "video_one.log"
+            registry._processes["video_one"] = FakeProcess()
+            registry._infos["video_one"] = ProcessInfo(
+                kind="video",
+                pid=222,
+                run_id="video_one",
+                log_file=str(log_file),
+                started_at="2026-05-20T10:00:00",
+                command="panel video command",
+                source_run_id="run_one",
+            )
+            command = (
+                f"bash -lc set +e exec > >(tee -a {log_file}) 2>&1 "
+                "python scripts/rsl_rl/play.py --video --checkpoint /tmp/run_one/model_1.pt"
+            )
+            output = f"223 223 Ss {command}\n"
+            with patch(
+                "tools.training_panel.training_panel.processes.subprocess.check_output",
+                return_value=output,
+            ):
+                processes = registry.list_processes()
+            self.assertEqual([process["run_id"] for process in processes], ["video_one"])
+
+    def test_registered_process_snapshot_includes_gpu_child_pid(self):
+        class FakeProcess:
+            pid = 222
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            info = ProcessInfo(
+                kind="training",
+                pid=222,
+                run_id="panel_live",
+                log_file=str(paths.process_log_dir / "panel_live.log"),
+                started_at="2026-05-20T10:00:00",
+                command="train.py",
+            )
+            with patch("tools.training_panel.training_panel.processes.os.getpgid") as getpgid, patch.object(
+                registry, "_gpu_device_pids", return_value={333, 444}
+            ):
+                getpgid.side_effect = lambda pid: {222: 777, 333: 777, 444: 999}[pid]
+                snapshot = registry._process_info_snapshot(info, FakeProcess())
+            self.assertEqual(snapshot["process_group"], 777)
+            self.assertEqual(snapshot["gpu_pid"], 333)
+            self.assertEqual(snapshot["gpu_pids"], [333])
+
+    def test_completed_process_snapshot_does_not_query_missing_tmux_session(self):
+        class FakeProcess:
+            pid = 222
+
+            def poll(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            info = ProcessInfo(
+                kind="training",
+                pid=222,
+                run_id="panel_done",
+                log_file=str(paths.process_log_dir / "panel_done.log"),
+                started_at="2026-05-20T10:00:00",
+                command="train.py",
+                tmux_session="missing_session",
+            )
+            with patch.object(registry, "_tmux_process_group", side_effect=AssertionError("tmux should not be queried")):
+                snapshot = registry._process_info_snapshot(info, FakeProcess())
+            self.assertEqual(snapshot["returncode"], 0)
+            self.assertNotIn("process_group", snapshot)
 
     def test_tmux_server_title_does_not_count_as_training_process(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -855,6 +1194,50 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(panel["latest_checkpoint"], str(log_dir / "model_9999.pt"))
             self.assertFalse(any(run["id"] == log_dir.name for run in runs))
 
+    def test_reconcile_repairs_completed_panel_stub_from_process_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            run_id = "panel_20260524_124402_128233"
+            process_log = paths.process_log_dir / f"{run_id}.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                "$ bash -lc <<'PANEL_COMMAND'\n"
+                "exec train.py --max_iterations 10\n"
+                "PANEL_COMMAND\n"
+                "Exact experiment name requested from command line: 2026-05-24_12-44-08\n",
+                encoding="utf-8",
+            )
+            exit_file = paths.process_log_dir / f"{run_id}.exit"
+            exit_file.write_text("0", encoding="utf-8")
+            log_dir = paths.rsl_rl_log_root / "2026-05-24_12-44-08_wheg_locomotion_reform_v1"
+            log_dir.mkdir(parents=True)
+            (log_dir / "model_9.pt").write_text("x", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": run_id,
+                    "source": "training_panel",
+                    "created_at": "2026-05-24T22:48:50",
+                    "updated_at": "2026-05-24T22:48:50",
+                    "log_dir": None,
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            with patch("tools.training_panel.training_panel.processes.subprocess.check_output", return_value=""):
+                registry.reconcile_stale_history()
+
+            run = history.get_run(run_id)
+            self.assertEqual(run["status"], "completed")
+            self.assertEqual(run["returncode"], 0)
+            self.assertEqual(run["log_dir"], str(log_dir))
+            self.assertEqual(run["process_log"], str(process_log))
+            self.assertEqual(run["exit_file"], str(exit_file))
+            self.assertEqual(run["command"], "exec train.py --max_iterations 10")
+            self.assertEqual(run["created_at"], "2026-05-24T12:44:02")
+            self.assertEqual(run["started_at"], "2026-05-24T12:44:02")
+            self.assertIn("completed_at", run)
+
     def test_reconcile_persists_running_panel_log_dir_before_exit(self):
         class FakeProcess:
             pid = 12345
@@ -903,6 +1286,47 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(raw["status"], "running")
             self.assertEqual(raw["log_dir"], str(log_dir))
             self.assertEqual(panel["latest_checkpoint"], str(log_dir / "model_1.pt"))
+
+    def test_reconcile_repairs_live_training_stub(self):
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            process_log = paths.process_log_dir / "panel_live.log"
+            process_log.write_text("training output\n", encoding="utf-8")
+            history.add_run({"id": "panel_live", "source": "training_panel"})
+            registry = ProcessRegistry(paths, history)
+            registry._processes["panel_live"] = FakeProcess()
+            registry._infos["panel_live"] = ProcessInfo(
+                kind="training",
+                pid=12345,
+                run_id="panel_live",
+                log_file=str(process_log),
+                started_at="2026-05-17T01:35:27",
+                command="train.py --task Template-Redrhex-Direct-v0",
+                tmux_session="redrhex_panel_live",
+                attach_command="tmux attach -t redrhex_panel_live",
+                exit_file=str(paths.process_log_dir / "panel_live.exit"),
+            )
+
+            with patch.object(registry, "_process_group_for_info", return_value=777), patch.object(
+                registry, "_gpu_pids_for_group", return_value=[888]
+            ), patch("tools.training_panel.training_panel.processes.subprocess.check_output", return_value=""):
+                registry.reconcile_stale_history()
+
+            raw = next(record for record in history._load_data()["runs"] if record["id"] == "panel_live")
+            self.assertEqual(raw["status"], "running")
+            self.assertEqual(raw["process_log"], str(process_log))
+            self.assertEqual(raw["process_group"], 777)
+            self.assertEqual(raw["gpu_pid"], 888)
+            self.assertEqual(raw["gpu_pids"], [888])
+            self.assertEqual(raw["tmux_session"], "redrhex_panel_live")
 
     def test_reconcile_persists_fresh_discovered_log_before_exact_name(self):
         class FakeProcess:

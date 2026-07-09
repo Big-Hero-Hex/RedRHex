@@ -1,4 +1,4 @@
-import { DEFAULT_MACHINE_ID, SUPABASE_URL } from "./config.js?v=3.4.2-folder-video-fixes";
+import { DEFAULT_MACHINE_ID, SUPABASE_URL } from "./config.js?v=3.4.10-sync-health";
 import {
   createSignedVideoUrl,
   currentUser,
@@ -11,15 +11,15 @@ import {
   signOut,
   update,
   upsert,
-} from "./api.js?v=3.4.2-folder-video-fixes";
-import { createRemoteRealtime } from "./realtime.js?v=3.4.2-folder-video-fixes";
+} from "./api.js?v=3.4.10-sync-health";
+import { createRemoteRealtime } from "./realtime.js?v=3.4.10-sync-health";
 import {
   compareHistoryRuns,
   historyRunsForSnapshot,
   jobClientRequestId,
   normalizeHistorySort,
   realRunConfirmsJob,
-} from "./history_sync.js?v=3.4.2-folder-video-fixes";
+} from "./history_sync.js?v=3.4.10-sync-health";
 import {
   REWARD_FIELDS,
   TERRAIN_DEFAULT_VALUES,
@@ -36,6 +36,7 @@ import {
   friendlyErrorMessage,
   formatRelativeTime,
   hasActiveRemoteWork,
+  isMachineFresh,
   jobDisplayStatus,
   jobRunId,
   latestFinishedTweakRun,
@@ -58,7 +59,7 @@ import {
   videoArtifactForCheckpoint,
   videoStateForCheckpoint,
   videoStateForRun,
-} from "./core.js?v=3.4.2-folder-video-fixes";
+} from "./core.js?v=3.4.10-sync-health";
 
 const PHONE_MEDIA = window.matchMedia
   ? window.matchMedia("(max-width: 720px)")
@@ -66,8 +67,8 @@ const PHONE_MEDIA = window.matchMedia
 
 const TEXT_AUTOSAVE_DELAY_MS = 350;
 const THEME_KEY = "redrhex_to_go_theme";
-const CHILD_RELEASE_VERSION = "3.4.2";
-const CHILD_RELEASE_NAME = "Folder + Video Fixes";
+const CHILD_RELEASE_VERSION = "3.4.10";
+const CHILD_RELEASE_NAME = "Sync Health Repair";
 const VIEW_IDS = ["train", "rewards", "terrain", "history", "connection", "dashboard"];
 const NOTIFICATION_EVENTS = [
   ["notify_training_converged", "Converged", "Reward improvement has flattened."],
@@ -1386,6 +1387,7 @@ function runCard(run) {
   const params = run.params || {};
   const terrainPreset = run.terrain_preset_id || params.terrain_preset_id || "baseline";
   const videoState = resolvedVideoStatus(run, video.state);
+  const syncState = runSyncState(run, video);
   const convLabel = convergenceLabel(run);
   const pending = Boolean(run.pending_confirmation);
   return `
@@ -1397,7 +1399,7 @@ function runCard(run) {
         ${convLabel ? `<span class="badge good">${escapeHtml(convLabel)}</span>` : ""}
       </span>
       <small>${escapeHtml(run.folder || "Uncategorized")} - ${escapeHtml(formatRelativeTime(run.created_at))}</small>
-      <small>${pending ? "waiting for mother confirmation" : run.latest_checkpoint ? "checkpoint ready" : "no checkpoint"} - video ${escapeHtml(videoState)} - terrain ${escapeHtml(terrainPreset)}</small>
+      <small>${pending ? "waiting for mother confirmation" : run.latest_checkpoint ? "checkpoint ready" : "no checkpoint"} - video ${escapeHtml(videoState)} - ${escapeHtml(syncState.label)} - terrain ${escapeHtml(terrainPreset)}</small>
     </button>
   `;
 }
@@ -1441,6 +1443,7 @@ function runDetailsGrid(run) {
   const terrainPreset = run.terrain_preset_id || params.terrain_preset_id || "baseline";
   const statusDesc = statusDescription("run", run.status);
   const convLabel = convergenceLabel(run);
+  const syncState = runSyncState(run, video);
   return `
     <article class="run-info-card">
       <span>Run State</span>
@@ -1462,6 +1465,11 @@ function runDetailsGrid(run) {
       </div>
     </article>
     <article class="run-info-card">
+      <span>Team Sync</span>
+      <strong class="${statusTone(syncState.tone)}">${escapeHtml(syncState.label)}</strong>
+      <small>${escapeHtml(syncState.detail)}</small>
+    </article>
+    <article class="run-info-card">
       <span>Training Recipe</span>
       <div class="run-info-list">
         <small>Reward <strong>${escapeHtml(rewardPreset)}</strong> <em>${rewardOverrides} override${rewardOverrides === 1 ? "" : "s"}</em></small>
@@ -1469,6 +1477,38 @@ function runDetailsGrid(run) {
       </div>
     </article>
   `;
+}
+
+function runSyncState(run, video = null) {
+  const machine = state.snapshot.targetMachine || state.snapshot.machine || null;
+  const syncError = String(machine?.last_sync_error || "").trim();
+  const videoState = video?.state || videoStateForRun(run, state.snapshot.artifacts).state;
+  if (syncError) {
+    return {
+      label: "sync failed",
+      tone: "failed",
+      detail: friendlyErrorMessage(syncError),
+    };
+  }
+  if (!machine || !isMachineFresh(machine)) {
+    return {
+      label: "sync delayed",
+      tone: "running",
+      detail: "Mother worker heartbeat is stale, so child data may lag.",
+    };
+  }
+  if ((run.latest_video || run.video_status === "completed") && videoState === "uploading") {
+    return {
+      label: "uploading video",
+      tone: "running",
+      detail: "Video is recorded on Mother and is being copied to team storage.",
+    };
+  }
+  return {
+    label: "synced",
+    tone: "completed",
+    detail: machine.last_sync_at ? `Worker synced ${formatRelativeTime(machine.last_sync_at)}.` : "Worker sync is healthy.",
+  };
 }
 
 function plainObject(value) {
@@ -1713,7 +1753,7 @@ function teamVideoSection(run) {
           <button data-action="load-video" data-run-id="${escapeHtml(run.id)}" data-path="${escapeHtml(videoArtifact.storage_path)}">Refresh Secure Link</button>
           <button data-action="copy-video-path" data-path="${escapeHtml(videoArtifact.storage_path)}">Copy Storage Path</button>
         </div>` : video.state === "uploading" ? `
-        <p class="muted">Video for ${escapeHtml(selectedLabel)} exists locally and is uploading to team storage.</p>
+        <p class="muted">Video for ${escapeHtml(selectedLabel)} was recorded on Mother and is uploading to team storage.</p>
         <button data-action="refresh">Refresh Status</button>
       ` : video.state === "recordable" ? `
         <p class="muted">No video for ${escapeHtml(selectedLabel)} yet.</p>
@@ -1957,6 +1997,8 @@ function syncDiagnosticsCard() {
         <small>Realtime <strong>${escapeHtml(realtime.status || "off")}</strong></small>
         <small>Worker sync <strong>${escapeHtml(formatRelativeTime(machine.last_sync_at))}</strong></small>
         <small>Changed <strong>${escapeHtml(String(summary.runs_changed ?? "-"))}</strong> · tombstones <strong>${escapeHtml(String(summary.tombstones ?? "-"))}</strong></small>
+        <small>Artifacts <strong>${escapeHtml(String(summary.artifacts ?? "-"))}</strong> · repairs <strong>${escapeHtml(String(summary.artifact_repair_runs ?? "-"))}</strong></small>
+        <small>Videos uploaded <strong>${escapeHtml(String(summary.videos_uploaded ?? "-"))}</strong> · reused <strong>${escapeHtml(String(summary.storage_reused ?? "-"))}</strong></small>
       </div>
       ${machine.last_sync_error || realtime.error ? `<p class="muted">${escapeHtml(machine.last_sync_error || realtime.error)}</p>` : ""}
     </article>
@@ -2052,7 +2094,8 @@ function patchRunCardsInPlace() {
     if (lines[0]) lines[0].textContent = `${run.folder || "Uncategorized"} - ${formatRelativeTime(run.created_at)}`;
     const params = run.params || {};
     const videoState = resolvedVideoStatus(run, video.state);
-    if (lines[1]) lines[1].textContent = `${run.latest_checkpoint ? "checkpoint ready" : "no checkpoint"} - video ${videoState} - terrain ${run.terrain_preset_id || params.terrain_preset_id || "baseline"}`;
+    const syncState = runSyncState(run, video);
+    if (lines[1]) lines[1].textContent = `${run.latest_checkpoint ? "checkpoint ready" : "no checkpoint"} - video ${videoState} - ${syncState.label} - terrain ${run.terrain_preset_id || params.terrain_preset_id || "baseline"}`;
   });
 }
 

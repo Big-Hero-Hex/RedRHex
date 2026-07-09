@@ -13,6 +13,14 @@ Format:
 
 Nothing yet. Nice and suspiciously calm.
 
+## V3.4.3 History Sync Repair
+
+### Fixed
+
+- Child history now loads machine-scoped runs, jobs, tombstones, folders, and artifacts from Supabase instead of taking a small global slice and filtering afterward.
+- Mother-side cleared names, notes, and folders now clear stale child/Supabase metadata instead of being silently omitted from sync.
+- Mother-side folder deletion now leaves a local tombstone so stale remote `team_folders` rows do not resurrect deleted folders.
+
 ## V3.4.2 Folder Sync + Notification Reliability
 
 ### Added

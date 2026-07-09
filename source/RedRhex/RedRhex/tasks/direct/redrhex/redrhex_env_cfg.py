@@ -114,7 +114,7 @@ REDRHEX_CFG = ArticulationCfg(
             disable_gravity=False,              # 保持重力（不能飛！）
             retain_accelerations=False,         # 不保留加速度（節省記憶體）
             linear_damping=0.05,                 # 線性阻尼：減緩直線運動，數值越大移動越慢
-            angular_damping=0.1,                # 角阻尼：減緩旋轉運動
+            angular_damping=0.10,               # 角阻尼：減緩旋轉運動
             max_linear_velocity=10.0,           # 最大移動速度（公尺/秒）
             max_angular_velocity=20.0,          # 最大旋轉速度（弧度/秒），要夠大才能讓腿轉動
             max_depenetration_velocity=1.0,     # 穿透恢復速度：當物體意外重疊時，分開的速度
@@ -353,7 +353,12 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     critic_privileged_observation_space = 47
     teacher_observation_space = observation_space + history_observation_space + critic_privileged_observation_space
 
-    # state_space 對 DirectRLEnv 來說就是 asymmetric critic 的特權觀測空間
+    # Advanced policy modes are preserved, but the default path is normal PPO.
+    teacher_student_enable = False
+    distillation_enable = False
+
+    # state_space keeps privileged observations available for explicit teacher
+    # configs; the default PPO config ignores it and uses policy/history only.
     state_space = critic_privileged_observation_space
 
     # =========================================================================
@@ -491,20 +496,22 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # =========================================================================
     
     # -------------------------------------------------------------------------
-    # 【預設】rough terrain generator
-    # 以課程化難度生成 rough / wave / stairs / boxes 的混合地形，
-    # 讓策略從一開始就對真機更常見的高度變化與接觸不確定性有適應能力。
+    # 【預設】flat plane baseline
+    # Recovery/default training starts on a deterministic plane. Rough terrain
+    # generation is preserved below and can be enabled explicitly with
+    # terrain.terrain_type="generator" plus terrain_curriculum_enable=True.
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
-        terrain_type="generator",
+        terrain_type="plane",
         terrain_generator=REDRHEX_ROUGH_TERRAINS_CFG,
         collision_group=-1,
-        max_init_terrain_level=1,
+        max_init_terrain_level=0,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
-            static_friction=1.2,   # 提高：橡膠 vs 抖青 約 0.8~1.2
-            dynamic_friction=1.0,  # 提高
+            static_friction=1.2,
+            dynamic_friction=1.0,
+            restitution=0.0,
         ),
         debug_vis=False,
     )
@@ -740,9 +747,9 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     main_drive_vel_scale = 8.0
     
     # ABAD 關節：目標位置偏移（弧度）
-    # AI 輸出 [-1, +1] × 0.3 = 實際角度偏移 [-0.3, +0.3] rad ≈ ±17 度
-    # 這是腿可以向外/向內擺動的範圍
-    abad_pos_scale = 0.61096  # 約等於 35 度
+    # AI 輸出 [-1, +1] × abad_pos_scale = 相對於 init_state 休止角的目標偏移。
+    # 最終寫入模擬前仍會用 abad_pos_limit_rad 做物理安全夾限。
+    abad_pos_scale = 0.60  # Conservative policy scale; final physical clamp is ±60 deg.
 
     # =========================================================================
     # 【速度命令範圍】定義機器人可以執行的移動指令
@@ -798,7 +805,7 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # Curriculum（Hydra 可直接覆寫：stage=1/2/3/4/5）
     # -------------------------------------------------------------------------
     curriculum_enable = True
-    stage = 5  # 1:Forward-only, 2:Lateral-only, 3:Diagonal-only, 4:Yaw-only, 5:Mixed-skills
+    stage = 1  # Default recovery baseline: 1=Forward-only, 5=Mixed-skills
     curriculum_auto_progress = False
     curriculum_stage1_steps = 800_000
     curriculum_stage2_steps = 1_800_000
@@ -891,7 +898,8 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     diag_abad_bias_scale = 0.20
     diag_abad_policy_blend = 0.70
     yaw_abad_action_scale = 0.55
-    abad_pos_limit = 0.60
+    abad_pos_limit_rad = math.radians(60.0)  # Physical safety clamp: ±60 deg from rest pose.
+    abad_pos_limit = abad_pos_limit_rad  # backward-compatible alias
 
     # -------------------------------------------------------------------------
     # Play 相容保護（舊 checkpoint 在新版控制邏輯下仍可穩定前進）
@@ -943,7 +951,7 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     stage_yaw_abad_action_scale = [0.38, 0.40, 0.46, 0.36, 0.46]
     stage_yaw_abad_stance_bias = [0.06, 0.08, 0.10, 0.11, 0.12]
     stage_yaw_abad_policy_blend = [0.85, 0.78, 0.70, 0.42, 0.56]
-    stage_abad_pos_limit = [0.48, 0.62, 0.58, 0.56, 0.62]
+    stage_abad_pos_limit = [math.radians(60.0)] * 5
     # Stage1 暖機不宜過長，避免有效控制長時間被壓小
     stage_action_warmup_steps = [30, 120, 100, 140, 120]
     # 防遺忘：Forward 模式下，後續 stage 僅保留小殘差，避免破壞穩定直走
@@ -1288,14 +1296,14 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     stage_fall_tilt_threshold = [1.80, 1.80, 1.72, 1.72, 1.64]
 
     # -------------------------------------------------------------------------
-    # G4: 能耗與動作平滑懲罰 ★★★ 大幅降低！★★★
+    # G4: Deprecated energy/action-rate scales
     # -------------------------------------------------------------------------
-    # 參考 Cassie：能耗懲罰應該很輕，避免機器人學會「省力不動」
-    rew_scale_torque = -0.000001  # ★ 降低 10 倍
-    rew_scale_action_rate = -0.01  # ★ 從 -0.05 降低到 -0.01
-    rew_scale_joint_acc = -1e-8  # ★ 降低 25 倍
+    # Energy is now handled only by v2_reward_scales["energy_per_distance"].
+    rew_scale_torque = 0.0
+    rew_scale_action_rate = 0.0
+    rew_scale_joint_acc = 0.0
     rew_scale_dof_vel = 0.0
-    rew_scale_abad_action_rate = -0.02  # ★ 從 -0.1 降低到 -0.02
+    rew_scale_abad_action_rate = 0.0
 
     # -------------------------------------------------------------------------
     # G5: RHex 步態專用獎勵 ★★★ 簡化！太多獎勵會互相衝突 ★★★
@@ -1477,45 +1485,47 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # -------------------------------------------------------------------------
     # Domain randomization 主開關
     # -------------------------------------------------------------------------
-    domain_randomization_enable = True
+    # Safe recovery baseline: all advanced randomization is opt-in. The ranges
+    # below remain available for explicit sim-to-real / robustness runs.
+    domain_randomization_enable = False
 
     # 質量/摩擦隨機化（優先嘗試物理層；不支援時自動退回控制層 proxy）
     dr_try_physical_material_randomization = False
-    dr_randomize_mass = True
+    dr_randomize_mass = False
     dr_mass_range = [0.90, 1.10]
-    dr_randomize_friction = True
+    dr_randomize_friction = False
     dr_friction_range = [0.50, 1.25]
 
     # 致動器強度隨機化（直接作用於控制目標）
-    dr_randomize_actuator_strength = True
+    dr_randomize_actuator_strength = False
     dr_main_actuator_strength_range = [0.85, 1.15]
     dr_abad_actuator_strength_range = [0.85, 1.15]
 
     # 腿級故障/降級隨機化：模擬齒輪退化、電壓不足、單腿受損
-    dr_fault_enable = True
+    dr_fault_enable = False
     dr_fault_probability = 0.12
     dr_fault_strength_range = [0.15, 0.60]
     dr_fault_max_legs = 1
     dr_fault_apply_to_abad = True
 
     # 觀測延遲與噪音
-    dr_obs_latency_enable = True
+    dr_obs_latency_enable = False
     dr_obs_latency_steps_range = [0, 2]
-    dr_obs_noise_enable = True
+    dr_obs_noise_enable = False
     dr_obs_noise_bias_enable = False
 
     # 隨機推擠（episode 內）
-    dr_push_enable = True
+    dr_push_enable = False
     dr_push_interval_s = 12.0
     dr_push_probability = 0.5
     dr_push_max_vel_xy = 0.6
     dr_push_max_vel_z = 0.0
 
     # 地形課程（若 terrain generator 可用，隨 stage 遞進）
-    terrain_curriculum_enable = True
+    terrain_curriculum_enable = False
     terrain_curriculum_levels = [0.0, 0.08, 0.20, 0.35, 0.55]  # flat -> mild -> medium -> rough
-    stage_push_probability_scale = [0.0, 0.2, 0.4, 0.7, 1.0]
-    stage_fault_probability_scale = [0.0, 0.0, 0.35, 0.70, 1.0]
+    stage_push_probability_scale = [0.0, 0.0, 0.0, 0.0, 0.0]
+    stage_fault_probability_scale = [0.0, 0.0, 0.0, 0.0, 0.0]
 
     # -------------------------------------------------------------------------
     # 舊版參數別名（向後相容）
@@ -1535,7 +1545,7 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # =========================================================================
     # 真實世界的感測器都有誤差，訓練時加入噪音讓 AI 更能適應
     
-    add_noise = True             # 啟用噪音
+    add_noise = False            # Recovery baseline: observation noise is opt-in
     noise_level = 1.0            # 噪音強度倍數
 
     # 各種觀測值的噪音大小
@@ -1572,9 +1582,8 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
         "tripod_support": True,   # 確保至少一組 Tripod 著地
         "body_contact": True,     # 摔倒懲罰
         
-        # ★ 平滑性獎勵 ★
-        "action_rate": True,      # 動作平滑
-        "torque": True,           # 能耗懲罰
+        # ★ 單一節能獎勵 ★
+        "energy_per_distance": True,
         
         # ★ 防消極獎勵 ★
         "alive": True,            # 存活獎勵
@@ -1615,7 +1624,6 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
 
         # 負向懲罰
         "stall_penalty": -2.0,
-        "action_smooth": -0.01,
         "fall": -8.0,
         "fall_height_threshold": 0.08,
         "fall_tilt_threshold": 1.70,
@@ -1638,21 +1646,9 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
         "lin_tracking_sigma": 0.30,
         "yaw_tracking_sigma": 0.35,
 
-        # =====================================================================
-        # 節能 reward（Energy-aware rewards）
-        # 設計原則：reward 只看「馬達能耗 / 有效位移」這個最終結果，
-        #          不直接把 spring 吸能/釋能 proxy 寫進 reward。
-        #          若彈簧腳真的有優勢，policy 會自然學出更低的單位位移能耗。
-        # =====================================================================
-        # E1: 單位有效位移能耗 — 每推進一段距離所需的馬達能耗越低越好
-        #     step-wise 形式下：(|τ*ω| * dt) / (progress * dt) = |τ*ω| / progress
-        "power_efficiency": 0.3,
-        "power_efficiency_eps": 0.1,       # 位移/進度分母的 ε，防除零
-        "power_efficiency_tanh_scale": 500.0,
-
-        # E2: 力矩平方懲罰（很輕，只防極端）
-        "torque_penalty": -0.0001,
-        "torque_penalty_abad_weight": 0.5, # ABAD 力矩懲罰的相對權重
+        # Single energy reward: -weight * clamp(energy / positive command-direction distance).
+        # Keep this secondary to command tracking and gait rewards.
+        "energy_per_distance": 0.001,
     }
 
     # =========================================================================
@@ -1661,9 +1657,10 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # 這些值必須與 REDRHEX_CFG.actuators["damper"] 的設定一致
     damper_stiffness = 200.0    # N·m/rad — 扭轉彈簧剛度
     damper_damping = 20.0       # N·m·s/rad — 阻尼係數
-    robot_mass_kg = 14.0        # 整機質量（用於 CoT 計算）
-    energy_velocity_yaw_radius = 0.18  # m，將 yaw rate 換算成等效線速度
-    energy_min_command_motion = 0.05   # m/s，低於此值不啟用位移型節能 reward（例如 pure yaw）
+    robot_mass_kg = 14.0        # 整機質量（保留供 diagnostics / eval 使用）
+    energy_per_distance_max = 500.0
+    energy_distance_eps = 1e-4
+    energy_command_threshold = 0.05
     main_drive_torque_estimate_damping = 1.0
     main_drive_torque_estimate_limit = 15.0
     abad_torque_estimate_stiffness = 40.0
@@ -1718,25 +1715,25 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
     stage_diag_reward_multiplier = [0.0]
     stage_yaw_reward_multiplier = [0.0]
 
-    # Moderate DR: keep sim-to-real robustness, but don't overburden fast training.
-    domain_randomization_enable = True
+    # Recovery baseline stays deterministic; enable these flags explicitly for robustness runs.
+    domain_randomization_enable = False
     dr_try_physical_material_randomization = False
-    dr_randomize_mass = True
+    dr_randomize_mass = False
     dr_mass_range = [0.97, 1.03]
-    dr_randomize_friction = True
+    dr_randomize_friction = False
     dr_friction_range = [0.90, 1.10]
-    dr_randomize_actuator_strength = True
+    dr_randomize_actuator_strength = False
     dr_main_actuator_strength_range = [0.95, 1.05]
     dr_abad_actuator_strength_range = [0.95, 1.05]
     dr_fault_enable = False
     dr_obs_latency_enable = False
     dr_obs_latency_steps_range = [0, 0]
-    dr_obs_noise_enable = True
+    dr_obs_noise_enable = False
     dr_push_enable = False
     terrain_curriculum_enable = False
     stage_push_probability_scale = [0.0]
 
-    add_noise = True
+    add_noise = False
     noise_level = 0.8
     noise_lin_vel = 0.03
     noise_ang_vel = 0.06
@@ -1788,7 +1785,6 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
         "height_low_penalty": 1.2,
         "leg_moving": 0.35,
         "stall_penalty": -2.5,
-        "action_smooth": -0.015,
         "fall": -8.0,
         "fall_height_threshold": 0.085,
         "fall_tilt_threshold": 1.70,
@@ -1806,10 +1802,6 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
         "yaw_cheat_tilt_thresh": 0.30,
         "lin_tracking_sigma": 0.30,
         "yaw_tracking_sigma": 0.35,
-        # 節能 reward — ForwardFast 先用低權重，穩定後再調高
-        "power_efficiency": 0.15,
-        "power_efficiency_eps": 0.1,
-        "power_efficiency_tanh_scale": 500.0,
-        "torque_penalty": -0.00005,
-        "torque_penalty_abad_weight": 0.5,
+        # Single energy reward, kept lower for this fast forward-only profile.
+        "energy_per_distance": 0.0005,
     }

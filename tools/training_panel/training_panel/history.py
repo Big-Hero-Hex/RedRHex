@@ -49,6 +49,10 @@ def _has_value(value: Any) -> bool:
     return value not in (None, "", [], {})
 
 
+def _folder_key(name: Any) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip()).lower()
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     if not value:
         return None
@@ -130,12 +134,13 @@ class HistoryStore:
         self.paths.ensure_dirs()
 
     def _load_data(self) -> dict:
-        data = _read_json(self.paths.history_file, {"runs": [], "folders": [], "deleted_runs": []})
+        data = _read_json(self.paths.history_file, {"runs": [], "folders": [], "deleted_runs": [], "deleted_folders": []})
         if not isinstance(data, dict):
-            data = {"runs": [], "folders": [], "deleted_runs": []}
+            data = {"runs": [], "folders": [], "deleted_runs": [], "deleted_folders": []}
         data.setdefault("runs", [])
         data.setdefault("folders", [])
         data.setdefault("deleted_runs", [])
+        data.setdefault("deleted_folders", [])
         return data
 
     def _save_data(self, data: dict) -> None:
@@ -402,6 +407,49 @@ class HistoryStore:
         existing.append(entry)
         data["deleted_runs"] = existing
 
+    def _forget_deleted_folder(self, data: dict, folder: str) -> None:
+        key = _folder_key(folder)
+        if not key:
+            return
+        data["deleted_folders"] = [
+            entry
+            for entry in data.get("deleted_folders", [])
+            if _folder_key(entry.get("name") if isinstance(entry, dict) else entry) != key
+        ]
+
+    def _remember_deleted_folder(self, data: dict, folder: str) -> None:
+        name = re.sub(r"\s+", " ", str(folder or "").strip())
+        key = _folder_key(name)
+        if not key:
+            return
+        existing = [
+            entry
+            for entry in data.get("deleted_folders", [])
+            if _folder_key(entry.get("name") if isinstance(entry, dict) else entry) != key
+        ]
+        existing.append(
+            {
+                "name": name,
+                "folder_key": key,
+                "deleted_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        data["deleted_folders"] = existing
+
+    def deleted_folder_tombstones(self) -> list[dict]:
+        tombstones = []
+        for entry in self._load_data().get("deleted_folders", []):
+            if isinstance(entry, str):
+                tombstone = {"name": entry, "folder_key": _folder_key(entry)}
+            elif isinstance(entry, dict):
+                tombstone = dict(entry)
+                tombstone["folder_key"] = tombstone.get("folder_key") or _folder_key(tombstone.get("name"))
+            else:
+                continue
+            if tombstone.get("folder_key"):
+                tombstones.append(tombstone)
+        return tombstones
+
     def deleted_run_tombstones(self, run_ids: list[str] | None = None) -> list[dict]:
         wanted = {str(run_id) for run_id in (run_ids or []) if str(run_id)}
         tombstones = []
@@ -494,6 +542,7 @@ class HistoryStore:
         if len(folder) > 80:
             raise ValueError("folder name must be 80 characters or fewer")
         data = self._load_data()
+        self._forget_deleted_folder(data, folder)
         folders = {str(existing).strip() for existing in data.get("folders", []) if str(existing).strip()}
         folders.add(folder)
         data["folders"] = sorted(folders, key=str.lower)
@@ -516,6 +565,7 @@ class HistoryStore:
                 record = {**record, "folder": None, "updated_at": now}
                 moved_count += 1
             records.append(record)
+        self._remember_deleted_folder(data, folder)
         data["folders"] = sorted(folders, key=str.lower)
         data["runs"] = records
         self._save_data(data)
@@ -543,6 +593,8 @@ class HistoryStore:
         folders = {str(folder).strip() for folder in data.get("folders", []) if str(folder).strip()}
         folders.discard(old_folder)
         folders.add(new_folder)
+        self._remember_deleted_folder(data, old_folder)
+        self._forget_deleted_folder(data, new_folder)
         now = datetime.now().isoformat(timespec="seconds")
         moved_count = 0
         records = []
@@ -630,6 +682,12 @@ class HistoryStore:
             return ""
         path = self._note_path(run_id)
         return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def note_exists(self, run_id: str) -> bool:
+        run_id = self.canonical_run_id(run_id)
+        if self._is_deleted_run(self._load_data(), run_id):
+            return False
+        return self._note_path(run_id).exists()
 
     def set_note(self, run_id: str, text: str) -> None:
         run_id = self.canonical_run_id(run_id)
@@ -939,19 +997,23 @@ class HistoryStore:
             **diff,
         }
 
-    def get_folders(self) -> list[str]:
-        """Return sorted list of explicit and run-assigned folder names."""
+    def folders_for_runs(self, runs: list[dict]) -> list[str]:
+        """Return sorted explicit and run-assigned folder names for a known run snapshot."""
         data = self._load_data()
         folders: set[str] = {
             str(folder).strip()
             for folder in data.get("folders", [])
             if str(folder).strip()
         }
-        for run in self.list_runs():
+        for run in runs:
             folder = run.get("folder")
             if folder and folder.strip():
                 folders.add(folder.strip())
         return sorted(folders, key=str.lower)
+
+    def get_folders(self) -> list[str]:
+        """Return sorted list of explicit and run-assigned folder names."""
+        return self.folders_for_runs(self.list_runs())
 
     def delete_preview(self, run_id: str) -> dict | None:
         run = self.get_run(run_id)

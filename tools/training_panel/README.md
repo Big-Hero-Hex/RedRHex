@@ -1,8 +1,8 @@
 # RedRHex Training Panel
 
-Local admin panel and V3.4.2 remote-control system for launching RSL-RL training runs, tuning rewards/terrain, viewing run history, keeping notes, coordinating team access, and sending requester-scoped notifications.
+Local admin panel and V3.4.10 remote-control system for launching RSL-RL training runs, tuning rewards/terrain, viewing run history, keeping notes, coordinating team access, and sending requester-scoped notifications.
 
-**Version:** 3.4.2 Folder + Video Fixes
+**Version:** 3.4.10 Sync Health Repair
 **Published by:** BioRoLa ABAD RHex Team
 **Credits:** Jason Liao and Jacob Yang
 
@@ -12,6 +12,7 @@ Local admin panel and V3.4.2 remote-control system for launching RSL-RL training
 - [Manual 中文](docs/MANUAL_ZH.md)
 - [RedRHex To Go 中文手冊](docs/REDRHEX_TO_GO_MANUAL_ZH.md)
 - [Deploy Readiness Guide](docs/DEPLOY_READINESS_GUIDE.md)
+- [Training Panel Porting Guide for AI Agents](docs/PANEL_PORTING_AGENT_GUIDE.md)
 - [Changelog EN](docs/CHANGELOG_EN.md)
 - [更新紀錄 中文](docs/CHANGELOG_ZH.md)
 
@@ -22,6 +23,14 @@ Local-only:
 ```bash
 python -m tools.training_panel --host 127.0.0.1 --port 8080
 ```
+
+Disposable smoke pipeline:
+
+```bash
+python -m tools.training_panel.smoke_pipeline
+```
+
+This launches a one-iteration `disposable_smoke_<timestamp>` training run and verifies the checkpoint, TensorBoard event, saved params, and local History discovery. Add `--dry-run` to inspect the Isaac command first, `--panel-url http://127.0.0.1:8080` to verify the live panel API, `--include-export` to check policy export, or `--include-video --video-length 120` to check video creation.
 
 The panel waits a short settle window before launching the next queued Isaac job after a
 training/play/video/export process exits. Override it only when debugging launcher timing:
@@ -228,7 +237,7 @@ History actions:
 - `TensorBoard` opens a pending browser tab immediately, starts TensorBoard for that run's log directory, then points the tab at the launched port.
 - `Play` starts `scripts/rsl_rl/play.py` with the latest checkpoint and selects that process in the Process Console.
 - `Export ONNX` exports the latest checkpoint to `exported/policy.onnx` and selects that export process in the Process Console.
-- `Deploy` validates exported policies for Jetson ROS2 readiness with staged export integrity, ONNX, runtime, contract, safety, optional ROS mock, and MuJoCo advisory checks. Readiness validation runs in the panel Python runtime, while Isaac export/training/play/video still use the Isaac launcher path. Reports are saved under each run's `deploy/` folder.
+- `Deploy` validates exported policies for Jetson ROS2 readiness with staged export integrity, ONNX, runtime, contract, safety, optional ROS mock, calibrated MuJoCo rollout smoke checks, native MuJoCo viewer playback, and MuJoCo MP4 recording. Readiness validation runs in the panel Python runtime, while Isaac export/training/play/video still use the Isaac launcher path. Reports and generated rollout artifacts are saved under each run's `deploy/` folder.
 - `Compact Run` deletes old top-level `model_*.pt` checkpoints after confirmation, keeping the highest-iteration checkpoint and preserving videos, TensorBoard logs, params, notes, and exported policy files.
 - `Recorded Result` embeds the latest MP4 and records one high-quality default video. After a successful panel-launched training run, the panel automatically records the same high-quality result.
 - `Resume` sends the latest checkpoint back to the Train form so you can choose new env/iteration values before continuing training.

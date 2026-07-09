@@ -10,6 +10,8 @@ PRESETS: dict[str, dict] = {
     "default": {"window_iterations": 200, "min_improvement_pct": 2.0},
     "strict":  {"window_iterations": 400, "min_improvement_pct": 1.0},
 }
+CONVERGENCE_MAX_EVENT_BYTES = 128 * 1024 * 1024
+CONVERGENCE_MAX_SCALARS = 2000
 
 _ALLOWED_FIELDS = {"enabled", "preset", "window_iterations", "min_improvement_pct",
                    "primary_tag", "min_iterations", "cooldown_minutes", "auto_record_video"}
@@ -39,14 +41,30 @@ class ConvergenceResult:
 
 
 class ConvergenceChecker:
+    @staticmethod
+    def _event_file_bytes(log_dir: Path) -> int:
+        total = 0
+        try:
+            event_files = list(log_dir.glob("events.out.tfevents.*"))
+        except OSError:
+            return 0
+        for path in event_files:
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
     def read_scalars(self, log_dir: Path, tag: str) -> list[tuple[int, float]]:
         """Read (step, value) pairs from TensorBoard event files in log_dir."""
+        if self._event_file_bytes(log_dir) > CONVERGENCE_MAX_EVENT_BYTES:
+            return []
         try:
             from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
         except ImportError:
             return []
         try:
-            ea = EventAccumulator(str(log_dir), size_guidance={"scalars": 0})
+            ea = EventAccumulator(str(log_dir), size_guidance={"scalars": CONVERGENCE_MAX_SCALARS})
             ea.Reload()
             tags = ea.Tags().get("scalars", [])
             if tag not in tags:

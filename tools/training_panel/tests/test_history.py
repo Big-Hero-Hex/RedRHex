@@ -424,6 +424,33 @@ class HistoryTests(unittest.TestCase):
     def test_route_id_decodes_encoded_ids(self):
         self.assertEqual(route_id("/api/runs/run%20one/notes"), "run one")
 
+    def test_runs_payload_includes_folders_for_coalesced_refresh(self):
+        class FakeProcesses:
+            def __init__(self):
+                self.reconciled = False
+
+            def reconcile_stale_history(self):
+                self.reconciled = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "foldered_run"
+            run.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            history = HistoryStore(self.make_paths(root))
+            history.assign_runs_to_folder(["foldered_run"], "Good Runs")
+            processes = FakeProcesses()
+            handler = object.__new__(PanelHandler)
+            handler.state = type("FakeState", (), {"history": history, "processes": processes})()
+
+            payload = handler._runs_payload()
+
+            self.assertTrue(processes.reconciled)
+            self.assertIn("runs", payload)
+            self.assertIn("folders", payload)
+            self.assertIn("Good Runs", payload["folders"])
+            self.assertEqual(payload["runs"][0]["folder"], "Good Runs")
+
     def test_open_location_rejects_paths_outside_log_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

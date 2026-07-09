@@ -126,6 +126,66 @@ torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
 
 
+def _load_runner_checkpoint_with_policy_fallback(
+    runner,
+    resume_path: str,
+    device: str,
+    *,
+    load_optimizer: bool = True,
+    allow_partial_policy: bool = False,
+) -> None:
+    """Load a checkpoint; optionally fall back to actor-compatible weights only."""
+    try:
+        runner.load(resume_path, load_optimizer=load_optimizer)
+        return
+    except TypeError:
+        if not load_optimizer:
+            raise
+        try:
+            runner.load(resume_path)
+            return
+        except RuntimeError as exc:
+            original_error = exc
+    except RuntimeError as exc:
+        original_error = exc
+
+    if not allow_partial_policy:
+        raise original_error
+
+    policy_module = runner.alg.policy if hasattr(runner.alg, "policy") else runner.alg.actor_critic
+    checkpoint = torch.load(resume_path, map_location=device)
+    if not isinstance(checkpoint, dict):
+        raise original_error
+
+    state_dict = None
+    for key in ("model_state_dict", "policy_state_dict", "actor_critic_state_dict", "student_state_dict"):
+        candidate = checkpoint.get(key)
+        if isinstance(candidate, dict):
+            state_dict = candidate
+            break
+    if state_dict is None:
+        state_dict = checkpoint if all(hasattr(v, "shape") for v in checkpoint.values()) else None
+    if state_dict is None:
+        raise original_error
+
+    current_state = policy_module.state_dict()
+    compatible_state = {}
+    for key, value in state_dict.items():
+        if key in current_state and hasattr(value, "shape") and current_state[key].shape == value.shape:
+            compatible_state[key] = value.to(device=current_state[key].device, dtype=current_state[key].dtype)
+    if not compatible_state:
+        raise original_error
+
+    merged_state = dict(current_state)
+    merged_state.update(compatible_state)
+    policy_module.load_state_dict(merged_state, strict=True)
+    skipped = len(state_dict) - len(compatible_state)
+    print(
+        "[WARN] Full policy-only checkpoint load failed, likely due to critic/privileged-observation shape changes. "
+        f"Loaded {len(compatible_state)} actor-compatible tensors and skipped {skipped} tensors."
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Train with RSL-RL agent."""
@@ -250,7 +310,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         if args_cli.resume_policy_only:
-            runner.load(resume_path, load_optimizer=False)
+            _load_runner_checkpoint_with_policy_fallback(
+                runner,
+                resume_path,
+                env.unwrapped.device,
+                load_optimizer=False,
+                allow_partial_policy=True,
+            )
             runner.current_learning_iteration = 0
             print("[INFO]: Resume mode = policy-only (optimizer state skipped, iteration reset to 0).")
             if args_cli.reset_action_std is not None:
@@ -268,7 +334,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         print(f"[INFO]: Reset action std (log_std) to log({target_std:.4f})")
         else:
             # load previously trained model + optimizer state
-            runner.load(resume_path)
+            _load_runner_checkpoint_with_policy_fallback(
+                runner,
+                resume_path,
+                env.unwrapped.device,
+                load_optimizer=True,
+                allow_partial_policy=False,
+            )
 
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)

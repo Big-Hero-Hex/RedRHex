@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.4.2-folder-video-fixes" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.4.10-sync-health" />
   </head>
   <body>
     <aside class="sidebar">
@@ -26,7 +26,7 @@
         <button class="nav-button" data-view="access">Control Center</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.4.2 Folder + Video Fixes</span>
+        <span class="release-version">Version 3.4.10 Sync Health Repair</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -39,7 +39,7 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.4.2 Folder + Video Fixes</span>
+          <span class="release-chip">Training Panel V3.4.10 Sync Health Repair</span>
           <button id="theme-toggle" class="ghost-button" type="button">Dark Mode</button>
           <button id="refresh-button" class="ghost-button" type="button">Refresh</button>
         </div>
@@ -97,6 +97,7 @@
             <button type="button" id="train-change-terrain-preset" class="ghost-button small-button">Change</button>
           </div>
         </form>
+        <div id="gpu-lock-status" class="status-line gpu-lock-status" hidden></div>
         <div id="train-status" class="status-line"></div>
       </section>
 
@@ -224,10 +225,14 @@
               <input id="run-search" type="search" placeholder="Search runs…" autocomplete="off" />
               <select id="status-filter">
                 <option value="">All statuses</option>
+                <option value="queued">Queued</option>
                 <option value="completed">Completed</option>
                 <option value="running">Running</option>
+                <option value="stopping">Stopping</option>
                 <option value="failed">Failed</option>
                 <option value="interrupted">Interrupted</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="unknown">Unknown</option>
               </select>
               <select id="sort-runs">
                 <option value="newest">Newest first</option>
@@ -410,6 +415,7 @@
               MuJoCo Model
               <input id="deploy-mujoco-model" />
             </label>
+            <div id="deploy-mujoco-status" class="deploy-runtime-status"></div>
             <label class="check-row">
               <input id="deploy-include-mujoco" type="checkbox" checked />
               MuJoCo advisory rollout
@@ -429,7 +435,29 @@
             <div class="form-actions compact-actions">
               <button type="button" id="deploy-validate-existing" class="primary-button">Validate Existing ONNX</button>
               <button type="button" id="deploy-export-validate" class="ghost-button">Export ONNX + Validate</button>
+              <button type="button" id="deploy-mujoco-smoke" class="ghost-button">Run MuJoCo Smoke</button>
               <button type="button" id="deploy-stop" class="danger-button" hidden>Stop Deploy</button>
+            </div>
+            <div class="mujoco-playback-panel">
+              <div class="section-header compact-header">
+                <h3>MuJoCo Playback</h3>
+                <span id="deploy-mujoco-playback-state" class="status-badge muted-pill">Idle</span>
+              </div>
+              <label>
+                Scenario
+                <select id="deploy-mujoco-scenario"></select>
+              </label>
+              <div class="form-actions compact-actions">
+                <button type="button" id="deploy-mujoco-viewer" class="ghost-button">Open MuJoCo Viewer</button>
+                <button type="button" id="deploy-mujoco-record" class="ghost-button">Record MuJoCo MP4</button>
+                <button type="button" id="deploy-mujoco-stop" class="danger-button" hidden>Stop MuJoCo</button>
+              </div>
+              <video id="deploy-mujoco-video" controls preload="metadata"></video>
+              <div class="form-actions compact-actions">
+                <button type="button" id="deploy-mujoco-open-video" class="ghost-button small-button" hidden>Open Video Folder</button>
+                <button type="button" id="deploy-mujoco-copy-video" class="ghost-button small-button" hidden>Copy Video Path</button>
+              </div>
+              <div id="deploy-mujoco-playback-status" class="status-line"></div>
             </div>
             <div id="deploy-status" class="status-line"></div>
           </section>
@@ -682,8 +710,23 @@
       </section>
     </main>
 
-    <script src="/static/status_catalog.js?v=3.3.5-startup-recovery"></script>
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <div class="confirm-dialog-card">
+        <h2 id="confirm-dialog-title">Confirm Action</h2>
+        <pre id="confirm-dialog-body"></pre>
+        <label id="confirm-dialog-input-wrap" class="confirm-dialog-input-wrap" hidden>
+          <span id="confirm-dialog-input-hint"></span>
+          <input id="confirm-dialog-input" autocomplete="off" />
+        </label>
+        <div class="confirm-dialog-actions">
+          <button type="button" id="confirm-dialog-cancel" class="ghost-button">Cancel</button>
+          <button type="button" id="confirm-dialog-confirm" class="danger-button">Confirm</button>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="/static/status_catalog.js?v=3.4.10-sync-health"></script>
     <script src="/static/api_adapters.js"></script>
-    <script src="/static/app.js?v=3.4.2-folder-video-fixes"></script>
+    <script src="/static/app.js?v=3.4.10-sync-health"></script>
   </body>
 </html>

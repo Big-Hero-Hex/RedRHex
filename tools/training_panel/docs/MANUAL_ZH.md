@@ -1,6 +1,6 @@
 # RedRHex Training Panel 使用手冊
 
-版本線：V3.4.2 Folder + Video Fixes，含 Mother 端訓練佇列支援。
+版本線：V3.4.3 History Sync Repair，含 Mother 端訓練佇列支援。
 
 發布：BioRoLa ABAD RHex Team  
 致謝：Jason Liao、Jacob Yang

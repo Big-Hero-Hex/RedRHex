@@ -35,16 +35,20 @@ from .history import HistoryStore, latest_checkpoint, latest_onnx, latest_video,
 from .terrain import read_terrain_values_from_yaml
 
 EXTERNAL_PLAY_ID_PREFIX = "external_play_"
+EXTERNAL_VIDEO_ID_PREFIX = "external_video_"
 EXTERNAL_ONNX_ID_PREFIX = "external_onnx_"
 EXTERNAL_TRAINING_ID_PREFIX = "external_training_"
 EXTERNAL_TENSORBOARD_ID_PREFIX = "external_tensorboard_"
+EXTERNAL_GPU_ID_PREFIX = "external_gpu_"
 EXTERNAL_ID_PREFIXES = (
     EXTERNAL_PLAY_ID_PREFIX,
+    EXTERNAL_VIDEO_ID_PREFIX,
     EXTERNAL_ONNX_ID_PREFIX,
     EXTERNAL_TRAINING_ID_PREFIX,
     EXTERNAL_TENSORBOARD_ID_PREFIX,
+    EXTERNAL_GPU_ID_PREFIX,
 )
-GPU_PROCESS_KINDS = {"training", "play", "video", "onnx", "deploy"}
+GPU_PROCESS_KINDS = {"training", "play", "video", "onnx", "deploy", "gpu"}
 DEFAULT_ISAAC_SETTLE_SECONDS = 5.0
 
 
@@ -85,10 +89,26 @@ class ProcessStartError(RuntimeError):
         self.payload = {"error": message, **payload}
 
 
+class CudaPreflightError(RuntimeError):
+    def __init__(self, health: dict):
+        message = str(health.get("error") or "CUDA driver preflight failed")
+        super().__init__(message)
+        self.health = health
+        self.payload = {"error": message, "cuda_health": health}
+
+
 class ProcessRegistry:
-    def __init__(self, paths: PanelPaths, history: HistoryStore, isaac_settle_seconds: float | None = None):
+    def __init__(
+        self,
+        paths: PanelPaths,
+        history: HistoryStore,
+        isaac_settle_seconds: float | None = None,
+        *,
+        cuda_preflight: bool = False,
+    ):
         self.paths = paths
         self.history = history
+        self.cuda_preflight = bool(cuda_preflight)
         self._lock = threading.Lock()
         self._queue_lock = threading.Lock()
         self._processes: dict[str, subprocess.Popen] = {}
@@ -107,12 +127,35 @@ class ProcessRegistry:
             infos = []
             for run_id, info in self._infos.items():
                 proc = self._processes.get(run_id)
-                infos.append({**info.__dict__, "returncode": self._returncode(info, proc) if proc else None})
+                infos.append(self._process_info_snapshot(info, proc))
         known_groups = {self._process_group_for_pid(info["pid"]) for info in infos}
-        external = [process for process in self._external_processes() if process.get("process_group") not in known_groups]
+        known_groups.update(info.get("process_group") for info in infos if info.get("process_group"))
+        known_log_files = {str(info.get("log_file") or "") for info in infos if info.get("log_file")}
+        external = [
+            process
+            for process in self._external_processes()
+            if process.get("process_group") not in known_groups
+            and not self._matches_known_process_log(process, known_log_files)
+        ]
         return infos + external
 
+    def _process_info_snapshot(self, info: ProcessInfo, proc: subprocess.Popen | None) -> dict:
+        returncode = self._returncode(info, proc) if proc else None
+        process_group = self._process_group_for_info(info) if returncode is None else None
+        gpu_pids = self._gpu_pids_for_group(process_group)
+        snapshot = {
+            **info.__dict__,
+            "returncode": returncode,
+        }
+        if process_group:
+            snapshot["process_group"] = process_group
+        if gpu_pids:
+            snapshot["gpu_pids"] = gpu_pids
+            snapshot["gpu_pid"] = gpu_pids[0]
+        return snapshot
+
     def queue_training(self, params: TrainingParams) -> dict:
+        self._assert_cuda_ready(params.device)
         with self._queue_lock:
             settle_delay = self._isaac_settle_delay()
             if self._queued_training_runs() or self.running_isaac_processes() or settle_delay > 0:
@@ -162,6 +205,7 @@ class ProcessRegistry:
         run_id: str | None = None,
         existing_record: dict | None = None,
     ) -> dict:
+        self._assert_cuda_ready(params.device)
         self.paths.ensure_dirs()
         run_id = run_id or f"panel_{timestamp_id()}"
         started_at_epoch = time.time()
@@ -244,6 +288,16 @@ class ProcessRegistry:
             try:
                 params = TrainingParams.from_dict(run.get("params") or {})
                 return self._start_training_run(params, run_id=str(run["id"]), existing_record=run)
+            except CudaPreflightError as exc:
+                self.history.update_run(
+                    str(run.get("id") or ""),
+                    status="failed",
+                    returncode=None,
+                    queue_error=str(exc),
+                    error=str(exc),
+                    cuda_health=exc.health,
+                )
+                return None
             except Exception as exc:
                 self.history.update_run(
                     str(run.get("id") or ""),
@@ -342,6 +396,8 @@ class ProcessRegistry:
                 os.killpg(process_group, signal.SIGINT)
         else:
             os.killpg(process_group, signal.SIGINT)
+        if info and info.kind == "mujoco" and info.source_run_id:
+            self.history.update_run(info.source_run_id, mujoco_playback_status="stopping")
         self.history.update_run(run_id, status="stopping")
         threading.Thread(
             target=self._force_stop_after_grace,
@@ -577,6 +633,7 @@ class ProcessRegistry:
         use_cuda: bool = False,
         use_tensorrt: bool = False,
         mujoco_model_path: str | None = None,
+        mujoco_only: bool = False,
     ) -> dict:
         deploy_id = f"deploy_{timestamp_id()}"
         argv = [
@@ -600,6 +657,8 @@ class ProcessRegistry:
             argv.append("--use-cuda")
         if use_tensorrt:
             argv.append("--use-tensorrt")
+        if mujoco_only:
+            argv.append("--mujoco-only")
         if mujoco_model_path:
             argv.extend(["--mujoco-model-path", str(mujoco_model_path)])
         shell = "\n".join(
@@ -639,6 +698,7 @@ class ProcessRegistry:
                 "use_cuda": bool(use_cuda),
                 "use_tensorrt": bool(use_tensorrt),
                 "mujoco_model_path": str(mujoco_model_path or ""),
+                "mujoco_only": bool(mujoco_only),
             },
         )
         thread = threading.Thread(
@@ -649,6 +709,99 @@ class ProcessRegistry:
         thread.start()
         return {
             "id": deploy_id,
+            "source_run_id": run_id,
+            "pid": proc.pid,
+            "process_log": str(log_file),
+            "command": shell,
+            "tmux_session": spawned.tmux_session,
+            "attach_command": spawned.attach_command,
+            "exit_file": spawned.exit_file,
+        }
+
+    def start_mujoco_playback(
+        self,
+        run_id: str,
+        *,
+        mode: str,
+        scenario: str = "stand_zero",
+        steps: int = 1250,
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 30,
+        mujoco_model_path: str | None = None,
+    ) -> dict:
+        if self.running_for_run(run_id, "mujoco"):
+            raise ProcessStartError(
+                "A MuJoCo playback process is already running for this run.",
+                {"processes": self.running_for_run(run_id, "mujoco")},
+            )
+        mode = str(mode or "").lower()
+        if mode not in {"viewer", "record"}:
+            raise ValueError("MuJoCo playback mode must be viewer or record")
+        process_id = f"mujoco_{mode}_{timestamp_id()}"
+        argv = [
+            sys.executable,
+            "-m",
+            "tools.training_panel.mujoco_playback",
+            "--run-id",
+            run_id,
+            "--process-id",
+            process_id,
+            "--mode",
+            mode,
+            "--scenario",
+            scenario,
+            "--steps",
+            str(max(1, int(steps))),
+            "--width",
+            str(max(320, int(width))),
+            "--height",
+            str(max(240, int(height))),
+            "--fps",
+            str(max(1, int(fps))),
+        ]
+        if mujoco_model_path:
+            argv.extend(["--mujoco-model-path", str(mujoco_model_path)])
+        shell = "\n".join(
+            [
+                f"cd {shlex.quote(str(self.paths.repo_root))}",
+                "exec " + " ".join(shlex.quote(arg) for arg in argv),
+            ]
+        )
+        log_file = self.paths.process_log_dir / f"{process_id}.log"
+        spawned = self._spawn_shell(process_id, shell, log_file)
+        proc = spawned.proc
+        self._register(
+            process_id,
+            "mujoco",
+            spawned,
+            log_file,
+            datetime.now().isoformat(timespec="seconds"),
+            shell,
+            source_run_id=run_id,
+        )
+        self.history.update_run(
+            run_id,
+            mujoco_playback_status="running",
+            mujoco_playback_mode=mode,
+            mujoco_playback_scenario=scenario,
+            mujoco_process_id=process_id,
+            mujoco_pid=proc.pid,
+            mujoco_process_log=str(log_file),
+            mujoco_command=shell,
+            mujoco_process_attach_command=spawned.attach_command,
+            mujoco_tmux_session=spawned.tmux_session,
+            mujoco_exit_file=spawned.exit_file,
+            mujoco_error=None,
+        )
+        thread = threading.Thread(
+            target=self._monitor_mujoco,
+            args=(run_id, process_id, proc),
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "id": process_id,
             "source_run_id": run_id,
             "pid": proc.pid,
             "process_log": str(log_file),
@@ -750,6 +903,99 @@ class ProcessRegistry:
             if process.get("returncode") is None and process.get("kind") in GPU_PROCESS_KINDS
         ]
 
+    def cuda_health(self) -> dict:
+        return self._cuda_health()
+
+    def _assert_cuda_ready(self, device: str) -> None:
+        if not self.cuda_preflight or not str(device or "").startswith("cuda"):
+            return
+        health = self.cuda_health()
+        if not health.get("ok"):
+            raise CudaPreflightError(health)
+
+    @staticmethod
+    def _cuda_health() -> dict:
+        kernel_version = ProcessRegistry._loaded_nvidia_kernel_version()
+        userspace_version = ProcessRegistry._nvidia_userspace_version()
+        reboot_required = Path("/var/run/reboot-required").exists()
+        remediation = (
+            "Reboot this machine so the installed NVIDIA userspace driver and loaded kernel module match. "
+            "If it still fails after reboot, reinstall the NVIDIA 580 driver packages so libcuda/NVML and the kernel module are the same version."
+        )
+        base = {
+            "ok": True,
+            "kernel_driver_version": kernel_version,
+            "userspace_driver_version": userspace_version,
+            "reboot_required": reboot_required,
+            "remediation": remediation,
+        }
+        if kernel_version and userspace_version and kernel_version != userspace_version:
+            return {
+                **base,
+                "ok": False,
+                "reason": "driver_library_mismatch",
+                "error": (
+                    f"CUDA driver preflight failed: loaded NVIDIA kernel module is {kernel_version}, "
+                    f"but libcuda/NVML userspace is {userspace_version}."
+                ),
+            }
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "-L"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                timeout=8,
+                check=False,
+            )
+        except FileNotFoundError:
+            return {
+                **base,
+                "ok": False,
+                "reason": "nvidia_smi_missing",
+                "error": "CUDA driver preflight failed: nvidia-smi is not installed or not on PATH.",
+            }
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {
+                **base,
+                "ok": False,
+                "reason": "nvidia_smi_error",
+                "error": f"CUDA driver preflight failed while running nvidia-smi: {exc}",
+            }
+        output = f"{result.stdout}\n{result.stderr}".strip()
+        if result.returncode != 0:
+            return {
+                **base,
+                "ok": False,
+                "reason": "nvidia_smi_failed",
+                "error": f"CUDA driver preflight failed: nvidia-smi exited {result.returncode}.",
+                "nvidia_smi_output": output,
+            }
+        return {**base, "nvidia_smi_output": output}
+
+    @staticmethod
+    def _loaded_nvidia_kernel_version() -> str | None:
+        try:
+            text = Path("/proc/driver/nvidia/version").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        match = re.search(r"\b(\d+\.\d+\.\d+)\b", text)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _nvidia_userspace_version() -> str | None:
+        for name in ("libcuda.so.1", "libnvidia-ml.so.1"):
+            path = Path("/usr/lib/x86_64-linux-gnu") / name
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                continue
+            match = re.search(r"\b(\d+\.\d+\.\d+)\b", resolved.name)
+            if match:
+                return match.group(1)
+        return None
+
     def stop_all_for_run(self, source_run_id: str) -> list[str]:
         stopped = []
         for process in self.running_for_run(source_run_id):
@@ -759,8 +1005,11 @@ class ProcessRegistry:
         return stopped
 
     def reconcile_stale_history(self) -> None:
+        processes = self.list_processes()
+        self._repair_active_training_history(processes)
+        self._repair_panel_log_history()
         known_process_runs = set()
-        for process in self.list_processes():
+        for process in processes:
             if process.get("kind") != "training":
                 continue
             if process.get("run_id"):
@@ -793,16 +1042,107 @@ class ProcessRegistry:
                 self.history.update_run(run["id"], status="interrupted")
         self.start_next_queued_training()
 
+    def _repair_active_training_history(self, processes: list[dict]) -> None:
+        """Keep history records useful even if metadata sync left a live run as a stub."""
+        for process in processes:
+            if process.get("kind") != "training" or process.get("returncode") is not None:
+                continue
+            run_id = str(process.get("source_run_id") or process.get("run_id") or "")
+            if not run_id or run_id.startswith(EXTERNAL_ID_PREFIXES):
+                continue
+            current = self.history.get_run(run_id) or {}
+            status = "stopping" if str(current.get("status") or "").lower() == "stopping" else "running"
+            updates = {
+                "source": "training_panel",
+                "status": status,
+                "pid": process.get("pid"),
+                "process_group": process.get("process_group"),
+                "gpu_pid": process.get("gpu_pid"),
+                "gpu_pids": process.get("gpu_pids"),
+                "process_log": process.get("log_file"),
+                "command": process.get("command"),
+                "started_at": process.get("started_at"),
+                "created_at": current.get("created_at") or process.get("started_at"),
+                "tmux_session": process.get("tmux_session"),
+                "attach_command": process.get("attach_command"),
+                "exit_file": process.get("exit_file"),
+            }
+            self.history.patch_run_metadata(
+                run_id,
+                **{key: value for key, value in updates.items() if value not in (None, "", [], {})},
+            )
+
+    def _repair_panel_log_history(self) -> None:
+        """Recover panel records that were reduced to metadata-only stubs."""
+        for record in self.history._load_records():
+            run_id = str(record.get("id") or "")
+            if not run_id.startswith("panel_") or record.get("source") != "training_panel":
+                continue
+            process_log = Path(str(record.get("process_log") or self.paths.process_log_dir / f"{run_id}.log"))
+            if not process_log.is_file():
+                continue
+            updates: dict[str, object] = {}
+            if not record.get("process_log"):
+                updates["process_log"] = str(process_log)
+            exit_file = Path(str(record.get("exit_file") or self.paths.process_log_dir / f"{run_id}.exit"))
+            exit_code = self._exit_code_from_path(exit_file)
+            if exit_code is not None and not record.get("exit_file"):
+                updates["exit_file"] = str(exit_file)
+            created_at = self._panel_created_at_from_run_id(run_id)
+            if created_at and record.get("created_at") != created_at:
+                updates["created_at"] = created_at
+            if created_at and not record.get("started_at"):
+                updates["started_at"] = created_at
+            completed_at = self._completed_at_from_exit_file(exit_file) if exit_code is not None else None
+            if completed_at and record.get("completed_at") != completed_at:
+                updates["completed_at"] = completed_at
+            if not record.get("command"):
+                command = self._command_from_process_log(process_log)
+                if command:
+                    updates["command"] = command
+            if not record.get("log_dir"):
+                log_dir = self._log_dir_from_process_log_path(process_log)
+                if log_dir:
+                    updates["log_dir"] = log_dir
+            if exit_code is not None and str(record.get("status") or "").lower() not in {"running", "stopping"}:
+                desired_status = "completed" if exit_code == 0 else "failed"
+                if record.get("status") != desired_status:
+                    updates["status"] = desired_status
+                if record.get("returncode") != exit_code:
+                    updates["returncode"] = exit_code
+            if updates:
+                self.history.patch_run_metadata(run_id, **updates)
+
+    @staticmethod
+    def _panel_created_at_from_run_id(run_id: str) -> str | None:
+        match = re.match(r"^panel_(\d{8})_(\d{6})", str(run_id or ""))
+        if not match:
+            return None
+        try:
+            return datetime.strptime(f"{match.group(1)}_{match.group(2)}", "%Y%m%d_%H%M%S").isoformat(
+                timespec="seconds"
+            )
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _completed_at_from_exit_file(exit_file: Path) -> str | None:
+        try:
+            return datetime.fromtimestamp(exit_file.stat().st_mtime).isoformat(timespec="seconds")
+        except OSError:
+            return None
+
     def _exit_code_from_history(self, run: dict) -> int | None:
         exit_file = run.get("exit_file")
         if not exit_file:
             return None
-        path = Path(str(exit_file))
-        if not path.exists():
-            return None
+        return self._exit_code_from_path(Path(str(exit_file)))
+
+    @staticmethod
+    def _exit_code_from_path(path: Path) -> int | None:
         try:
             return int(path.read_text(encoding="utf-8").strip())
-        except ValueError:
+        except (OSError, ValueError):
             return None
 
     def _completed_log_for_run(self, run: dict, *, allow_time_fallback: bool = True) -> str | None:
@@ -834,12 +1174,33 @@ class ProcessRegistry:
             return file.read(max_chars).decode("utf-8", errors="replace")
 
     def _external_processes(self) -> list[dict]:
-        return [
+        processes = [
             *self._external_training_processes(),
             *self._external_onnx_processes(),
+            *self._external_video_processes(),
             *self._external_play_processes(),
+            *self._external_gpu_python_processes(),
             *self._external_tensorboard_processes(),
         ]
+        for process in processes:
+            if process.get("kind") not in GPU_PROCESS_KINDS:
+                continue
+            process_group = process.get("process_group")
+            if not isinstance(process_group, int):
+                continue
+            gpu_pids = self._gpu_pids_for_group(process_group)
+            if gpu_pids:
+                process["gpu_pids"] = gpu_pids
+                process["gpu_pid"] = gpu_pids[0]
+        return processes
+
+    @staticmethod
+    def _matches_known_process_log(process: dict, known_log_files: set[str]) -> bool:
+        if not known_log_files:
+            return False
+        log_file = str(process.get("log_file") or "")
+        command = str(process.get("command") or "")
+        return any(path and (path == log_file or path in command) for path in known_log_files)
 
     def _external_training_processes(self) -> list[dict]:
         try:
@@ -864,12 +1225,11 @@ class ProcessRegistry:
             except ValueError:
                 continue
             source_run_id = self._source_run_id_from_training_process(pid, process_group, command)
-            if not source_run_id:
-                continue
             existing = by_group.get(process_group)
             if existing and existing["pid"] == process_group:
                 continue
             log_file = self._matching_training_log(pid, process_group, command)
+            tmux_session = self._tmux_session_for_process_group(process_group)
             by_group[process_group] = {
                 "kind": "training",
                 "pid": pid,
@@ -882,6 +1242,54 @@ class ProcessRegistry:
                 "returncode": None,
                 "external": True,
                 "stat": stat,
+                "tmux_session": tmux_session,
+                "attach_command": f"tmux attach -t {shlex.quote(tmux_session)}" if tmux_session else None,
+            }
+        return list(by_group.values())
+
+    def _external_gpu_python_processes(self) -> list[dict]:
+        pids = self._gpu_device_pids()
+        if not pids:
+            return []
+        try:
+            output = subprocess.check_output(
+                ["ps", "-o", "pid=,pgid=,stat=,args=", "-p", ",".join(str(pid) for pid in sorted(pids))],
+                text=True,
+                errors="replace",
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        by_group = {}
+        for line in output.splitlines():
+            parts = line.strip().split(maxsplit=3)
+            if len(parts) < 4:
+                continue
+            pid_text, pgid_text, stat, command = parts
+            try:
+                pid = int(pid_text)
+                process_group = int(pgid_text)
+            except ValueError:
+                continue
+            if not self._is_external_gpu_python_process(command, pid_text):
+                continue
+            existing = by_group.get(process_group)
+            if existing and existing["pid"] == process_group:
+                continue
+            tmux_session = self._tmux_session_for_process_group(process_group)
+            by_group[process_group] = {
+                "kind": "gpu",
+                "pid": pid,
+                "process_group": process_group,
+                "run_id": f"{EXTERNAL_GPU_ID_PREFIX}{process_group}",
+                "source_run_id": None,
+                "log_file": "",
+                "started_at": "",
+                "command": command,
+                "returncode": None,
+                "external": True,
+                "stat": stat,
+                "tmux_session": tmux_session,
+                "attach_command": f"tmux attach -t {shlex.quote(tmux_session)}" if tmux_session else None,
             }
         return list(by_group.values())
 
@@ -919,6 +1327,50 @@ class ProcessRegistry:
                 "pid": pid,
                 "process_group": process_group,
                 "run_id": f"{EXTERNAL_PLAY_ID_PREFIX}{process_group}",
+                "source_run_id": source_run_id,
+                "log_file": str(log_file) if log_file else "",
+                "started_at": "",
+                "command": command,
+                "returncode": None,
+                "external": True,
+                "stat": stat,
+            }
+        return list(by_group.values())
+
+    def _external_video_processes(self) -> list[dict]:
+        try:
+            output = subprocess.check_output(
+                ["ps", "-eo", "pid=,pgid=,stat=,args="],
+                text=True,
+                errors="replace",
+            )
+        except (OSError, subprocess.SubprocessError):
+            return []
+        by_group = {}
+        for line in output.splitlines():
+            parts = line.strip().split(maxsplit=3)
+            if len(parts) < 4:
+                continue
+            pid_text, pgid_text, stat, command = parts
+            if not self._is_repo_video_process(command, pid_text):
+                continue
+            try:
+                pid = int(pid_text)
+                process_group = int(pgid_text)
+            except ValueError:
+                continue
+            source_run_id = self._source_run_id_from_command(command)
+            if not source_run_id:
+                continue
+            existing = by_group.get(process_group)
+            if existing and existing["pid"] == process_group:
+                continue
+            log_file = self._matching_process_log(command)
+            by_group[process_group] = {
+                "kind": "video",
+                "pid": pid,
+                "process_group": process_group,
+                "run_id": f"{EXTERNAL_VIDEO_ID_PREFIX}{process_group}",
                 "source_run_id": source_run_id,
                 "log_file": str(log_file) if log_file else "",
                 "started_at": "",
@@ -987,6 +1439,8 @@ class ProcessRegistry:
             pid_text, pgid_text, stat, command = parts
             if "tensorboard_data_server" in command:
                 continue
+            if self._is_tmux_server_command(command):
+                continue
             if not self._is_repo_tensorboard_process(command):
                 continue
             try:
@@ -1022,15 +1476,22 @@ class ProcessRegistry:
         return match.group(1) if match else None
 
     def _source_run_id_from_training_process(self, pid: int, process_group: int, command: str) -> str | None:
+        run_id = self._source_run_id_from_training_process_log(command)
+        if run_id:
+            return run_id
         for run in self.history.list_runs():
             if run.get("source") != "training_panel":
                 continue
             if run.get("pid") in (pid, process_group):
                 return run.get("id")
+        matches = []
+        for run in self.history.list_runs():
+            if run.get("source") != "training_panel":
+                continue
             recorded_command = run.get("command") or ""
             if recorded_command and self._training_commands_match(recorded_command, command):
-                return run.get("id")
-        return None
+                matches.append(run.get("id"))
+        return matches[0] if len(matches) == 1 else None
 
     def _matching_process_log(self, command: str) -> Path | None:
         checkpoint_match = re.search(r"--checkpoint\s+(\S+)", command)
@@ -1069,20 +1530,66 @@ class ProcessRegistry:
         return max(candidates, key=lambda path: path.stat().st_mtime)
 
     def _matching_training_log(self, pid: int, process_group: int, command: str) -> Path | None:
+        process_log = self._training_process_log_from_command(command)
+        if process_log:
+            return process_log
         for run in self.history.list_runs():
             if run.get("source") != "training_panel":
                 continue
-            if run.get("pid") in (pid, process_group) or self._training_commands_match(run.get("command") or "", command):
+            if run.get("pid") in (pid, process_group):
                 process_log = run.get("process_log")
                 if process_log:
                     return Path(process_log)
+        matches = []
+        for run in self.history.list_runs():
+            if run.get("source") != "training_panel":
+                continue
+            if self._training_commands_match(run.get("command") or "", command):
+                process_log = run.get("process_log")
+                if process_log:
+                    matches.append(Path(process_log))
+        return matches[0] if len(matches) == 1 else None
+
+    def _source_run_id_from_training_process_log(self, command: str) -> str | None:
+        process_log = self._training_process_log_from_command(command)
+        if not process_log:
+            return None
+        log_name = process_log.name
+        for run in self.history.list_runs():
+            if run.get("source") != "training_panel":
+                continue
+            run_log = run.get("process_log")
+            if run_log and Path(str(run_log)).name == log_name:
+                return run.get("id")
+        stem = process_log.stem
+        run = self.history.get_run(stem)
+        if run and run.get("source") == "training_panel":
+            return stem
         return None
+
+    def _training_process_log_from_command(self, command: str) -> Path | None:
+        pattern = r"(/[^\s'\"<>]*?/logs/training_panel/process_logs/panel_[A-Za-z0-9_]+\.log)"
+        matches = re.findall(pattern, command)
+        if not matches:
+            return None
+        return Path(matches[-1])
+
+    def _command_from_process_log(self, process_log: Path) -> str | None:
+        text = self._head_file(process_log, max_chars=120000)
+        match = re.search(r"\$ bash -lc <<'PANEL_COMMAND'\n(.*?)\nPANEL_COMMAND", text, re.DOTALL)
+        if not match:
+            return None
+        command = match.group(1).strip()
+        return command or None
 
     def _log_dir_from_process_log(self, run_id: str) -> str | None:
         run = self.history.get_run(run_id) or {}
         process_log = Path(str(run.get("process_log") or ""))
         if not process_log.exists():
             return None
+        return self._log_dir_from_process_log_path(process_log)
+
+    def _log_dir_from_process_log_path(self, process_log: Path) -> str | None:
         text = self._head_file(process_log, max_chars=120000) + "\n" + tail_file(process_log, max_chars=300000)
         exact_names = re.findall(r"Exact experiment name requested from command line:\s*(\S+)", text)
         for name in reversed(exact_names):
@@ -1116,9 +1623,18 @@ class ProcessRegistry:
     def _is_repo_play_process(self, command: str, pid_text: str) -> bool:
         if self._is_tmux_server_command(command):
             return False
-        if "--export_policy_only" in command:
+        if "--export_policy_only" in command or "--video" in command:
             return False
         if "scripts/rsl_rl/play.py" not in command:
+            return False
+        if "isaaclab.sh -p" not in command and "python" not in command:
+            return False
+        return self._command_or_cwd_matches_repo(command, pid_text)
+
+    def _is_repo_video_process(self, command: str, pid_text: str) -> bool:
+        if self._is_tmux_server_command(command):
+            return False
+        if "scripts/rsl_rl/play.py" not in command or "--video" not in command:
             return False
         if "isaaclab.sh -p" not in command and "python" not in command:
             return False
@@ -1133,6 +1649,46 @@ class ProcessRegistry:
             return False
         return self._command_or_cwd_matches_repo(command, pid_text)
 
+    def _is_external_gpu_python_process(self, command: str, pid_text: str) -> bool:
+        command_lower = command.lower()
+        if self._is_tmux_server_command(command):
+            return False
+        if "python" not in command_lower and "isaac" not in command_lower:
+            return False
+        if "tools.training_panel" in command or "tensorboard" in command_lower:
+            return False
+        if not (
+            self._command_or_cwd_matches_path(command, pid_text, self.paths.repo_root)
+            or self._command_or_cwd_matches_path(command, pid_text, self.paths.isaaclab_root)
+        ):
+            return False
+        if (
+            self._is_repo_training_process(command, pid_text)
+            or self._is_repo_play_process(command, pid_text)
+            or self._is_repo_video_process(command, pid_text)
+            or self._is_repo_onnx_process(command, pid_text)
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _gpu_device_pids() -> set[int]:
+        devices = [path for path in ("/dev/nvidia0", "/dev/nvidia-uvm", "/dev/nvidiactl") if Path(path).exists()]
+        if not devices or not shutil.which("fuser"):
+            return set()
+        try:
+            result = subprocess.run(
+                ["fuser", *devices],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                check=False,
+            )
+        except OSError:
+            return set()
+        return {int(match) for match in re.findall(r"\b\d+\b", f"{result.stdout}\n{result.stderr}") if int(match) > 1}
+
     def _is_repo_tensorboard_process(self, command: str) -> bool:
         return "tensorboard" in command and "--logdir" in command and str(self.paths.repo_root) in command
 
@@ -1141,10 +1697,14 @@ class ProcessRegistry:
         return "tmux new-session" in command or "tmux: server" in command or "/tmux new-session" in command
 
     def _command_or_cwd_matches_repo(self, command: str, pid_text: str) -> bool:
-        if str(self.paths.repo_root) in command:
+        return self._command_or_cwd_matches_path(command, pid_text, self.paths.repo_root)
+
+    @staticmethod
+    def _command_or_cwd_matches_path(command: str, pid_text: str, root: Path) -> bool:
+        if str(root) in command:
             return True
         try:
-            return Path(f"/proc/{int(pid_text)}/cwd").resolve() == self.paths.repo_root.resolve()
+            return Path(f"/proc/{int(pid_text)}/cwd").resolve() == root.resolve()
         except (OSError, RuntimeError, ValueError):
             return False
 
@@ -1177,6 +1737,46 @@ class ProcessRegistry:
         except ProcessLookupError:
             return None
 
+    def _process_group_for_info(self, info: ProcessInfo) -> int | None:
+        if info.tmux_session:
+            tmux_group = self._tmux_process_group(info.tmux_session)
+            if tmux_group:
+                return tmux_group
+        return self._process_group_for_pid(info.pid)
+
+    @staticmethod
+    def _tmux_process_group(session: str) -> int | None:
+        tmux = shutil.which("tmux")
+        if not tmux:
+            return None
+        try:
+            output = subprocess.check_output(
+                [tmux, "list-panes", "-t", session, "-F", "#{pane_pid}"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in output.splitlines():
+            try:
+                return os.getpgid(int(line.strip()))
+            except (ValueError, ProcessLookupError):
+                continue
+        return None
+
+    def _gpu_pids_for_group(self, process_group: int | None) -> list[int]:
+        if not process_group:
+            return []
+        gpu_pids = []
+        for pid in self._gpu_device_pids():
+            try:
+                if os.getpgid(pid) == process_group:
+                    gpu_pids.append(pid)
+            except ProcessLookupError:
+                continue
+        return sorted(gpu_pids)
+
     def _stop_external_group(self, run_id: str) -> bool:
         process_id = run_id
         for prefix in EXTERNAL_ID_PREFIXES:
@@ -1185,12 +1785,51 @@ class ProcessRegistry:
             process_group = int(process_id)
         except ValueError:
             return False
+        process = next((item for item in self._external_processes() if item.get("run_id") == run_id), {})
+        tmux_session = str(process.get("tmux_session") or "")
         try:
-            os.killpg(process_group, signal.SIGINT)
+            if not tmux_session or not self._send_tmux_interrupt(tmux_session):
+                os.killpg(process_group, signal.SIGINT)
         except ProcessLookupError:
             return False
-        threading.Thread(target=self._force_kill_group_after_grace, args=(process_group,), daemon=True).start()
+        threading.Thread(
+            target=self._force_kill_group_after_grace,
+            args=(process_group, tmux_session or None),
+            daemon=True,
+        ).start()
         return True
+
+    @staticmethod
+    def _tmux_session_for_process_group(process_group: int) -> str | None:
+        tmux = shutil.which("tmux")
+        if not tmux:
+            return None
+        try:
+            output = subprocess.check_output(
+                [tmux, "list-panes", "-a", "-F", "#{session_name} #{pane_pid}"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        for line in output.splitlines():
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            session, pane_pid_text = parts
+            try:
+                pane_pid = int(pane_pid_text)
+            except ValueError:
+                continue
+            if pane_pid == process_group:
+                return session
+            try:
+                if os.getpgid(pane_pid) == process_group:
+                    return session
+            except ProcessLookupError:
+                continue
+        return None
 
     def _spawn_shell(self, run_id: str, shell: str, log_file: Path) -> SpawnedProcess:
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1416,7 +2055,8 @@ class ProcessRegistry:
             log_dir = self._log_dir_from_process_log(run_id)
             if not log_dir and returncode == 0:
                 log_dir = self.history.find_latest_log_after(started_at_epoch)
-        self.history.update_run(run_id, status=status, returncode=returncode, log_dir=log_dir)
+        completed_at = datetime.now().isoformat(timespec="seconds")
+        self.history.update_run(run_id, status=status, returncode=returncode, log_dir=log_dir, completed_at=completed_at)
         self._refresh_tensorboard_summary(run_id, log_dir)
 
         # Record video when: training succeeded normally, OR convergence was detected and
@@ -1547,6 +2187,44 @@ class ProcessRegistry:
         )
         self.start_next_queued_training()
 
+    def _monitor_mujoco(self, source_run_id: str, process_id: str, proc: subprocess.Popen) -> None:
+        returncode = proc.wait()
+        run = self.history.get_run(source_run_id) or {}
+        log_dir = Path(str(run.get("log_dir") or ""))
+        report_path = log_dir / "deploy" / f"mujoco_playback_{process_id}" / "mujoco_playback_report.json"
+        report = None
+        if report_path.is_file():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                report = None
+        video = ""
+        if isinstance(report, dict):
+            video = str(report.get("video_path") or report.get("artifacts", {}).get("video") or "")
+        if video and not Path(video).is_file():
+            video = ""
+        if returncode == 130 or returncode < 0:
+            status = "stopped"
+        elif returncode == 0 and isinstance(report, dict) and report.get("status") == "completed":
+            status = "completed"
+        else:
+            status = "failed"
+        error = None
+        if status == "failed":
+            error = "MuJoCo playback finished but no successful playback report was produced."
+            if isinstance(report, dict):
+                error = str(report.get("summary") or error)
+        self.history.update_run(
+            source_run_id,
+            mujoco_playback_status=status,
+            mujoco_returncode=returncode,
+            mujoco_process_id=process_id,
+            mujoco_video_report=str(report_path) if report_path.is_file() else None,
+            latest_mujoco_video=video or None,
+            mujoco_error=error,
+            mujoco_completed_at=datetime.now().isoformat(timespec="seconds"),
+        )
+
     @staticmethod
     def _force_stop_after_grace(proc: subprocess.Popen, process_group: int, tmux_session: str | None = None) -> None:
         try:
@@ -1575,8 +2253,15 @@ class ProcessRegistry:
                 continue
 
     @staticmethod
-    def _force_kill_group_after_grace(process_group: int) -> None:
+    def _force_kill_group_after_grace(process_group: int, tmux_session: str | None = None) -> None:
         time.sleep(5)
+        if tmux_session:
+            ProcessRegistry._kill_tmux_session(tmux_session)
+            time.sleep(2)
+            try:
+                os.killpg(process_group, 0)
+            except ProcessLookupError:
+                return
         for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
                 os.killpg(process_group, 0)

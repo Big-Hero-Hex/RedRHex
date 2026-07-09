@@ -1,6 +1,6 @@
 # RedRHex Training Panel Manual
 
-Version line: V3.4.2 Folder + Video Fixes, with Mother-side training queue support.
+Version line: V3.4.3 History Sync Repair, with Mother-side training queue support.
 
 Published by: BioRoLa ABAD RHex Team  
 Credits: Jason Liao and Jacob Yang

@@ -9,6 +9,7 @@ const state = {
   activeProcesses: [],
   activeProcessesByRun: {},
   activeProcessByKind: {},
+  cudaHealth: null,
   debugTarget: null,
   lastDebug: null,
   debugTimer: null,
@@ -20,11 +21,12 @@ const state = {
   statusFilter: "",
   sortKey: "newest",
   // Folders (Module 3)
-  activeFolder: "",
+  activeFolder: null,
   folders: [],
   selectedRunIds: new Set(),
   isBulkDeleting: false,
   pendingDeleteRunIds: new Set(),
+  pendingActions: new Set(),
   notifications: {
     initialized: false,
     knownRunIds: new Set(),
@@ -170,10 +172,19 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
-  const data = await response.json();
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text };
+    }
+  }
   if (!response.ok) {
-    const error = new Error(data.error || response.statusText);
+    const error = new Error(data.error || response.statusText || `Request failed (${response.status})`);
     error.data = data;
+    error.status = response.status;
     throw error;
   }
   return data;
@@ -197,6 +208,127 @@ function setStatus(message, linkUrl = "") {
 function setTerrainStatus(message) {
   const status = $("#terrain-status");
   if (status) status.textContent = message;
+}
+
+function pendingKey(type, id = "global") {
+  return `${type}:${id || "global"}`;
+}
+
+function isPending(type, id = "global") {
+  return state.pendingActions.has(pendingKey(type, id));
+}
+
+function setPending(type, id, pending) {
+  const key = pendingKey(type, id);
+  if (pending) state.pendingActions.add(key);
+  else state.pendingActions.delete(key);
+  renderPendingStates();
+}
+
+function renderPendingStates() {
+  updateBulkToolbar();
+  renderRunDetails();
+}
+
+function captureHistoryScroll() {
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    runsTop: $("#runs")?.scrollTop || 0,
+    detailsTop: document.querySelector(".details-panel-wrap")?.scrollTop || 0,
+  };
+}
+
+function restoreHistoryScroll(scrollState) {
+  if (!scrollState) return;
+  requestAnimationFrame(() => {
+    const runs = $("#runs");
+    const details = document.querySelector(".details-panel-wrap");
+    if (runs) runs.scrollTop = scrollState.runsTop;
+    if (details) details.scrollTop = scrollState.detailsTop;
+    window.scrollTo(scrollState.windowX, scrollState.windowY);
+  });
+}
+
+function confirmAction({
+  title,
+  body,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  requiredText = "",
+  inputLabel = "",
+} = {}) {
+  const dialog = $("#confirm-dialog");
+  if (!dialog || typeof dialog.showModal !== "function") {
+    if (!requiredText) return Promise.resolve(window.confirm(body || title || "") ? true : null);
+    const value = window.prompt(`${body || title || ""}\n\nType ${requiredText} to confirm:`, "");
+    return Promise.resolve(value === requiredText ? value : null);
+  }
+
+  return new Promise((resolve) => {
+    const titleEl = $("#confirm-dialog-title");
+    const bodyEl = $("#confirm-dialog-body");
+    const inputWrap = $("#confirm-dialog-input-wrap");
+    const input = $("#confirm-dialog-input");
+    const inputHint = $("#confirm-dialog-input-hint");
+    const confirmButton = $("#confirm-dialog-confirm");
+    const cancelButton = $("#confirm-dialog-cancel");
+    let resolved = false;
+
+    const cleanup = () => {
+      input.removeEventListener("input", updateConfirmState);
+      input.removeEventListener("keydown", handleInputKeydown);
+      confirmButton.removeEventListener("click", handleConfirm);
+      cancelButton.removeEventListener("click", handleCancel);
+      dialog.removeEventListener("cancel", handleCancel);
+      dialog.removeEventListener("close", handleClose);
+    };
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    function updateConfirmState() {
+      confirmButton.disabled = Boolean(requiredText) && input.value !== requiredText;
+    }
+    function handleInputKeydown(event) {
+      if (event.key === "Enter" && !confirmButton.disabled) {
+        event.preventDefault();
+        handleConfirm();
+      }
+    }
+    function handleConfirm() {
+      finish(requiredText ? input.value : true);
+    }
+    function handleCancel(event) {
+      if (event) event.preventDefault();
+      finish(null);
+    }
+    function handleClose() {
+      finish(null);
+    }
+
+    titleEl.textContent = title || "Confirm Action";
+    bodyEl.textContent = body || "";
+    confirmButton.textContent = confirmLabel;
+    cancelButton.textContent = cancelLabel;
+    input.value = "";
+    inputWrap.hidden = !requiredText;
+    inputHint.textContent = inputLabel || (requiredText ? `Type ${requiredText} to confirm.` : "");
+    updateConfirmState();
+
+    input.addEventListener("input", updateConfirmState);
+    input.addEventListener("keydown", handleInputKeydown);
+    confirmButton.addEventListener("click", handleConfirm);
+    cancelButton.addEventListener("click", handleCancel);
+    dialog.addEventListener("cancel", handleCancel);
+    dialog.addEventListener("close", handleClose);
+    dialog.showModal();
+    if (requiredText) input.focus();
+    else confirmButton.focus();
+  });
 }
 
 function setView(name) {
@@ -329,7 +461,35 @@ function clearTrainingRunName(form = $("#train-form")) {
 
 async function loadSystem() {
   const system = await api("/api/system");
+  state.cudaHealth = system.cuda_health || null;
   $("#system-info").textContent = JSON.stringify(system, null, 2);
+  renderCudaHealthNotice();
+}
+
+function cudaHealthStatusHtml(health, prefix = "CUDA training is blocked.") {
+  const parts = [prefix];
+  if (health?.error) parts.push(health.error);
+  if (health?.reboot_required) parts.push("A system reboot is required.");
+  if (health?.remediation) parts.push(health.remediation);
+  return parts.map((part) => escapeHtml(part)).join("<br>");
+}
+
+function renderCudaHealthNotice({ force = false } = {}) {
+  const status = $("#train-status");
+  if (!status || !state.cudaHealth || state.cudaHealth.ok !== false) return;
+  if (!force && status.textContent.trim() && status.dataset.cudaNotice !== "1") return;
+  status.dataset.cudaNotice = "1";
+  status.innerHTML = cudaHealthStatusHtml(state.cudaHealth);
+}
+
+function renderCudaPreflightError(error) {
+  const health = error.data?.cuda_health;
+  if (!health) return false;
+  state.cudaHealth = health;
+  const status = $("#train-status");
+  status.dataset.cudaNotice = "1";
+  status.innerHTML = cudaHealthStatusHtml(health, "Training was not started.");
+  return true;
 }
 
 function renderKvGrid(selector, rows) {
@@ -641,7 +801,7 @@ function runParamSummary(run) {
 
 function runTimeSummary(run) {
   const relative = formatRelativeTime(run.created_at);
-  const duration = formatDuration(run.created_at, run.updated_at);
+  const duration = formatDuration(run.started_at || run.created_at, run.completed_at || run.finished_at || run.updated_at);
   if (relative && duration) return `${relative} · duration ${duration}`;
   return relative || duration || "";
 }
@@ -708,15 +868,48 @@ function activeMediaProcess() {
 }
 
 function activeGpuProcess() {
-  return state.activeProcesses.find((process) => ["training", "play", "video", "onnx", "deploy"].includes(process.kind)) || null;
+  return state.activeProcesses.find((process) => ["training", "play", "video", "onnx", "deploy", "gpu"].includes(process.kind)) || null;
+}
+
+function processOwnerLabel(process) {
+  if (!process) return "";
+  const parts = [];
+  if (process.source_run_id) parts.push(`run ${process.source_run_id}`);
+  else if (process.external) parts.push("unlinked external process");
+  else if (process.run_id) parts.push(process.run_id);
+  if (process.pid) parts.push(`pid ${process.pid}`);
+  if (Array.isArray(process.gpu_pids) && process.gpu_pids.length) parts.push(`gpu pid ${process.gpu_pids.join(",")}`);
+  else if (process.gpu_pid) parts.push(`gpu pid ${process.gpu_pid}`);
+  if (process.process_group) parts.push(`pgid ${process.process_group}`);
+  if (process.tmux_session) parts.push(`tmux ${process.tmux_session}`);
+  return parts.join(" · ");
 }
 
 function mediaLockMessage(process) {
   if (!process) return "";
+  if (process.kind === "gpu") return "A Python or Isaac process outside the panel is using the GPU.";
   if (process.kind === "training") return "Training is running. New training requests will be queued until the GPU is free.";
   if (process.kind === "video") return "Video recording is running. Stop recording before starting another Isaac action.";
   if (process.kind === "onnx") return "ONNX export is running. Stop it before starting playback or recording.";
   return "Playback is running. Stop Play before starting another Isaac action.";
+}
+
+function renderGpuLockStatus() {
+  const status = $("#gpu-lock-status");
+  if (!status) return;
+  const process = activeGpuProcess();
+  if (!process) {
+    status.hidden = true;
+    status.textContent = "";
+    return;
+  }
+  const owner = processOwnerLabel(process);
+  status.hidden = false;
+  status.innerHTML = `
+    <span>${escapeHtml(mediaLockMessage(process))}${owner ? ` Active: ${escapeHtml(owner)}.` : ""}</span>
+    <button type="button" class="danger-button small-button" id="stop-gpu-process" data-tooltip="Stop the active GPU process">Stop GPU Process</button>
+    <button type="button" class="ghost-button small-button" id="show-gpu-process" data-tooltip="Open the process console">Console</button>
+  `;
 }
 
 function consoleTargetForRun(runId) {
@@ -806,12 +999,16 @@ function renderRuns() {
       const active = state.selectedRun && state.selectedRun.id === run.id ? "active" : "";
       const title = run.display_name || run.id;
       const deleting = state.pendingDeleteRunIds.has(run.id);
+      const moving = isPending("folder", run.id);
+      const compacting = isPending("compact", run.id);
+      const busy = deleting || moving || compacting;
       const queued = String(run.status || "").toLowerCase() === "queued";
       const canTensorboard = Boolean(run.log_dir);
       const canCheckpoint = Boolean(run.latest_checkpoint);
       const playProcessId = activeProcessIdForRun(run.id, "play");
       const videoProcessId = activeProcessIdForRun(run.id, "video");
       const onnxProcessId = activeProcessIdForRun(run.id, "onnx");
+      const trainingProcessId = activeProcessIdForRun(run.id, "training");
       const paramSummary = runParamSummary(run);
       const timeSummary = runTimeSummary(run);
       const videoText = videoProcessId ? "recording video" : videoSummary(run);
@@ -824,8 +1021,8 @@ function renderRuns() {
       const canTweak = !["running", "stopping"].includes(String(run.status || "").toLowerCase());
       const unread = state.notifications.unreadRunIds.has(run.id);
       return `
-        <article class="run-card ${active} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""}" data-run-id="${escapeHtml(run.id)}">
-          <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${deleting ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for folder move" data-tooltip="Select for folder move">
+        <article class="run-card ${active} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? 'aria-busy="true"' : ""}>
+          <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${busy ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for folder move" data-tooltip="Select for folder move">
           <div class="run-top">
             <div class="run-title">
               ${unread ? `<span class="unread-dot" data-tooltip="Unread history update"></span>` : ""}
@@ -847,21 +1044,26 @@ function renderRuns() {
               ? `<small><span class="terrain-diff-badge">${escapeHtml(String(run.terrain_diff_count))} terrain override${run.terrain_diff_count !== 1 ? "s" : ""}</span></small>`
               : ""}
           ${queued ? `<small>waiting for GPU queue</small>` : ""}
+          ${moving ? `<small>moving to folder...</small>` : ""}
+          ${compacting ? `<small>compacting checkpoints...</small>` : ""}
           <small>${escapeHtml(checkpointSummary(run))}${videoText ? ` · ${escapeHtml(videoText)}` : ""}${onnxText ? ` · ${escapeHtml(onnxText)}` : ""}${escapeHtml(runStatusDetail(run))}${run.has_notes ? " <strong>+ notes</strong>" : ""}</small>
           <div class="run-actions">
-            <button type="button" data-action="tensorboard" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting || !canTensorboard)} data-tooltip="Open metrics">TensorBoard</button>
-            <button type="button" data-action="${playAction}" data-run-id="${escapeHtml(run.id)}" ${playProcessAttr} ${runButtonDisabled(deleting || playDisabled)} data-tooltip="${playProcessId ? "Stop Isaac playback" : "Play checkpoint"}">${escapeHtml(playLabel)}</button>
-            <button type="button" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting || !canCheckpoint)} data-tooltip="Resume training from checkpoint">Resume to Train</button>
-            <button type="button" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting || queued || !canTweak)} data-tooltip="Copy this run into an editable reward tweak draft">Tweak</button>
+            <button type="button" data-action="tensorboard" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canTensorboard)} data-tooltip="Open metrics">TensorBoard</button>
+            <button type="button" data-action="${playAction}" data-run-id="${escapeHtml(run.id)}" ${playProcessAttr} ${runButtonDisabled(busy || playDisabled)} data-tooltip="${playProcessId ? "Stop Isaac playback" : "Play checkpoint"}">${escapeHtml(playLabel)}</button>
+            <button type="button" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)} data-tooltip="Resume training from checkpoint">Resume to Train</button>
+            <button type="button" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)} data-tooltip="Copy this run into an editable reward tweak draft">Tweak</button>
             <button type="button" data-action="console" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting)} data-tooltip="Show Process Console">Console</button>
             ${queued
-              ? `<button type="button" data-action="cancel-queue" data-run-id="${escapeHtml(run.id)}" class="danger-button" ${runButtonDisabled(deleting)} data-tooltip="Cancel this queued training run">Cancel Queue</button>`
+              ? `<button type="button" data-action="cancel-queue" data-run-id="${escapeHtml(run.id)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Cancel this queued training run">Cancel Queue</button>`
               : ""}
             ${videoProcessId
-              ? `<button type="button" data-action="stop-video" data-run-id="${escapeHtml(run.id)}" data-process-id="${escapeHtml(videoProcessId)}" ${runButtonDisabled(deleting)} data-tooltip="Stop recording">Stop Recording</button>`
+              ? `<button type="button" data-action="stop-video" data-run-id="${escapeHtml(run.id)}" data-process-id="${escapeHtml(videoProcessId)}" ${runButtonDisabled(busy)} data-tooltip="Stop recording">Stop Recording</button>`
+              : ""}
+            ${trainingProcessId
+              ? `<button type="button" data-action="stop-process" data-run-id="${escapeHtml(run.id)}" data-process-id="${escapeHtml(trainingProcessId)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Stop the active training process">Stop Training</button>`
               : ""}
             ${state.selectedRun && state.selectedRun.id !== run.id
-              ? `<button type="button" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting)} data-tooltip="Compare with selected">Compare</button>`
+              ? `<button type="button" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)} data-tooltip="Compare with selected">Compare</button>`
               : ""}
           </div>
         </article>
@@ -993,6 +1195,13 @@ function renderRunDetails() {
   const onnxProcessId = run ? activeOnnxProcessId(run) : "";
   const gpuProcess = activeGpuProcess();
   const queued = run ? String(run.status || "").toLowerCase() === "queued" : false;
+  const runId = run?.id || "";
+  const deleting = runId ? state.pendingDeleteRunIds.has(runId) : false;
+  const compacting = runId ? isPending("compact", runId) : false;
+  const moving = runId ? isPending("folder", runId) : false;
+  const renaming = runId ? isPending("rename", runId) : false;
+  const savingNotes = runId ? isPending("notes", runId) : false;
+  const runBusy = deleting || compacting || moving;
 
   // Header
   $("#details-title").textContent = run ? run.display_name || run.id : "Run Details";
@@ -1009,7 +1218,7 @@ function renderRunDetails() {
   if (infoBlock && infoGrid && run) {
     const rows = [];
     if (run.created_at) rows.push(["Created", formatRelativeTime(run.created_at)]);
-    const dur = formatDuration(run.created_at, run.updated_at);
+    const dur = formatDuration(run.started_at || run.created_at, run.completed_at || run.finished_at || run.updated_at);
     if (dur) rows.push(["Duration", dur]);
     if (run.params?.task) rows.push(["Task", run.params.task]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
@@ -1041,34 +1250,42 @@ function renderRunDetails() {
   } else if (!(state.renameDirty && state.renameDraftRunId === run.id)) {
     runName.value = run.display_name || "";
   }
-  runName.disabled = !run;
+  runName.disabled = !run || renaming || deleting;
 
   // Folder select
   renderFolderSelect(run);
 
   // Inputs
   const notesEditor = $("#notes-editor");
-  notesEditor.disabled = !run;
+  notesEditor.disabled = !run || savingNotes || deleting;
   if (!run) notesEditor.value = "";
-  $("#save-name").disabled = !run;
-  $("#save-notes").disabled = !run;
+  $("#save-name").disabled = !run || renaming || deleting;
+  $("#save-name").textContent = renaming ? "Saving..." : "Save";
+  $("#save-notes").disabled = !run || savingNotes || deleting;
+  $("#save-notes").textContent = savingNotes ? "Saving..." : "Save Notes";
 
   // Action buttons
-  $("#delete-run").disabled = !run;
-  $("#compact-run").disabled = !run || !run.log_dir || Boolean(run && activeProcessForRun(run.id));
-  $("#open-run-folder").disabled = !run || !run.log_dir;
-  $("#tensorboard-run").disabled = !run || !run.log_dir;
-  $("#play-run").disabled = !run || queued || (!run.latest_checkpoint && !playProcessId) || Boolean(gpuProcess && !playProcessId);
+  $("#delete-run").disabled = !run || runBusy;
+  $("#delete-run").textContent = deleting ? "Deleting..." : "Delete Run";
+  $("#compact-run").disabled = !run || runBusy || !run.log_dir || Boolean(run && activeProcessForRun(run.id));
+  $("#compact-run").textContent = compacting ? "Compacting..." : "Compact Run";
+  $("#open-run-folder").disabled = !run || runBusy || !run.log_dir;
+  $("#tensorboard-run").disabled = !run || runBusy || !run.log_dir;
+  $("#play-run").disabled = !run || runBusy || queued || (!run.latest_checkpoint && !playProcessId) || Boolean(gpuProcess && !playProcessId);
   $("#play-run").textContent = playProcessId ? "Stop Play" : "Play";
-  $("#export-onnx").disabled = !run || queued || !run.latest_checkpoint || Boolean(gpuProcess);
+  $("#export-onnx").disabled = !run || runBusy || queued || !run.latest_checkpoint || Boolean(gpuProcess);
   $("#export-onnx").textContent = onnxProcessId ? "Exporting ONNX" : "Export ONNX";
   $("#copy-onnx-path").hidden = !run || !run.onnx_path;
-  $("#copy-onnx-path").disabled = !run || !run.onnx_path;
+  $("#copy-onnx-path").disabled = !run || runBusy || !run.onnx_path;
   $("#open-onnx-folder").hidden = !run || !run.onnx_path;
-  $("#open-onnx-folder").disabled = !run || !run.onnx_path;
-  $("#resume-run").disabled = !run || !run.latest_checkpoint;
-  $("#tweak-run").disabled = !run || ["running", "stopping"].includes(String(run.status || "").toLowerCase());
+  $("#open-onnx-folder").disabled = !run || runBusy || !run.onnx_path;
+  $("#resume-run").disabled = !run || runBusy || !run.latest_checkpoint;
+  $("#tweak-run").disabled = !run || runBusy || ["running", "stopping"].includes(String(run.status || "").toLowerCase());
   $("#stop-process").disabled = !state.debugTarget && !run;
+  const debugKey = state.debugTarget ? `${state.debugTarget.type}:${state.debugTarget.id}` : "";
+  const debugBusy = debugKey ? isPending("debug", debugKey) : false;
+  $("#debug-refresh").disabled = !state.debugTarget || debugBusy;
+  $("#debug-refresh").textContent = debugBusy ? "Refreshing..." : "Refresh";
 
   const hasCommand = Boolean(state.lastDebug && state.lastDebug.command);
   $("#copy-command").hidden = !hasCommand;
@@ -1164,6 +1381,80 @@ function activeDeployProcessForRun(runId) {
   return activeProcessForRun(runId, "deploy");
 }
 
+function activeMujocoProcessForRun(runId) {
+  return activeProcessForRun(runId, "mujoco");
+}
+
+function mujocoVideoUrl(run) {
+  return `/api/runs/${encodeURIComponent(run.id)}/mujoco/video?v=${encodeURIComponent(run.latest_mujoco_video || run.updated_at || "")}`;
+}
+
+function mujocoVideoFolder(run) {
+  return run && run.latest_mujoco_video ? String(run.latest_mujoco_video).replace(/\/[^/]+$/, "") : "";
+}
+
+function renderMujocoScenarioOptions(defaults) {
+  const select = $("#deploy-mujoco-scenario");
+  if (!select) return;
+  const current = select.value || "stand_zero";
+  const scenarios = Array.isArray(defaults.mujoco_scenarios) && defaults.mujoco_scenarios.length
+    ? defaults.mujoco_scenarios
+    : [{ name: "stand_zero" }, { name: "forward_mid" }, { name: "yaw_mid" }, { name: "boundary_command" }];
+  select.innerHTML = scenarios
+    .map((scenario) => `<option value="${escapeHtml(scenario.name)}">${escapeHtml(scenario.name)}</option>`)
+    .join("");
+  select.value = scenarios.some((scenario) => scenario.name === current) ? current : scenarios[0].name;
+}
+
+function renderMujocoPlayback(run, defaults) {
+  renderMujocoScenarioOptions(defaults);
+  const active = run ? activeMujocoProcessForRun(run.id) : null;
+  const stateBadge = $("#deploy-mujoco-playback-state");
+  const status = $("#deploy-mujoco-playback-status");
+  const viewerButton = $("#deploy-mujoco-viewer");
+  const recordButton = $("#deploy-mujoco-record");
+  const stopButton = $("#deploy-mujoco-stop");
+  const video = $("#deploy-mujoco-video");
+  const openButton = $("#deploy-mujoco-open-video");
+  const copyButton = $("#deploy-mujoco-copy-video");
+  const canRun = Boolean(run && run.onnx_path && defaults.mujoco_installed && defaults.onnxruntime_installed);
+  const viewerReady = canRun && Boolean(defaults.mujoco_viewer_available);
+  const recordReady = canRun && Boolean(defaults.mujoco_renderer_available && defaults.mujoco_encoder_available);
+  if (viewerButton) viewerButton.disabled = !viewerReady || Boolean(active);
+  if (recordButton) recordButton.disabled = !recordReady || Boolean(active);
+  if (stopButton) {
+    stopButton.hidden = !active;
+    stopButton.disabled = !active;
+  }
+  if (stateBadge) {
+    const stateText = active ? "Running" : (run?.mujoco_playback_status || (run?.latest_mujoco_video ? "completed" : "idle"));
+    stateBadge.textContent = stateText.replace(/^\w/, (char) => char.toUpperCase());
+    stateBadge.className = active
+      ? "status-badge status-running"
+      : (stateText === "completed" ? "status-badge status-completed" : (stateText === "failed" ? "status-badge status-failed" : "status-badge muted-pill"));
+  }
+  if (video) {
+    if (run?.latest_mujoco_video) {
+      const src = mujocoVideoUrl(run);
+      if (video.getAttribute("src") !== src) video.setAttribute("src", src);
+    } else {
+      video.removeAttribute("src");
+      video.load();
+    }
+  }
+  if (openButton) openButton.hidden = !run?.latest_mujoco_video;
+  if (copyButton) copyButton.hidden = !run?.latest_mujoco_video;
+  if (status) {
+    if (!run) status.textContent = "Select a run to open or record MuJoCo playback.";
+    else if (!run.onnx_path) status.textContent = "Export ONNX before MuJoCo playback.";
+    else if (active) status.textContent = `MuJoCo ${run.mujoco_playback_mode || "playback"} running: ${active.run_id}`;
+    else if (run.mujoco_error) status.textContent = run.mujoco_error;
+    else if (run.latest_mujoco_video) status.textContent = `MuJoCo MP4 ready: ${run.latest_mujoco_video}`;
+    else if (!defaults.mujoco_viewer_available && !defaults.mujoco_encoder_available) status.textContent = "MuJoCo viewer or MP4 encoder is not available in this environment.";
+    else status.textContent = "Ready for deterministic MuJoCo scenario playback.";
+  }
+}
+
 function renderDeployReport(data) {
   const latest = data?.latest;
   const report = latest?.report;
@@ -1224,6 +1515,13 @@ function renderDeployPanel() {
   if (target) target.value = defaults.target || "Jetson ROS2";
   const model = $("#deploy-mujoco-model");
   if (model && !model.value) model.value = defaults.mujoco_model_path || "";
+  const runtimeStatus = $("#deploy-mujoco-status");
+  if (runtimeStatus) {
+    const mujoco = defaults.mujoco_installed ? `MuJoCo ${defaults.mujoco_version || "installed"}` : "MuJoCo missing";
+    const ort = defaults.onnxruntime_installed ? `ONNX Runtime ${defaults.onnxruntime_version || "installed"}` : "ONNX Runtime missing";
+    const calibration = defaults.mujoco_calibrated ? "calibrated" : "advisory";
+    runtimeStatus.textContent = `${mujoco} · ${ort} · ${calibration}`;
+  }
   const includeMujoco = $("#deploy-include-mujoco");
   if (includeMujoco && state.deployDefaults && !includeMujoco.dataset.initialized) {
     includeMujoco.checked = Boolean(defaults.include_mujoco_default);
@@ -1236,13 +1534,16 @@ function renderDeployPanel() {
   }
   renderDeployArtifactStatus(run);
   renderDeployReport(state.deployData);
+  renderMujocoPlayback(run, defaults);
   const active = run ? activeDeployProcessForRun(run.id) : null;
   const gpuProcess = activeGpuProcess();
   const validateButton = $("#deploy-validate-existing");
   const exportButton = $("#deploy-export-validate");
+  const mujocoButton = $("#deploy-mujoco-smoke");
   const stopButton = $("#deploy-stop");
   if (validateButton) validateButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
   if (exportButton) exportButton.disabled = !run || !run.latest_checkpoint || Boolean(gpuProcess && !active);
+  if (mujocoButton) mujocoButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
   if (stopButton) {
     stopButton.hidden = !active;
     stopButton.disabled = !active;
@@ -1251,22 +1552,29 @@ function renderDeployPanel() {
     state.deployDebug = { type: "deploy", id: active.run_id };
     startDeployDebugPolling();
     setDeployStatus(`Deploy readiness running: ${active.run_id}`);
+  } else {
+    const mujocoActive = run ? activeMujocoProcessForRun(run.id) : null;
+    if (mujocoActive) {
+      state.deployDebug = { type: "process", id: mujocoActive.run_id };
+      startDeployDebugPolling();
+    }
   }
 }
 
-function deployPayload(exportFirst) {
+function deployPayload(exportFirst, options = {}) {
   return {
     export_first: Boolean(exportFirst),
     device: $("#deploy-device")?.value || "cuda:0",
-    include_ros_mock: Boolean($("#deploy-include-ros")?.checked),
-    include_mujoco: Boolean($("#deploy-include-mujoco")?.checked),
+    include_ros_mock: options.mujocoOnly ? false : Boolean($("#deploy-include-ros")?.checked),
+    include_mujoco: options.mujocoOnly ? true : Boolean($("#deploy-include-mujoco")?.checked),
     use_cuda: Boolean($("#deploy-use-cuda")?.checked),
     use_tensorrt: Boolean($("#deploy-use-tensorrt")?.checked),
     mujoco_model_path: $("#deploy-mujoco-model")?.value || "",
+    mujoco_only: Boolean(options.mujocoOnly),
   };
 }
 
-async function startDeployValidation(exportFirst) {
+async function startDeployValidation(exportFirst, options = {}) {
   syncDeploySelection();
   const runId = state.deploySelectedRunId;
   if (!runId) {
@@ -1275,10 +1583,10 @@ async function startDeployValidation(exportFirst) {
   }
   const result = await api(`/api/runs/${encodeURIComponent(runId)}/deploy/start`, {
     method: "POST",
-    body: JSON.stringify(deployPayload(exportFirst)),
+    body: JSON.stringify(deployPayload(exportFirst, options)),
   });
   state.deployDebug = { type: "deploy", id: result.id };
-  setDeployStatus(`Started deploy readiness: ${result.id}`);
+  setDeployStatus(`Started ${options.mujocoOnly ? "MuJoCo smoke" : "deploy readiness"}: ${result.id}`);
   await loadRuns();
   await refreshDeployDebug();
   startDeployDebugPolling();
@@ -1292,10 +1600,76 @@ async function stopDeployValidation() {
   await loadRuns();
 }
 
+function mujocoPlaybackPayload() {
+  const defaults = state.deployDefaults?.mujoco_playback_defaults || {};
+  return {
+    scenario: $("#deploy-mujoco-scenario")?.value || "stand_zero",
+    steps: defaults.steps || 1250,
+    width: defaults.width || 1280,
+    height: defaults.height || 720,
+    fps: defaults.fps || 30,
+    mujoco_model_path: $("#deploy-mujoco-model")?.value || "",
+  };
+}
+
+async function startMujocoPlayback(mode) {
+  syncDeploySelection();
+  const runId = state.deploySelectedRunId;
+  if (!runId) {
+    setDeployStatus("Select a run first.");
+    return;
+  }
+  const endpoint = mode === "viewer" ? "viewer" : "video";
+  const result = await api(`/api/runs/${encodeURIComponent(runId)}/mujoco/${endpoint}/start`, {
+    method: "POST",
+    body: JSON.stringify(mujocoPlaybackPayload()),
+  });
+  state.deployDebug = { type: "process", id: result.id };
+  setDeployStatus(`Started MuJoCo ${mode === "viewer" ? "viewer" : "MP4 recording"}: ${result.id}`);
+  await loadRuns();
+  await refreshDeployDebug();
+  startDeployDebugPolling();
+}
+
+async function stopMujocoPlayback() {
+  const active = activeMujocoProcessForRun(state.deploySelectedRunId);
+  if (!active) return;
+  await api(`/api/mujoco/${encodeURIComponent(active.run_id)}/stop`, { method: "POST", body: "{}" });
+  setDeployStatus(`Stop requested for ${active.run_id}.`);
+  await loadRuns();
+}
+
+async function openMujocoVideoFolder() {
+  const run = findRun(state.deploySelectedRunId);
+  const folder = mujocoVideoFolder(run);
+  if (!folder) {
+    setDeployStatus("No MuJoCo video folder is available yet.");
+    return;
+  }
+  const data = await api("/api/open-location", { method: "POST", body: JSON.stringify({ path: folder }) });
+  setDeployStatus(data.opened ? `Opened ${folder}` : `Video folder: ${folder}`);
+}
+
+async function copyMujocoVideoPath() {
+  const run = findRun(state.deploySelectedRunId);
+  if (!run?.latest_mujoco_video) {
+    setDeployStatus("No MuJoCo video path is available yet.");
+    return;
+  }
+  await copyText(run.latest_mujoco_video);
+  setDeployStatus(`MuJoCo video path copied: ${run.latest_mujoco_video}`);
+}
+
 function deployDebugEndpoint() {
   const active = activeDeployProcessForRun(state.deploySelectedRunId);
-  const id = active?.run_id || state.deployDebug?.id;
-  return id ? `/api/deploy/${encodeURIComponent(id)}/debug` : "";
+  const activeMujoco = activeMujocoProcessForRun(state.deploySelectedRunId);
+  if (active?.run_id) return `/api/deploy/${encodeURIComponent(active.run_id)}/debug`;
+  if (activeMujoco?.run_id) return `/api/processes/${encodeURIComponent(activeMujoco.run_id)}/debug`;
+  const id = state.deployDebug?.id;
+  if (!id) return "";
+  return state.deployDebug?.type === "process"
+    ? `/api/processes/${encodeURIComponent(id)}/debug`
+    : `/api/deploy/${encodeURIComponent(id)}/debug`;
 }
 
 function renderDeployDebug(debug) {
@@ -1336,6 +1710,7 @@ async function refreshDeployDebug() {
     renderDeployDebug(debug);
     if (!isLiveDebug(debug)) {
       stopDeployDebugPolling();
+      await loadRuns();
       await loadDeployForSelectedRun();
     }
   } catch {
@@ -1347,7 +1722,7 @@ function startDeployDebugPolling() {
   stopDeployDebugPolling();
   state.deployDebugTimer = setTimeout(async () => {
     await refreshDeployDebug();
-    const active = activeDeployProcessForRun(state.deploySelectedRunId);
+    const active = activeDeployProcessForRun(state.deploySelectedRunId) || activeMujocoProcessForRun(state.deploySelectedRunId);
     if (active) startDeployDebugPolling();
   }, DEBUG_POLL_MS);
 }
@@ -1372,7 +1747,11 @@ async function copyDeployDebugOutput() {
 function hasActiveRun() {
   return (
     Object.keys(state.activeProcessMap).length > 0 ||
-    state.runs.some((run) => ["queued", "running", "stopping"].includes(run.status) || run.video_status === "recording")
+    state.runs.some((run) =>
+      ["queued", "running", "stopping"].includes(run.status) ||
+      run.video_status === "recording" ||
+      ["running", "stopping"].includes(run.mujoco_playback_status)
+    )
   );
 }
 
@@ -1390,8 +1769,10 @@ function scheduleRunsRefresh() {
 
 async function loadRuns() {
   const selectedId = state.selectedRun && state.selectedRun.id;
+  const scrollState = captureHistoryScroll();
   const [runsData, processesData] = await Promise.all([api("/api/runs"), api("/api/processes")]);
   state.runs = runsData.runs;
+  if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
   reconcileHistoryNotifications(state.runs);
   state.activeProcessMap = {};
   state.activeProcesses = [];
@@ -1415,8 +1796,11 @@ async function loadRuns() {
   }
   renderRuns();
   renderRunDetails();
+  renderGpuLockStatus();
   renderFolderSidebar();
+  renderFolderOptions();
   renderDeployPanel();
+  restoreHistoryScroll(scrollState);
   scheduleRunsRefresh();
 }
 
@@ -1568,7 +1952,8 @@ async function copyOnnxPath() {
 
 function isLiveDebug(debug) {
   if (debug.kind) return debug.returncode === null;
-  return debug.status === "running" || debug.status === "stopping" || debug.status === "video recording";
+  const status = String(debug.status || "").toLowerCase();
+  return status.includes("running") || status.includes("stopping") || status.includes("recording") || status.includes("exporting");
 }
 
 function outputDiagnosis(output) {
@@ -1636,6 +2021,7 @@ function renderDebug(debug) {
 async function refreshDebug() {
   if (!state.debugTarget) return;
   const target = { ...state.debugTarget };
+  setPending("debug", `${target.type}:${target.id}`, true);
   try {
     const debug = await api(debugEndpoint(target));
     if (
@@ -1647,7 +2033,8 @@ async function refreshDebug() {
       return;
     }
     renderDebug(debug);
-    if (!isLiveDebug(debug) && state.debugTarget.type === "process") stopDebugPolling();
+    if (isLiveDebug(debug)) startDebugPolling();
+    else stopDebugPolling();
   } catch (error) {
     if (
       !state.debugTarget ||
@@ -1659,7 +2046,14 @@ async function refreshDebug() {
     $("#debug-live").textContent = "Error";
     $("#debug-live").className = "status-badge error-pill";
     $("#debug-status").innerHTML = `<span class="debug-kv"><strong>Error:</strong> ${escapeHtml(error.message)}</span>`;
+  } finally {
+    setPending("debug", `${target.type}:${target.id}`, false);
   }
+}
+
+function startDebugPolling() {
+  if (state.debugTimer) return;
+  state.debugTimer = setInterval(refreshDebug, DEBUG_POLL_MS);
 }
 
 function stopDebugPolling() {
@@ -1672,7 +2066,6 @@ function setDebugTarget(target) {
   renderRunDetails();
   stopDebugPolling();
   refreshDebug();
-  state.debugTimer = setInterval(refreshDebug, DEBUG_POLL_MS);
 }
 
 function renderDebugPayload(payload) {
@@ -1728,6 +2121,7 @@ function clearRunDetailState({ render = true } = {}) {
 async function startTraining(event) {
   event.preventDefault();
   const form = $("#train-form");
+  delete $("#train-status").dataset.cudaNotice;
   $("#train-status").textContent = "Starting training...";
   try {
     const payload = formData(form);
@@ -1745,6 +2139,7 @@ async function startTraining(event) {
     await loadRuns();
     await loadActivity();
   } catch (error) {
+    if (renderCudaPreflightError(error)) return;
     $("#train-status").textContent = error.message;
   }
 }
@@ -1754,12 +2149,18 @@ async function saveNotes() {
     setStatus("Select a run first.");
     return;
   }
-  await api(`/api/runs/${encodeURIComponent(state.selectedRun.id)}/notes`, {
-    method: "POST",
-    body: JSON.stringify({ notes: $("#notes-editor").value }),
-  });
-  await loadRuns();
-  setStatus("Notes saved.");
+  const runId = state.selectedRun.id;
+  setPending("notes", runId, true);
+  try {
+    await api(`/api/runs/${encodeURIComponent(runId)}/notes`, {
+      method: "POST",
+      body: JSON.stringify({ notes: $("#notes-editor").value }),
+    });
+    await loadRuns();
+    setStatus("Notes saved.");
+  } finally {
+    setPending("notes", runId, false);
+  }
 }
 
 async function saveName() {
@@ -1769,18 +2170,23 @@ async function saveName() {
   }
   const runId = state.selectedRun.id;
   const displayName = $("#run-name").value;
-  const data = await api(`/api/runs/${encodeURIComponent(runId)}/rename`, {
-    method: "POST",
-    body: JSON.stringify({ display_name: displayName }),
-  });
-  state.renameDirty = false;
-  state.renameDraftRunId = null;
-  await loadRuns();
-  await loadActivity();
-  state.selectedRun = findRun(runId) || data.run || state.selectedRun;
-  renderRunDetails();
-  renderRuns();
-  setStatus("Name saved.");
+  setPending("rename", runId, true);
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(runId)}/rename`, {
+      method: "POST",
+      body: JSON.stringify({ display_name: displayName }),
+    });
+    state.renameDirty = false;
+    state.renameDraftRunId = null;
+    await loadRuns();
+    await loadActivity();
+    state.selectedRun = findRun(runId) || data.run || state.selectedRun;
+    renderRunDetails();
+    renderRuns();
+    setStatus("Name saved.");
+  } finally {
+    setPending("rename", runId, false);
+  }
 }
 
 function tensorboardHost() {
@@ -1970,6 +2376,27 @@ async function stopProcessById(processId) {
   await loadRuns();
 }
 
+async function stopActiveGpuProcess() {
+  const process = activeGpuProcess();
+  if (!process) {
+    $("#train-status").textContent = "No active GPU process was found.";
+    return;
+  }
+  await stopProcessById(process.run_id);
+  $("#train-status").textContent = `Stopping ${process.run_id}...`;
+}
+
+async function showActiveGpuProcess() {
+  const process = activeGpuProcess();
+  if (!process) {
+    $("#train-status").textContent = "No active GPU process was found.";
+    return;
+  }
+  setDebugTarget({ type: "process", id: process.run_id });
+  setView("history");
+  await refreshDebug();
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2024,7 +2451,9 @@ function formatDeletePreview(preview) {
     "It will remove these repo-owned files/directories:",
     paths,
     "",
-    "Click OK to delete. This cannot be undone.",
+    `To confirm, type this exact run id: ${preview.requires_confirmation || preview.id}`,
+    "",
+    "This cannot be undone.",
   ].join("\n");
 }
 
@@ -2036,20 +2465,26 @@ async function deleteSelectedRun() {
   const runId = state.selectedRun.id;
   state.pendingDeleteRunIds.add(runId);
   renderRuns();
+  renderRunDetails();
   try {
     const preview = await api(`/api/runs/${encodeURIComponent(runId)}/delete-preview`);
-    if (!window.confirm(formatDeletePreview(preview))) {
+    const confirmation = await confirmAction({
+      title: "Delete Run",
+      body: formatDeletePreview(preview),
+      confirmLabel: "Delete Run",
+      requiredText: preview.requires_confirmation || runId,
+      inputLabel: `Type ${preview.requires_confirmation || runId} to permanently delete this run.`,
+    });
+    if (!confirmation) {
       setStatus("Delete cancelled.");
       return;
     }
     const result = await api(`/api/runs/${encodeURIComponent(runId)}/delete`, {
       method: "POST",
-      body: JSON.stringify({ confirm: true, delete_logs: true }),
+      body: JSON.stringify({ confirmation, delete_logs: true }),
     });
     const deletedRunId = result.run_id || runId;
-    state.runs = state.runs.filter((run) => run.id !== deletedRunId);
     clearRunDetailState();
-    renderRuns();
     await loadRuns();
     await loadActivity();
     setStatus(`Deleted ${deletedRunId}. Removed ${result.deleted_paths.length} log/note path(s).`);
@@ -2058,6 +2493,7 @@ async function deleteSelectedRun() {
   } finally {
     state.pendingDeleteRunIds.delete(runId);
     renderRuns();
+    renderRunDetails();
   }
 }
 
@@ -2076,7 +2512,7 @@ function formatBulkDeletePreview(preview) {
     "",
     lines.join("\n") || "- No matching runs found.",
     "",
-    "Click OK to delete. This cannot be undone.",
+    "This cannot be undone.",
   ].join("\n");
 }
 
@@ -2099,7 +2535,12 @@ async function deleteSelectedRuns() {
       setStatus("No selected runs can be deleted.");
       return;
     }
-    if (!window.confirm(formatBulkDeletePreview(preview))) {
+    const confirmed = await confirmAction({
+      title: "Delete Selected Runs",
+      body: formatBulkDeletePreview(preview),
+      confirmLabel: "Delete Selected",
+    });
+    if (!confirmed) {
       setStatus("Bulk delete cancelled.");
       return;
     }
@@ -2113,11 +2554,9 @@ async function deleteSelectedRuns() {
       ...(result.deleted_run_ids || []),
       ...runIds,
     ]);
-    state.runs = state.runs.filter((run) => !affectedRunIds.has(run.id));
     if (state.selectedRun && affectedRunIds.has(state.selectedRun.id)) {
       clearRunDetailState();
     }
-    renderRuns();
     await loadRuns();
     await loadActivity();
     const skipped = (result.skipped_duplicate_ids || []).length;
@@ -3045,7 +3484,11 @@ function renderComparisonPanel(runA, runB) {
   const rows = [
     comparisonRowHtml("Status", runA.status, runB.status),
     comparisonRowHtml("Created", formatRelativeTime(runA.created_at), formatRelativeTime(runB.created_at)),
-    comparisonRowHtml("Duration", formatDuration(runA.created_at, runA.updated_at), formatDuration(runB.created_at, runB.updated_at)),
+    comparisonRowHtml(
+      "Duration",
+      formatDuration(runA.started_at || runA.created_at, runA.completed_at || runA.finished_at || runA.updated_at),
+      formatDuration(runB.started_at || runB.created_at, runB.completed_at || runB.finished_at || runB.updated_at)
+    ),
     comparisonRowHtml("Task", runA.params?.task, runB.params?.task),
     comparisonRowHtml("Environments", runA.params?.num_envs, runB.params?.num_envs),
     comparisonRowHtml("Max Iterations", runA.params?.max_iterations, runB.params?.max_iterations),
@@ -3095,10 +3538,17 @@ function updateBulkToolbar() {
   const clear = $("#clear-selected-runs");
   const deleteButton = $("#delete-selected-runs");
   const selectedCount = state.selectedRunIds.size;
+  const bulkBusy = state.isBulkDeleting || isPending("folder", "bulk");
   if (count) count.textContent = `${selectedCount} selected`;
-  if (move) move.disabled = selectedCount === 0;
-  if (clear) clear.disabled = selectedCount === 0;
-  if (deleteButton) deleteButton.disabled = selectedCount === 0 || state.isBulkDeleting;
+  if (move) {
+    move.disabled = selectedCount === 0 || bulkBusy;
+    move.textContent = isPending("folder", "bulk") ? "Moving..." : "Move selected";
+  }
+  if (clear) clear.disabled = selectedCount === 0 || bulkBusy;
+  if (deleteButton) {
+    deleteButton.disabled = selectedCount === 0 || bulkBusy;
+    deleteButton.textContent = state.isBulkDeleting ? "Deleting..." : "Delete selected";
+  }
 }
 
 function toggleRunSelection(runId, checked) {
@@ -3120,17 +3570,24 @@ function clearRunSelection() {
 
 async function assignRunsToFolder(runIds, folderValue, options = {}) {
   const folder = folderValue === "" ? null : folderValue;
-  const data = await api("/api/folders/assign", {
-    method: "POST",
-    body: JSON.stringify({ run_ids: runIds, folder }),
-  });
-  state.folders = data.folders || state.folders;
-  if (options.clearSelection !== false) state.selectedRunIds.clear();
-  await loadRuns();
-  await loadFolders();
-  const label = folder || "Uncategorized";
-  setStatus(`Moved ${data.run_ids.length} run${data.run_ids.length !== 1 ? "s" : ""} to ${label}.`);
-  return data;
+  const cleanedIds = runIds.map((runId) => String(runId || "").trim()).filter(Boolean);
+  cleanedIds.forEach((runId) => setPending("folder", runId, true));
+  renderRuns();
+  try {
+    const data = await api("/api/folders/assign", {
+      method: "POST",
+      body: JSON.stringify({ run_ids: cleanedIds, folder }),
+    });
+    state.folders = data.folders || state.folders;
+    if (options.clearSelection !== false) state.selectedRunIds.clear();
+    await loadRuns();
+    const label = folder || "Uncategorized";
+    setStatus(`Moved ${data.run_ids.length} run${data.run_ids.length !== 1 ? "s" : ""} to ${label}.`);
+    return data;
+  } finally {
+    cleanedIds.forEach((runId) => setPending("folder", runId, false));
+    renderRuns();
+  }
 }
 
 async function moveSelectedRunsToFolder() {
@@ -3139,7 +3596,12 @@ async function moveSelectedRunsToFolder() {
     setStatus("Select one or more runs first.");
     return;
   }
-  await assignRunsToFolder(runIds, $("#bulk-folder-select")?.value || "");
+  setPending("folder", "bulk", true);
+  try {
+    await assignRunsToFolder(runIds, $("#bulk-folder-select")?.value || "");
+  } finally {
+    setPending("folder", "bulk", false);
+  }
 }
 
 async function loadFolders() {
@@ -3236,7 +3698,6 @@ async function deleteFolder(folderName) {
   state.folders = data.folders || state.folders.filter((item) => item !== folder);
   if (state.activeFolder === folder) state.activeFolder = "";
   await loadRuns();
-  await loadFolders();
   await loadActivity();
   setStatus(`Removed folder ${folder}. Moved ${data.moved_count || 0} run${data.moved_count === 1 ? "" : "s"} to Uncategorized.`);
 }
@@ -3249,7 +3710,6 @@ async function renameFolder(oldName, newName) {
   state.folders = data.folders || state.folders;
   if (state.activeFolder === oldName) state.activeFolder = data.new_folder;
   await loadRuns();
-  await loadFolders();
   await loadActivity();
   setStatus(`Renamed folder ${data.old_folder} to ${data.new_folder}.`);
   return data;
@@ -3281,7 +3741,7 @@ function renderFolderOptions() {
 function renderFolderSelect(run) {
   const sel = $("#run-folder-select");
   if (!sel) return;
-  sel.disabled = !run;
+  sel.disabled = !run || state.pendingDeleteRunIds.has(run.id) || isPending("folder", run.id);
   renderFolderOptions();
   sel.value = run ? (run.folder || "") : "";
 }
@@ -3297,7 +3757,7 @@ async function createFolder(folderName) {
     body: JSON.stringify({ name: folderName }),
   });
   state.folders = data.folders || state.folders;
-  await loadFolders();
+  await loadRuns();
   await loadActivity();
   setStatus(`Created folder ${data.folder}.`);
   return data.folder;
@@ -3692,7 +4152,6 @@ async function loadActivity() {
 async function refreshAll() {
   await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadActivity(), loadDeployDefaults()]);
   await loadRuns();
-  await loadFolders();
   if (state.selectedRun) setDebugTarget({ type: "run", id: state.selectedRun.id });
 }
 
@@ -3807,23 +4266,36 @@ async function compactSelectedRun() {
     return;
   }
   const runId = state.selectedRun.id;
-  const preview = await api(`/api/runs/${encodeURIComponent(runId)}/compact-preview`);
-  if (preview.delete_count === 0) {
-    setStatus(`Nothing to compact. Keeping ${preview.kept_checkpoint}.`);
-    return;
+  setPending("compact", runId, true);
+  renderRuns();
+  try {
+    const preview = await api(`/api/runs/${encodeURIComponent(runId)}/compact-preview`);
+    if (preview.delete_count === 0) {
+      setStatus(`Nothing to compact. Keeping ${preview.kept_checkpoint}.`);
+      return;
+    }
+    const confirmation = await confirmAction({
+      title: "Compact Run",
+      body: formatCompactPreview(preview),
+      confirmLabel: "Compact Run",
+      requiredText: preview.requires_confirmation || runId,
+      inputLabel: `Type ${preview.requires_confirmation || runId} to delete old checkpoints.`,
+    });
+    if (!confirmation) {
+      setStatus("Compact cancelled.");
+      return;
+    }
+    const result = await api(`/api/runs/${encodeURIComponent(runId)}/compact`, {
+      method: "POST",
+      body: JSON.stringify({ confirmation }),
+    });
+    await loadRuns();
+    await loadActivity();
+    setStatus(`Compacted ${result.run_id}. Deleted ${result.deleted_paths.length} checkpoint(s), freed ${formatBytes(result.bytes_freed)}.`);
+  } finally {
+    setPending("compact", runId, false);
+    renderRuns();
   }
-  const confirmation = window.prompt(formatCompactPreview(preview), "");
-  if (confirmation === null) {
-    setStatus("Compact cancelled.");
-    return;
-  }
-  const result = await api(`/api/runs/${encodeURIComponent(runId)}/compact`, {
-    method: "POST",
-    body: JSON.stringify({ confirmation }),
-  });
-  await loadRuns();
-  await loadActivity();
-  setStatus(`Compacted ${result.run_id}. Deleted ${result.deleted_paths.length} checkpoint(s), freed ${formatBytes(result.bytes_freed)}.`);
 }
 
 document.querySelectorAll(".nav-button").forEach((button) => {
@@ -3869,6 +4341,12 @@ $("#copy-command").addEventListener("click", () => copyLaunchCommand().catch(han
 $("#terminal-view").addEventListener("click", () => openTerminalView());
 $("#open-process-log-folder").addEventListener("click", () => openProcessLogFolder().catch(handleActionError));
 $("#stop-process").addEventListener("click", () => stopSelectedProcess().catch(handleActionError));
+$("#gpu-lock-status").addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.id === "stop-gpu-process") stopActiveGpuProcess().catch(handleActionError);
+  if (button.id === "show-gpu-process") showActiveGpuProcess().catch(handleActionError);
+});
 $("#resume-run").addEventListener("click", () => state.selectedRun && handleRunAction("resume", state.selectedRun.id));
 $("#tweak-run").addEventListener("click", () => state.selectedRun && handleRunAction("tweak", state.selectedRun.id));
 $("#tweak-last-run").addEventListener("click", tweakFromLastRun);
@@ -3889,11 +4367,16 @@ $("#deploy-run-select").addEventListener("change", (event) => {
 $("#deploy-refresh").addEventListener("click", () => loadDeployForSelectedRun().catch(handleActionError));
 $("#deploy-validate-existing").addEventListener("click", () => startDeployValidation(false).catch(handleActionError));
 $("#deploy-export-validate").addEventListener("click", () => startDeployValidation(true).catch(handleActionError));
+$("#deploy-mujoco-smoke").addEventListener("click", () => startDeployValidation(false, { mujocoOnly: true }).catch(handleActionError));
 $("#deploy-stop").addEventListener("click", () => stopDeployValidation().catch(handleActionError));
 $("#deploy-debug-refresh").addEventListener("click", () => refreshDeployDebug().catch(handleActionError));
 $("#deploy-copy-report").addEventListener("click", () => copyDeployReport().catch(handleActionError));
 $("#deploy-copy-debug").addEventListener("click", () => copyDeployDebugOutput().catch(handleActionError));
-
+$("#deploy-mujoco-viewer").addEventListener("click", () => startMujocoPlayback("viewer").catch(handleActionError));
+$("#deploy-mujoco-record").addEventListener("click", () => startMujocoPlayback("record").catch(handleActionError));
+$("#deploy-mujoco-stop").addEventListener("click", () => stopMujocoPlayback().catch(handleActionError));
+$("#deploy-mujoco-open-video").addEventListener("click", () => openMujocoVideoFolder().catch(handleActionError));
+$("#deploy-mujoco-copy-video").addEventListener("click", () => copyMujocoVideoPath().catch(handleActionError));
 
 // Rewards page event listeners
 const presetActivateBtn = $("#preset-activate-btn");

@@ -13,6 +13,14 @@
 
 目前沒有。安靜得很可疑，但先享受一下。
 
+## V3.4.3 History Sync Repair
+
+### Fixed
+
+- Child history 現在會依 machine 查 Supabase 的 runs、jobs、tombstones、folders、artifacts，不再先拿一小段全域資料再過濾，避免漏掉 Mother 的資料。
+- Mother 清掉 run name、notes、folder 時，會同步清掉 Child / Supabase 上的舊資料，不再因為空值被省略而殘留。
+- Mother 刪除 folder 後會留下本機 tombstone，避免舊的 remote `team_folders` row 又把資料夾復活。
+
 ## V3.4.2 Folder Sync + Notification Reliability
 
 ### Added

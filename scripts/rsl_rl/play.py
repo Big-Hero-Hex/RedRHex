@@ -145,6 +145,48 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import RedRhex.tasks  # noqa: F401
 
 
+def _load_runner_checkpoint_with_policy_fallback(runner, resume_path: str, device: str) -> None:
+    """Load a checkpoint, falling back to actor-compatible weights for old critic shapes."""
+    try:
+        runner.load(resume_path)
+        return
+    except RuntimeError as exc:
+        original_error = exc
+
+    policy_module = runner.alg.policy if hasattr(runner.alg, "policy") else runner.alg.actor_critic
+    checkpoint = torch.load(resume_path, map_location=device)
+    if not isinstance(checkpoint, dict):
+        raise original_error
+
+    state_dict = None
+    for key in ("model_state_dict", "policy_state_dict", "actor_critic_state_dict", "student_state_dict"):
+        candidate = checkpoint.get(key)
+        if isinstance(candidate, dict):
+            state_dict = candidate
+            break
+    if state_dict is None:
+        state_dict = checkpoint if all(hasattr(v, "shape") for v in checkpoint.values()) else None
+    if state_dict is None:
+        raise original_error
+
+    current_state = policy_module.state_dict()
+    compatible_state = {}
+    for key, value in state_dict.items():
+        if key in current_state and hasattr(value, "shape") and current_state[key].shape == value.shape:
+            compatible_state[key] = value.to(device=current_state[key].device, dtype=current_state[key].dtype)
+    if not compatible_state:
+        raise original_error
+
+    merged_state = dict(current_state)
+    merged_state.update(compatible_state)
+    policy_module.load_state_dict(merged_state, strict=True)
+    skipped = len(state_dict) - len(compatible_state)
+    print(
+        "[WARN] Full checkpoint load failed, likely due to critic/privileged-observation shape changes. "
+        f"Loaded {len(compatible_state)} actor-compatible tensors and skipped {skipped} tensors for inference."
+    )
+
+
 def _apply_panel_terrain_override(env_cfg, override_file: str | None) -> None:
     if not override_file:
         return
@@ -628,7 +670,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
     else:
         raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    runner.load(resume_path)
+    _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)

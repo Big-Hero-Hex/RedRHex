@@ -313,9 +313,30 @@ class RedrhexEnv(DirectRLEnv):
         self.actions = torch.zeros(self.num_envs, self.cfg.action_space, device=self.device)
         # last_actions = 上一次的動作（用來計算動作變化率，讓動作更平滑）
         self.last_actions = torch.zeros_like(self.actions)
+        self._action_nan_count = torch.zeros(self.num_envs, device=self.device)
         
         # 主驅動關節上一次的速度（用來計算加速度，避免動作太劇烈）
         self.last_main_drive_vel = torch.zeros(self.num_envs, self.num_main_drive_joints, device=self.device)
+
+        # ABAD rest pose: policy commands offsets around the configured init-state pose.
+        abad_init_angles = []
+        for joint_name in self.cfg.abad_joint_names:
+            angle = self.cfg.robot_cfg.init_state.joint_pos.get(joint_name, 0.0)
+            abad_init_angles.append(angle)
+        self._abad_rest_pos = torch.tensor(abad_init_angles, device=self.device).unsqueeze(0)
+        self._abad_pos_limit_rad = float(
+            getattr(
+                self.cfg,
+                "abad_pos_limit_rad",
+                getattr(self.cfg, "abad_pos_limit", math.radians(60.0)),
+            )
+        )
+        self._abad_action_scale = min(
+            float(getattr(self.cfg, "abad_pos_scale", self._abad_pos_limit_rad)),
+            self._abad_pos_limit_rad,
+        )
+        print(f"[ABAD休止角度] {[f'{a*180/3.14159:.1f}°' for a in abad_init_angles]}")
+        print(f"[ABAD限制] ±{self._abad_pos_limit_rad:.3f} rad, action scale={self._abad_action_scale:.3f} rad")
 
         # =================================================================
         # 避震關節的初始位置
@@ -327,14 +348,16 @@ class RedrhexEnv(DirectRLEnv):
             angle = self.cfg.robot_cfg.init_state.joint_pos.get(joint_name, 0.0)
             damper_init_angles.append(angle)
         self._damper_initial_pos = torch.tensor(damper_init_angles, device=self.device).unsqueeze(0)
+        self._damper_rest_pos = self._damper_initial_pos.clone()
         print(f"[避震關節初始角度] {[f'{a*180/3.14159:.1f}°' for a in damper_init_angles]}")
 
         # ★ 彈簧物理常數（從 cfg 讀取，保持一致）
         self._spring_k = float(getattr(self.cfg, 'damper_stiffness', 200.0))
         self._spring_d = float(getattr(self.cfg, 'damper_damping', 20.0))
         self._robot_mass = float(getattr(self.cfg, 'robot_mass_kg', 14.0))
-        self._energy_yaw_radius = float(getattr(self.cfg, "energy_velocity_yaw_radius", 0.18))
-        self._energy_min_cmd_motion = float(getattr(self.cfg, "energy_min_command_motion", 0.05))
+        self._energy_per_distance_max = float(getattr(self.cfg, "energy_per_distance_max", 500.0))
+        self._energy_distance_eps = float(getattr(self.cfg, "energy_distance_eps", 1e-4))
+        self._energy_command_threshold = float(getattr(self.cfg, "energy_command_threshold", 0.05))
         self._main_drive_torque_estimate_damping = float(
             getattr(self.cfg, "main_drive_torque_estimate_damping", 50.0)
         )
@@ -477,9 +500,16 @@ class RedrhexEnv(DirectRLEnv):
             "diag_base_height": torch.zeros(self.num_envs, device=self.device),
             "diag_tilt": torch.zeros(self.num_envs, device=self.device),
             "diag_drive_vel_mean": torch.zeros(self.num_envs, device=self.device),
+            "diag_main_drive_target_vel_mean": torch.zeros(self.num_envs, device=self.device),
+            "diag_main_drive_vel_mean": torch.zeros(self.num_envs, device=self.device),
+            "diag_main_drive_vel_error": torch.zeros(self.num_envs, device=self.device),
             "diag_rotating_legs": torch.zeros(self.num_envs, device=self.device),
             "diag_min_leg_vel": torch.zeros(self.num_envs, device=self.device),
             "diag_abad_magnitude": torch.zeros(self.num_envs, device=self.device),
+            "diag_abad_target_max_abs": torch.zeros(self.num_envs, device=self.device),
+            "diag_abad_pos_max_abs": torch.zeros(self.num_envs, device=self.device),
+            "diag_abad_pos_limit_violation": torch.zeros(self.num_envs, device=self.device),
+            "diag_abad_forward_lock_error": torch.zeros(self.num_envs, device=self.device),
             # 旋轉追蹤診斷
             "diag_cmd_wz": torch.zeros(self.num_envs, device=self.device),
             "diag_actual_wz": torch.zeros(self.num_envs, device=self.device),
@@ -521,35 +551,27 @@ class RedrhexEnv(DirectRLEnv):
             "diag_push_events": torch.zeros(self.num_envs, device=self.device),
             "diag_terrain_level": torch.zeros(self.num_envs, device=self.device),
             "diag_action_warmup": torch.zeros(self.num_envs, device=self.device),
+            "diag_action_nan_count": torch.zeros(self.num_envs, device=self.device),
             # 簡化獎勵診斷彙總
             "diag_leg_speed": torch.zeros(self.num_envs, device=self.device),
             "diag_stance_count": torch.zeros(self.num_envs, device=self.device),
-            # ★★★ 節能 reward 與 diagnostic ★★★
-            "rew_power_efficiency": torch.zeros(self.num_envs, device=self.device),
+            # Single active energy reward and its diagnostics.
             "rew_energy_per_distance": torch.zeros(self.num_envs, device=self.device),
-            "rew_spring_recovery": torch.zeros(self.num_envs, device=self.device),
-            "rew_spring_utilization": torch.zeros(self.num_envs, device=self.device),
-            "rew_torque_penalty": torch.zeros(self.num_envs, device=self.device),
-            "diag_mech_power_main": torch.zeros(self.num_envs, device=self.device),
-            "diag_mech_power_abad": torch.zeros(self.num_envs, device=self.device),
-            "diag_mech_power_total": torch.zeros(self.num_envs, device=self.device),
-            "diag_spring_energy_total": torch.zeros(self.num_envs, device=self.device),
-            "diag_spring_power_release": torch.zeros(self.num_envs, device=self.device),
-            "diag_spring_power_store": torch.zeros(self.num_envs, device=self.device),
-            "diag_spring_recovery_ratio": torch.zeros(self.num_envs, device=self.device),
-            "diag_damper_dissipation": torch.zeros(self.num_envs, device=self.device),
-            "diag_spring_deflection_std": torch.zeros(self.num_envs, device=self.device),
-            "diag_cost_of_transport": torch.zeros(self.num_envs, device=self.device),
-            "diag_motion_speed_equiv": torch.zeros(self.num_envs, device=self.device),
-            "diag_cmd_motion_speed_equiv": torch.zeros(self.num_envs, device=self.device),
-            "diag_useful_progress_speed": torch.zeros(self.num_envs, device=self.device),
+            "diag_energy_cost": torch.zeros(self.num_envs, device=self.device),
+            "diag_progress_distance": torch.zeros(self.num_envs, device=self.device),
             "diag_energy_per_distance": torch.zeros(self.num_envs, device=self.device),
-            "diag_torque_rms_main": torch.zeros(self.num_envs, device=self.device),
+            "diag_damper_pos_error": torch.zeros(self.num_envs, device=self.device),
+            "diag_damper_vel_rms": torch.zeros(self.num_envs, device=self.device),
+            "diag_damper_pos_mean": torch.zeros(self.num_envs, device=self.device),
         }
 
         # 初始化目標速度緩衝
         self._target_drive_vel = torch.zeros(self.num_envs, self.num_main_drive_joints, device=self.device)
-        self._target_abad_pos = torch.zeros(self.num_envs, self.num_abad_joints, device=self.device)
+        self._target_abad_pos = self._abad_rest_pos.expand(self.num_envs, -1).clone()
+        self.robot.set_joint_position_target(self._target_abad_pos, joint_ids=self._abad_indices)
+        self._damper_pos_target = self._damper_rest_pos.expand(self.num_envs, -1).clone()
+        self._damper_vel_target = torch.zeros(self.num_envs, self.num_damper_joints, device=self.device)
+        self._apply_damper_hold()
         self._base_velocity = torch.zeros(self.num_envs, self.num_main_drive_joints, device=self.device)  # 基礎速度（未經AI調節）
         
         # 模式與 gating 狀態緩衝
@@ -1196,6 +1218,7 @@ class RedrhexEnv(DirectRLEnv):
     def _get_privileged_observations(self) -> torch.Tensor:
         drive_scale = max(float(getattr(self.cfg, "main_drive_vel_scale", 8.0)), 1.0)
         abad_scale = max(float(getattr(self.cfg, "abad_pos_scale", 0.5)), 1.0e-6)
+        abad_target_offset = self._target_abad_pos - self._abad_rest_pos.expand(self.num_envs, -1)
         base_height = self.robot.data.root_pos_w[:, 2:3]
         contact_frac = torch.clamp(
             self._contact_count.unsqueeze(1) / max(float(self.num_main_drive_joints), 1.0),
@@ -1206,7 +1229,7 @@ class RedrhexEnv(DirectRLEnv):
         privileged_obs = torch.cat(
             [
                 self._target_drive_vel / drive_scale,
-                self._target_abad_pos / abad_scale,
+                abad_target_offset / abad_scale,
                 self._current_leg_in_stance.float(),
                 self._main_strength_scale_per_leg,
                 self._abad_strength_scale_per_leg,
@@ -1481,7 +1504,9 @@ class RedrhexEnv(DirectRLEnv):
         限制在 [-1, 1] 可以防止失控。
         """
         self.last_actions = self.actions.clone()           # 記住舊動作
-        self.actions = actions.clone().clamp(-1.0, 1.0)    # 接收並限制新動作
+        self._action_nan_count = torch.isnan(actions).float().sum(dim=1)
+        safe_actions = torch.nan_to_num(actions.clone(), nan=0.0, posinf=1.0, neginf=-1.0)
+        self.actions = safe_actions.clamp(-1.0, 1.0)       # 接收並限制新動作
 
     def _resolve_command_modes(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """根據命令分出 FWD/LAT/DIAG/YAW/OTHER 五種模式。"""
@@ -1558,21 +1583,12 @@ class RedrhexEnv(DirectRLEnv):
         """圓周相位距離（範圍 [0, π]）。"""
         return torch.abs(torch.atan2(torch.sin(phase_a - phase_b), torch.cos(phase_a - phase_b)))
 
-    def _compute_energy_equivalent_speed(
-        self,
-        lin_xy: torch.Tensor,
-        yaw_rate: torch.Tensor,
-    ) -> torch.Tensor:
-        """把平移速度與 yaw rate 合成單一等效速度，避免 pure yaw 被當成零速。"""
-        yaw_equiv = self._energy_yaw_radius * yaw_rate
-        return torch.sqrt(torch.sum(torch.square(lin_xy), dim=1) + torch.square(yaw_equiv))
-
     def _get_active_joint_torques(
         self,
         main_drive_vel: torch.Tensor,
         abad_vel: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """優先讀 simulator torque；若欄位不存在則回退到控制器 proxy。"""
+        """Prefer simulator torque; fall back to an actuator-model torque proxy."""
         torque_tensor = None
         for attr_name in ("applied_torque", "computed_torque", "joint_torque"):
             candidate = getattr(self.robot.data, attr_name, None)
@@ -1601,6 +1617,127 @@ class RedrhexEnv(DirectRLEnv):
             max=self._abad_torque_estimate_limit,
         )
         return main_torques, abad_torques
+
+    def _as_env_id_tensor(self, env_ids: Sequence[int] | torch.Tensor | None) -> torch.Tensor | None:
+        if env_ids is None:
+            return None
+        if isinstance(env_ids, torch.Tensor):
+            return env_ids.to(device=self.device, dtype=torch.long)
+        return torch.tensor(env_ids, device=self.device, dtype=torch.long)
+
+    def _apply_damper_hold(self, env_ids: Sequence[int] | torch.Tensor | None = None) -> None:
+        """Hold passive damper joints at their init-state rest pose with zero velocity target."""
+        if self.num_damper_joints == 0:
+            return
+
+        env_ids_tensor = self._as_env_id_tensor(env_ids)
+        if env_ids_tensor is None:
+            pos_target, vel_target = self._compute_damper_targets(self.num_envs)
+            self._damper_pos_target.copy_(pos_target)
+            self._damper_vel_target.copy_(vel_target)
+            self.robot.set_joint_position_target(self._damper_pos_target, joint_ids=self._damper_indices)
+            self.robot.set_joint_velocity_target(self._damper_vel_target, joint_ids=self._damper_indices)
+            return
+
+        rest_target, zero_vel_target = self._compute_damper_targets(env_ids_tensor.numel())
+        self._damper_pos_target[env_ids_tensor] = rest_target
+        self._damper_vel_target[env_ids_tensor] = zero_vel_target
+        self.robot.set_joint_position_target(rest_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor)
+        self.robot.set_joint_velocity_target(zero_vel_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor)
+
+    def _compute_damper_targets(self, env_count: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Damper targets are fixed rest-pose position hold plus zero velocity."""
+        pos_target = self._damper_rest_pos.expand(env_count, -1)
+        vel_target = torch.zeros(env_count, self.num_damper_joints, device=self.device)
+        return pos_target, vel_target
+
+    def _compute_damper_diagnostics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        damper_pos = self.joint_pos[:, self._damper_indices]
+        damper_vel = self.joint_vel[:, self._damper_indices]
+        damper_rest = self._damper_rest_pos.expand(self.num_envs, -1)
+        damper_pos_error = torch.mean(torch.abs(damper_pos - damper_rest), dim=1)
+        damper_vel_rms = torch.sqrt(torch.mean(torch.square(damper_vel), dim=1).clamp(min=0.0))
+        damper_pos_mean = torch.mean(damper_pos, dim=1)
+        return damper_pos_error, damper_vel_rms, damper_pos_mean
+
+    def _compute_abad_limit_diagnostics(
+        self, mode_fwd: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        abad_rest = self._abad_rest_pos.expand(self.num_envs, -1)
+        abad_pos_offset = self.joint_pos[:, self._abad_indices] - abad_rest
+        abad_target_offset = self._target_abad_pos - abad_rest
+        pos_abs = torch.abs(abad_pos_offset)
+        target_abs = torch.abs(abad_target_offset)
+        target_max_abs = target_abs.max(dim=1).values
+        pos_max_abs = pos_abs.max(dim=1).values
+        tol = float(getattr(self.cfg, "abad_pos_limit_tolerance", 0.02))
+        limit_violation = (pos_abs > (self._abad_pos_limit_rad + tol)).any(dim=1).float()
+        if mode_fwd is None:
+            mode_fwd = self._mode_fwd
+        forward_lock_error = torch.where(
+            mode_fwd,
+            pos_abs.mean(dim=1),
+            torch.zeros(self.num_envs, device=self.device),
+        )
+        return target_max_abs, pos_max_abs, limit_violation, forward_lock_error
+
+    def _compute_energy_per_distance_reward(
+        self,
+        main_drive_vel: torch.Tensor,
+        abad_vel: torch.Tensor,
+        actual_lin: torch.Tensor,
+        cmd_lin: torch.Tensor,
+        healthy_gate: torch.Tensor | None,
+        scales: dict[str, float],
+    ) -> dict[str, torch.Tensor]:
+        """Single active energy reward: energy consumed per positive commanded-direction distance."""
+        dt = float(self.step_dt)
+        zeros = torch.zeros(self.num_envs, device=self.device)
+        eps = max(float(getattr(self, "_energy_distance_eps", 1e-4)), 1e-8)
+        command_threshold = max(float(getattr(self, "_energy_command_threshold", 0.05)), 0.0)
+        energy_max = max(float(getattr(self, "_energy_per_distance_max", 500.0)), eps)
+        weight = float(scales.get("energy_per_distance", 0.001))
+
+        main_torques, abad_torques = self._get_active_joint_torques(main_drive_vel, abad_vel)
+        mech_power = (
+            torch.sum(torch.abs(main_torques * main_drive_vel), dim=1)
+            + torch.sum(torch.abs(abad_torques * abad_vel), dim=1)
+        )
+        energy_cost = mech_power * dt
+
+        cmd_lin_speed = torch.linalg.norm(cmd_lin, dim=1)
+        translation_cmd = cmd_lin_speed > command_threshold
+        cmd_dir = cmd_lin / torch.clamp(cmd_lin_speed, min=eps).unsqueeze(1)
+        progress_speed = torch.sum(actual_lin * cmd_dir, dim=1)
+        positive_progress_speed = torch.clamp(progress_speed, min=0.0)
+        progress_distance = torch.where(
+            translation_cmd,
+            positive_progress_speed * dt,
+            zeros,
+        )
+
+        energy_per_distance = energy_cost / torch.clamp(progress_distance, min=eps)
+        # eps is numerical only: under a translational command, no positive progress is maximally bad.
+        energy_per_distance = torch.where(
+            translation_cmd & (progress_distance <= eps),
+            torch.full_like(energy_per_distance, energy_max),
+            energy_per_distance,
+        )
+        energy_per_distance = torch.where(translation_cmd, energy_per_distance, zeros)
+        energy_per_distance = torch.clamp(torch.nan_to_num(energy_per_distance, nan=energy_max, posinf=energy_max), max=energy_max)
+
+        enabled = bool(getattr(self.cfg, "ablation_flags", {}).get("energy_per_distance", True))
+        reward = -weight * energy_per_distance if enabled else zeros
+        if healthy_gate is not None:
+            reward = reward * healthy_gate
+        reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=-energy_max * max(weight, 0.0))
+
+        return {
+            "reward": reward,
+            "energy_cost": torch.nan_to_num(energy_cost, nan=0.0, posinf=energy_max),
+            "progress_distance": torch.nan_to_num(progress_distance, nan=0.0, posinf=energy_max),
+            "energy_per_distance": energy_per_distance,
+        }
 
     def _compute_forward_gait_prior_terms(
         self,
@@ -1697,6 +1834,150 @@ class RedrhexEnv(DirectRLEnv):
             "phase_diff": phase_diff * mode_mask,
             "ratio_proxy": ratio_proxy * mode_mask,
         }
+
+    def _compute_main_drive_targets(self, desired_drive_vel: torch.Tensor, max_vel: float) -> torch.Tensor:
+        """Finalize main-drive velocity targets from policy/CPG logic before writing to sim."""
+        target_drive_vel = torch.nan_to_num(desired_drive_vel, nan=0.0, posinf=max_vel, neginf=-max_vel)
+        target_drive_vel = target_drive_vel * self._main_strength_scale_per_leg
+        if not self._mass_physical_randomized:
+            target_drive_vel = target_drive_vel / torch.clamp(self._mass_scale.unsqueeze(1), min=0.2)
+        if not self._friction_physical_randomized:
+            target_drive_vel = target_drive_vel * self._friction_scale.unsqueeze(1)
+        return torch.clamp(target_drive_vel, min=-max_vel, max=max_vel)
+
+    def _compute_abad_targets(
+        self,
+        abad_actions: torch.Tensor,
+        mode_fwd: torch.Tensor,
+        mode_diag: torch.Tensor,
+        mode_yaw: torch.Tensor,
+        cmd_vy: torch.Tensor,
+        action_warmup_scale: torch.Tensor,
+        yaw_hard_brake: torch.Tensor,
+        yaw_hard_brake_scale: float,
+    ) -> torch.Tensor:
+        """Compute ABAD rest-relative position targets and enforce the final physical clamp."""
+        abad_rest = self._abad_rest_pos.expand(self.num_envs, -1)
+        base_abad_offset = abad_actions * self._abad_action_scale
+        target_abad_offset = base_abad_offset.clone()
+
+        # Forward locomotion owns main-drive only; ABAD is hard-locked to rest.
+        if getattr(self.cfg, "lock_abad_in_forward", True):
+            target_abad_offset = torch.where(
+                mode_fwd.unsqueeze(1),
+                torch.zeros_like(target_abad_offset),
+                target_abad_offset,
+            )
+
+        if self._is_lateral_preparing.any():
+            target_abad_offset = torch.where(
+                self._is_lateral_preparing.unsqueeze(1),
+                torch.zeros_like(target_abad_offset),
+                target_abad_offset,
+            )
+
+        if self._is_lateral_mode.any():
+            lateral_dir = torch.sign(self.commands[:, 1])
+            phase_sin = torch.sin(self._lateral_gait_phase)
+            base_amp = float(
+                self._get_stage_value(
+                    "stage_lateral_abad_base_amplitude",
+                    getattr(self.cfg, "lateral_abad_base_amplitude", 0.32),
+                )
+            )
+            max_amp = float(
+                self._get_stage_value(
+                    "stage_lateral_abad_max_amplitude",
+                    getattr(self.cfg, "lateral_abad_max_amplitude", 0.58),
+                )
+            )
+            vy_ref = max(float(getattr(self.cfg, "mode_lateral_min_vy", 0.12)), 1e-3)
+            vy_ratio = torch.clamp(torch.abs(cmd_vy) / vy_ref, min=0.0, max=1.5)
+            abad_amplitude = base_amp + (max_amp - base_amp) * torch.clamp(vy_ratio, min=0.0, max=1.0)
+            lateral_side_pattern = self._side_pattern(-1.0, 1.0, width=self.num_abad_joints)
+            lateral_abad_pos = (
+                lateral_dir.unsqueeze(1)
+                * phase_sin.unsqueeze(1)
+                * abad_amplitude.unsqueeze(1)
+                * lateral_side_pattern
+            )
+            policy_blend = float(
+                self._get_stage_value(
+                    "stage_lateral_abad_policy_blend",
+                    getattr(self.cfg, "lateral_abad_policy_blend", 0.10),
+                )
+            )
+            policy_blend = min(max(policy_blend, 0.0), 1.0)
+            blended_abad = (1.0 - policy_blend) * lateral_abad_pos + policy_blend * base_abad_offset
+            target_abad_offset = torch.where(
+                self._is_lateral_mode.unsqueeze(1),
+                blended_abad,
+                target_abad_offset,
+            )
+
+        if mode_diag.any():
+            diag_dir = torch.sign(cmd_vy)
+            vy_ref = max(float(getattr(self.cfg, "mode_lateral_min_vy", 0.12)), 1e-3)
+            vy_ratio = torch.clamp(torch.abs(cmd_vy) / vy_ref, min=0.0, max=1.5)
+            diag_amp = float(
+                self._get_stage_value("stage_diag_abad_bias_scale", getattr(self.cfg, "diag_abad_bias_scale", 0.18))
+            ) * torch.clamp(vy_ratio, min=0.0, max=1.0)
+            diag_bias = diag_dir.unsqueeze(1) * diag_amp.unsqueeze(1) * self._side_pattern(
+                -1.0, 1.0, width=self.num_abad_joints
+            )
+            diag_policy_blend = float(
+                self._get_stage_value("stage_diag_abad_policy_blend", getattr(self.cfg, "diag_abad_policy_blend", 0.70))
+            )
+            diag_policy_blend = min(max(diag_policy_blend, 0.0), 1.0)
+            diag_target = diag_policy_blend * base_abad_offset + (1.0 - diag_policy_blend) * diag_bias
+            target_abad_offset = torch.where(mode_diag.unsqueeze(1), diag_target, target_abad_offset)
+
+        yaw_abad_scale = float(
+            self._get_stage_value("stage_yaw_abad_action_scale", getattr(self.cfg, "yaw_abad_action_scale", 1.0))
+        )
+        yaw_abad_scale = min(max(yaw_abad_scale, 0.0), 1.0)
+        target_abad_offset = torch.where(
+            mode_yaw.unsqueeze(1),
+            target_abad_offset * yaw_abad_scale,
+            target_abad_offset,
+        )
+        yaw_stance_bias = float(self._get_stage_value("stage_yaw_abad_stance_bias", 0.0))
+        if mode_yaw.any() and yaw_stance_bias > 1e-6:
+            yaw_stance = self._side_pattern(-1.0, 1.0, width=self.num_abad_joints)
+            yaw_stance_target = yaw_stance * yaw_stance_bias
+            yaw_stance_blend = float(self._get_stage_value("stage_yaw_abad_policy_blend", 0.7))
+            yaw_stance_blend = min(max(yaw_stance_blend, 0.0), 1.0)
+            blended_yaw_abad = yaw_stance_blend * target_abad_offset + (1.0 - yaw_stance_blend) * yaw_stance_target
+            target_abad_offset = torch.where(mode_yaw.unsqueeze(1), blended_yaw_abad, target_abad_offset)
+        if yaw_hard_brake.any():
+            target_abad_offset = torch.where(
+                yaw_hard_brake.unsqueeze(1),
+                target_abad_offset * yaw_hard_brake_scale,
+                target_abad_offset,
+            )
+
+        target_abad_offset = target_abad_offset * action_warmup_scale.unsqueeze(1)
+        target_abad_offset = target_abad_offset * self._abad_strength_scale_per_leg
+        target_abad_offset = torch.nan_to_num(
+            target_abad_offset,
+            nan=0.0,
+            posinf=self._abad_pos_limit_rad,
+            neginf=-self._abad_pos_limit_rad,
+        )
+
+        stage_abad_limit = float(
+            self._get_stage_value(
+                "stage_abad_pos_limit",
+                getattr(self.cfg, "abad_pos_limit_rad", getattr(self.cfg, "abad_pos_limit", self._abad_pos_limit_rad)),
+            )
+        )
+        abad_limit = min(max(stage_abad_limit, 0.0), self._abad_pos_limit_rad)
+        target_abad_offset = torch.clamp(target_abad_offset, min=-abad_limit, max=abad_limit)
+        target_abad_pos = abad_rest + target_abad_offset
+        return torch.maximum(
+            torch.minimum(target_abad_pos, abad_rest + self._abad_pos_limit_rad),
+            abad_rest - self._abad_pos_limit_rad,
+        )
 
     def _apply_action(self) -> None:
         """將策略輸出轉為關節控制（含 FWD/LAT/DIAG/YAW 模式 gating）。"""
@@ -2008,121 +2289,28 @@ class RedrhexEnv(DirectRLEnv):
             self._lateral_timeout_cooldown[:] = 0
             self._stand_pose_error[:] = 0.0
 
-        # Domain randomization：作用在控制層的 proxy
-        final_drive_vel = final_drive_vel * self._main_strength_scale_per_leg
-        if not self._mass_physical_randomized:
-            final_drive_vel = final_drive_vel / torch.clamp(self._mass_scale.unsqueeze(1), min=0.2)
-        if not self._friction_physical_randomized:
-            final_drive_vel = final_drive_vel * self._friction_scale.unsqueeze(1)
-        final_drive_vel = torch.clamp(final_drive_vel, min=-max_vel, max=max_vel)
+        # Main-drive: policy/CPG/LAT-FSM target velocities, then final DR/safety clamp.
+        final_drive_vel = self._compute_main_drive_targets(final_drive_vel, max_vel)
         self._target_drive_vel = final_drive_vel.clone()
 
         self.robot.set_joint_velocity_target(final_drive_vel, joint_ids=self._main_drive_indices)
         
-        # ABAD：FWD 鎖住，LAT 準備期歸零，LAT 執行期交替並步，DIAG/YAW 全開
-        abad_actions = masked_abad_actions
-        base_abad_pos = abad_actions * self.cfg.abad_pos_scale
-        target_abad_pos = base_abad_pos.clone()
-        
-        if getattr(self.cfg, "lock_abad_in_forward", True):
-            target_abad_pos = torch.where(
-                mode_fwd.unsqueeze(1),
-                torch.zeros_like(target_abad_pos),
-                target_abad_pos,
-            )
-        
-        if self._is_lateral_preparing.any():
-            target_abad_pos = torch.where(
-                self._is_lateral_preparing.unsqueeze(1),
-                torch.zeros_like(target_abad_pos),
-                target_abad_pos,
-            )
-        
-        if self._is_lateral_mode.any():
-            lateral_dir = torch.sign(self.commands[:, 1])
-            phase_sin = torch.sin(self._lateral_gait_phase)
-            base_amp = float(self._get_stage_value("stage_lateral_abad_base_amplitude", getattr(self.cfg, "lateral_abad_base_amplitude", 0.32)))
-            max_amp = float(self._get_stage_value("stage_lateral_abad_max_amplitude", getattr(self.cfg, "lateral_abad_max_amplitude", 0.58)))
-            vy_ref = max(float(getattr(self.cfg, "mode_lateral_min_vy", 0.12)), 1e-3)
-            vy_ratio = torch.clamp(torch.abs(cmd_vy) / vy_ref, min=0.0, max=1.5)
-            abad_amplitude = base_amp + (max_amp - base_amp) * torch.clamp(vy_ratio, min=0.0, max=1.0)
-            lateral_side_pattern = self._side_pattern(-1.0, 1.0, width=self.num_abad_joints)
-            lateral_abad_pos = (
-                lateral_dir.unsqueeze(1)
-                * phase_sin.unsqueeze(1)
-                * abad_amplitude.unsqueeze(1)
-                * lateral_side_pattern
-            )
-            policy_blend = float(self._get_stage_value("stage_lateral_abad_policy_blend", getattr(self.cfg, "lateral_abad_policy_blend", 0.10)))
-            policy_blend = min(max(policy_blend, 0.0), 1.0)
-            blended_abad = (1.0 - policy_blend) * lateral_abad_pos + policy_blend * base_abad_pos
-            target_abad_pos = torch.where(
-                self._is_lateral_mode.unsqueeze(1),
-                blended_abad,
-                target_abad_pos,
-            )
-
-        # DIAG：提供小幅 ABAD 側向先驗，幫助融合 forward + lateral 能力
-        if mode_diag.any():
-            diag_dir = torch.sign(cmd_vy)
-            vy_ref = max(float(getattr(self.cfg, "mode_lateral_min_vy", 0.12)), 1e-3)
-            vy_ratio = torch.clamp(torch.abs(cmd_vy) / vy_ref, min=0.0, max=1.5)
-            diag_amp = float(
-                self._get_stage_value("stage_diag_abad_bias_scale", getattr(self.cfg, "diag_abad_bias_scale", 0.18))
-            ) * torch.clamp(vy_ratio, min=0.0, max=1.0)
-            diag_bias = diag_dir.unsqueeze(1) * diag_amp.unsqueeze(1) * self._side_pattern(
-                -1.0, 1.0, width=self.num_abad_joints
-            )
-            diag_policy_blend = float(
-                self._get_stage_value("stage_diag_abad_policy_blend", getattr(self.cfg, "diag_abad_policy_blend", 0.70))
-            )
-            diag_policy_blend = min(max(diag_policy_blend, 0.0), 1.0)
-            diag_target = diag_policy_blend * base_abad_pos + (1.0 - diag_policy_blend) * diag_bias
-            target_abad_pos = torch.where(mode_diag.unsqueeze(1), diag_target, target_abad_pos)
-
-        # YAW：保留 ABAD 自由度，但降低振幅避免一開始旋轉就掀翻
-        yaw_abad_scale = float(
-            self._get_stage_value("stage_yaw_abad_action_scale", getattr(self.cfg, "yaw_abad_action_scale", 1.0))
+        # ABAD: policy controls rest-relative offsets; forward mode locks to rest.
+        target_abad_pos = self._compute_abad_targets(
+            abad_actions=masked_abad_actions,
+            mode_fwd=mode_fwd,
+            mode_diag=mode_diag,
+            mode_yaw=mode_yaw,
+            cmd_vy=cmd_vy,
+            action_warmup_scale=action_warmup_scale,
+            yaw_hard_brake=yaw_hard_brake,
+            yaw_hard_brake_scale=yaw_hard_brake_scale,
         )
-        yaw_abad_scale = min(max(yaw_abad_scale, 0.0), 1.0)
-        target_abad_pos = torch.where(
-            mode_yaw.unsqueeze(1),
-            target_abad_pos * yaw_abad_scale,
-            target_abad_pos,
-        )
-        yaw_stance_bias = float(
-            self._get_stage_value("stage_yaw_abad_stance_bias", 0.0)
-        )
-        if mode_yaw.any() and yaw_stance_bias > 1e-6:
-            yaw_stance = self._side_pattern(-1.0, 1.0, width=self.num_abad_joints)
-            yaw_stance_target = yaw_stance * yaw_stance_bias
-            yaw_stance_blend = float(
-                self._get_stage_value("stage_yaw_abad_policy_blend", 0.7)
-            )
-            yaw_stance_blend = min(max(yaw_stance_blend, 0.0), 1.0)
-            blended_yaw_abad = yaw_stance_blend * target_abad_pos + (1.0 - yaw_stance_blend) * yaw_stance_target
-            target_abad_pos = torch.where(mode_yaw.unsqueeze(1), blended_yaw_abad, target_abad_pos)
-        if yaw_hard_brake.any():
-            target_abad_pos = torch.where(
-                yaw_hard_brake.unsqueeze(1),
-                target_abad_pos * yaw_hard_brake_scale,
-                target_abad_pos,
-            )
-
-        target_abad_pos = target_abad_pos * action_warmup_scale.unsqueeze(1)
-        
-        target_abad_pos = target_abad_pos * self._abad_strength_scale_per_leg
-        abad_limit = float(
-            self._get_stage_value("stage_abad_pos_limit", getattr(self.cfg, "abad_pos_limit", max(float(self.cfg.abad_pos_scale), 0.5)))
-        )
-        target_abad_pos = torch.clamp(target_abad_pos, min=-abad_limit, max=abad_limit)
         self._target_abad_pos = target_abad_pos.clone()
         self.robot.set_joint_position_target(target_abad_pos, joint_ids=self._abad_indices)
-        
-        self.robot.set_joint_position_target(
-            self._damper_initial_pos.expand(self.num_envs, -1),
-            joint_ids=self._damper_indices,
-        )
+
+        # Damper/spring-leg joints are passive supports: fixed rest pose + zero velocity target.
+        self._apply_damper_hold()
 
     def _get_observations(self) -> dict:
         """
@@ -2165,6 +2353,7 @@ class RedrhexEnv(DirectRLEnv):
         # ABAD 關節狀態
         abad_pos = self.joint_pos[:, self._abad_indices]
         abad_vel = self.joint_vel[:, self._abad_indices]
+        abad_pos_offset = abad_pos - self._abad_rest_pos.expand(self.num_envs, -1)
 
         # 構建觀測向量
         obs = torch.cat([
@@ -2174,7 +2363,7 @@ class RedrhexEnv(DirectRLEnv):
             main_drive_pos_sin,                             # (6)
             main_drive_pos_cos,                             # (6)
             main_drive_vel / self.cfg.base_gait_angular_vel,  # (6) 正規化
-            abad_pos / self.cfg.abad_pos_scale,             # (6) 正規化
+            abad_pos_offset / self.cfg.abad_pos_scale,      # (6) rest-relative 正規化
             abad_vel,                                       # (6)
             self.commands,                                  # (3)
             torch.sin(self.gait_phase).unsqueeze(-1),       # (1)
@@ -2254,7 +2443,7 @@ class RedrhexEnv(DirectRLEnv):
             "height_maintain": 0.8,
             "leg_moving": 0.5,
             "stall_penalty": -2.0,
-            "action_smooth": -0.01,
+            "energy_per_distance": 0.001,
             "fall": -8.0,
             "lin_tracking_sigma": 0.30,
             "yaw_tracking_sigma": 0.35,
@@ -2566,88 +2755,31 @@ class RedrhexEnv(DirectRLEnv):
         rew_stall = is_stalled.float() * scales.get("stall_penalty", -2.0)
         total_reward += rew_stall
         
-        # R8: 平滑懲罰
-        action_rate = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
-        rew_smooth = action_rate * scales.get("action_smooth", -0.01)
-        total_reward += rew_smooth
+        # Deprecated action smoothness reward, not used in total reward.
+        rew_smooth = torch.zeros(self.num_envs, device=self.device)
 
-        # =====================================================================
-        # E: 節能 reward（Energy-aware rewards）
-        # 設計原則：權重遠低於追蹤，讓省能不壓過命令追蹤
-        # =====================================================================
-
-        # --- 讀取 damper 關節狀態 ---
-        damper_pos = self.joint_pos[:, self._damper_indices]      # [N, 6]
-        damper_vel = self.joint_vel[:, self._damper_indices]      # [N, 6]
-        damper_deflection = damper_pos - self._damper_initial_pos # [N, 6] 彈簧偏轉
+        # Single active energy reward: energy consumed per positive commanded-direction distance.
         abad_vel = self.joint_vel[:, self._abad_indices]
-
-        # --- 讀取有源關節力矩 ---
-        # 優先使用 simulator 提供的實際 torque；若版本不支援，退回控制器 proxy。
-        main_torques, abad_torques = self._get_active_joint_torques(main_drive_vel, abad_vel)
-
-        # --- E1: 有源機械功率效率 ---
-        # 設計改為最簡單的 outcome-based reward：
-        # 直接最小化「每單位有效位移所需的馬達能耗」。
-        # RL 若真的學出更省能的步態，彈簧腳的優勢會自然反映在這個結果上，
-        # 而不是靠 reward 額外指定 spring 應該怎麼工作。
-        mech_power_main = torch.sum(torch.abs(main_torques * main_drive_vel), dim=1)  # [N]
-        mech_power_abad = torch.sum(torch.abs(abad_torques * abad_vel), dim=1)
-        total_mech_power = mech_power_main + mech_power_abad
-        power_eff_eps = max(float(scales.get("power_efficiency_eps", 0.1)), 1e-3)
-        power_eff_tanh_scale = max(float(scales.get("power_efficiency_tanh_scale", 500.0)), 1.0)
-        actual_motion_speed = self._compute_energy_equivalent_speed(actual_lin, actual_wz)
-        cmd_motion_speed = self._compute_energy_equivalent_speed(cmd_lin, cmd_wz)
-        cmd_translation_gate = (cmd_lin_speed > self._energy_min_cmd_motion).float()
-        useful_progress_speed = torch.where(
-            cmd_lin_speed > self._energy_min_cmd_motion,
-            torch.clamp(lin_progress, min=0.0),
-            torch.zeros_like(lin_progress),
+        energy_terms = self._compute_energy_per_distance_reward(
+            main_drive_vel=main_drive_vel,
+            abad_vel=abad_vel,
+            actual_lin=actual_lin,
+            cmd_lin=cmd_lin,
+            healthy_gate=healthy_gate,
+            scales=scales,
         )
-        energy_per_distance = total_mech_power / (useful_progress_speed + power_eff_eps)
-        rew_energy_per_distance = -torch.tanh(energy_per_distance / power_eff_tanh_scale) * scales.get(
-            "power_efficiency", 0.3
-        )
-        rew_energy_per_distance = rew_energy_per_distance * healthy_gate * cmd_translation_gate
-        # 保留舊名稱，避免既有 TensorBoard / 腳本讀值中斷。
-        rew_power_efficiency = rew_energy_per_distance
+        rew_energy_per_distance = energy_terms["reward"]
+        energy_cost = energy_terms["energy_cost"]
+        progress_distance = energy_terms["progress_distance"]
+        energy_per_distance = energy_terms["energy_per_distance"]
         total_reward += rew_energy_per_distance
-
-        # --- E2: 彈簧相關量改為 diagnostics only ---
-        # 彈簧位能: E = 0.5 * k * Δθ²
-        spring_energy = 0.5 * self._spring_k * torch.square(damper_deflection)  # [N, 6]
-        # 彈簧功率 (位能變化率): dE/dt = k * Δθ * ω_damp
-        spring_power = self._spring_k * damper_deflection * damper_vel  # [N, 6]
-        # 只在 phase-based stance contact proxy 下統計 spring exchange，避免 swing 中抖動污染診斷。
-        if hasattr(self, "_current_leg_in_stance") and self._current_leg_in_stance.shape == damper_pos.shape:
-            spring_contact_mask = self._current_leg_in_stance.float()
-        else:
-            spring_contact_mask = torch.ones_like(damper_pos)
-        spring_release = torch.sum(torch.clamp(-spring_power, min=0.0) * spring_contact_mask, dim=1)  # [N]
-        spring_store = torch.sum(torch.clamp(spring_power, min=0.0) * spring_contact_mask, dim=1)     # [N]
-        spring_recovery_eps = 1e-5
-        spring_recovery_ratio = spring_release / (spring_release + spring_store + spring_recovery_eps)
-        spring_deflection_std = torch.std(damper_deflection, dim=1, unbiased=False)  # [N]
-        rew_spring_recovery = torch.zeros_like(rew_power_efficiency)
-        rew_spring_utilization = torch.zeros_like(rew_power_efficiency)
-
-        # --- E4: 力矩平方懲罰 ---
-        abad_weight = float(scales.get("torque_penalty_abad_weight", 0.5))
-        torque_sq = (
-            torch.sum(torch.square(main_torques), dim=1)
-            + abad_weight * torch.sum(torch.square(abad_torques), dim=1)
-        )
-        rew_torque_penalty = torque_sq * scales.get("torque_penalty", -0.0001)
-        total_reward += rew_torque_penalty
-
-        # --- 節能 diagnostics (不回饋到 reward) ---
-        spring_energy_total = torch.sum(spring_energy, dim=1)
-        damper_dissipation = self._spring_d * torch.sum(torch.square(damper_vel), dim=1)
-        torque_rms_main = torch.sqrt(torch.mean(torch.square(main_torques), dim=1))
-        # Cost of Transport proxy: P / (m * g * v_eq)
-        cot_proxy = total_mech_power / (
-            self._robot_mass * 9.81 * (actual_motion_speed + power_eff_eps)
-        )
+        damper_pos_error, damper_vel_rms, damper_pos_mean = self._compute_damper_diagnostics()
+        (
+            abad_target_max_abs,
+            abad_pos_max_abs,
+            abad_pos_limit_violation,
+            abad_forward_lock_error,
+        ) = self._compute_abad_limit_diagnostics(mode_fwd)
 
         # R9: 倒地懲罰（與終止判斷解耦）
         # 注意：roll/pitch 在不同初始姿態下可能帶固定偏置，不適合直接當 terminate 依據。
@@ -2683,6 +2815,15 @@ class RedrhexEnv(DirectRLEnv):
         self._body_tilt = body_tilt
         
         total_reward = torch.nan_to_num(total_reward, nan=0.0, posinf=20.0, neginf=-20.0)
+
+        main_drive_target_vel_mean = torch.abs(self._target_drive_vel).mean(dim=1)
+        main_drive_vel_mean = torch.abs(main_drive_vel).mean(dim=1)
+        main_drive_vel_error = torch.abs(main_drive_vel - self._target_drive_vel).mean(dim=1)
+        action_nan_count = getattr(
+            self,
+            "_action_nan_count",
+            torch.zeros(self.num_envs, device=self.device),
+        )
         
         self.episode_sums["rew_forward"] += rew_forward
         self.episode_sums["rew_tracking"] += rew_tracking
@@ -2708,12 +2849,8 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["rew_stall"] += rew_stall
         self.episode_sums["rew_smooth"] += rew_smooth
         self.episode_sums["rew_fall"] += rew_fall
-        # ★ 節能 reward episode sums
-        self.episode_sums["rew_power_efficiency"] += rew_power_efficiency
+        # Single active energy reward episode sums
         self.episode_sums["rew_energy_per_distance"] += rew_energy_per_distance
-        self.episode_sums["rew_spring_recovery"] += rew_spring_recovery
-        self.episode_sums["rew_spring_utilization"] += rew_spring_utilization
-        self.episode_sums["rew_torque_penalty"] += rew_torque_penalty
 
         self.episode_sums["diag_forward_vel"] += actual_vx
         self.episode_sums["diag_lateral_vel"] += actual_vy
@@ -2722,10 +2859,19 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_cmd_wz"] += cmd_wz
         self.episode_sums["diag_actual_wz"] += actual_wz
         self.episode_sums["diag_wz_error"] += wz_error
-        self.episode_sums["diag_motion_speed_equiv"] += actual_motion_speed
-        self.episode_sums["diag_cmd_motion_speed_equiv"] += cmd_motion_speed
-        self.episode_sums["diag_useful_progress_speed"] += useful_progress_speed
-        self.episode_sums["diag_energy_per_distance"] += energy_per_distance * cmd_translation_gate
+        self.episode_sums["diag_main_drive_target_vel_mean"] += main_drive_target_vel_mean
+        self.episode_sums["diag_main_drive_vel_mean"] += main_drive_vel_mean
+        self.episode_sums["diag_main_drive_vel_error"] += main_drive_vel_error
+        self.episode_sums["diag_energy_cost"] += energy_cost
+        self.episode_sums["diag_progress_distance"] += progress_distance
+        self.episode_sums["diag_energy_per_distance"] += energy_per_distance
+        self.episode_sums["diag_damper_pos_error"] += damper_pos_error
+        self.episode_sums["diag_damper_vel_rms"] += damper_vel_rms
+        self.episode_sums["diag_damper_pos_mean"] += damper_pos_mean
+        self.episode_sums["diag_abad_target_max_abs"] += abad_target_max_abs
+        self.episode_sums["diag_abad_pos_max_abs"] += abad_pos_max_abs
+        self.episode_sums["diag_abad_pos_limit_violation"] += abad_pos_limit_violation
+        self.episode_sums["diag_abad_forward_lock_error"] += abad_forward_lock_error
         lin_vel_error = torch.linalg.norm(cmd_lin - actual_lin, dim=1)
         self.episode_sums["diag_vel_error"] += lin_vel_error
         self.episode_sums["diag_base_height"] += base_height
@@ -2757,18 +2903,7 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_push_events"] += self._push_events_step
         self.episode_sums["diag_terrain_level"] += self._terrain_level
         self.episode_sums["diag_action_warmup"] += self._action_warmup_scale
-        # ★ 節能 diagnostic episode sums
-        self.episode_sums["diag_mech_power_main"] += mech_power_main
-        self.episode_sums["diag_mech_power_abad"] += mech_power_abad
-        self.episode_sums["diag_mech_power_total"] += total_mech_power
-        self.episode_sums["diag_spring_energy_total"] += spring_energy_total
-        self.episode_sums["diag_spring_power_release"] += spring_release
-        self.episode_sums["diag_spring_power_store"] += spring_store
-        self.episode_sums["diag_spring_recovery_ratio"] += spring_recovery_ratio
-        self.episode_sums["diag_damper_dissipation"] += damper_dissipation
-        self.episode_sums["diag_spring_deflection_std"] += spring_deflection_std
-        self.episode_sums["diag_cost_of_transport"] += cot_proxy
-        self.episode_sums["diag_torque_rms_main"] += torque_rms_main
+        self.episode_sums["diag_action_nan_count"] += action_nan_count
 
         self.last_main_drive_vel = main_drive_vel.clone()
         return total_reward
@@ -3040,53 +3175,31 @@ class RedrhexEnv(DirectRLEnv):
         self._body_tilt = body_tilt  # 保存用於 _get_dones
 
         # =================================================================
-        # G4: 能耗與動作平滑懲罰
+        # G4: Single active energy reward
         # =================================================================
-        # 目標：讓機器人的動作更省力、更平順
-        # 
-        # 為什麼這很重要？
-        # 1. 省電：真實機器人電池有限，不能浪費
-        # 2. 保護硬體：劇烈動作會損壞馬達和關節
-        # 3. 看起來更自然：平滑的動作比抖動好看
-        
-        # G4.1 力矩懲罰（不要用太大力）
-        # 馬達出力越大，耗電越多，所以要懲罰大力矩
-        if hasattr(self.robot.data, 'applied_torque'):
-            joint_torques = torch.sum(torch.square(self.robot.data.applied_torque), dim=1)
-            rew_torque = joint_torques * self.cfg.rew_scale_torque * dt
-            if self._is_reward_enabled("torque"):  # 簡化模式下保留
-                total_reward += rew_torque
-        
-        # G4.2 動作變化率懲罰（不要抖動）
-        # 比較這次動作和上次動作，變化越大懲罰越重
-        # 這樣可以讓動作更平滑，不會忽大忽小
-        action_rate = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
-        rew_action_rate = action_rate * self.cfg.rew_scale_action_rate * dt
-        if self._is_reward_enabled("action_rate"):  # 簡化模式下保留
-            total_reward += rew_action_rate
-        
-        # G4.3 關節加速度懲罰（不要急加速）
-        # 加速度太大 = 動作太劇烈，對機械結構不好
-        if hasattr(self.robot.data, 'joint_acc'):
-            joint_accel = torch.sum(torch.square(self.robot.data.joint_acc), dim=1)
-            rew_joint_acc = joint_accel * self.cfg.rew_scale_joint_acc * dt
-            total_reward += rew_joint_acc
-        
-        # ★★★ G4.4 高頻關節速度懲罰 ★★★
-        # ★ 大幅降低！這個懲罰會讓機器人不敢動
-        main_drive_speed = torch.abs(main_drive_vel).mean(dim=1)
-        abad_speed = torch.abs(abad_vel).mean(dim=1)
-        actual_move_speed = torch.sqrt(actual_vx**2 + actual_vy**2)
-        
-        # 效率指標：實際移動速度 / 關節速度
-        joint_total_speed = main_drive_speed + abad_speed * 2.0
-        efficiency = actual_move_speed / (joint_total_speed + 0.1)
-        
-        # 只懲罰極端低效率的情況（閾值更嚴格）
-        cmd_has_velocity = (torch.abs(cmd_vx) > 0.05) | (torch.abs(cmd_vy) > 0.05)
-        inefficient_motion = cmd_has_velocity & (joint_total_speed > 3.0) & (efficiency < 0.03)  # ★ 更嚴格的條件
-        rew_sliding_penalty = -inefficient_motion.float() * 1.0 * dt  # ★ 從 -5.0 降到 -1.0
-        total_reward += rew_sliding_penalty
+        # Deprecated torque/action-rate/joint-speed energy penalties are not used.
+        rew_action_rate = torch.zeros(self.num_envs, device=self.device)
+        full_reward_scales = getattr(self.cfg, "v2_reward_scales", {"energy_per_distance": 0.001})
+        energy_terms = self._compute_energy_per_distance_reward(
+            main_drive_vel=main_drive_vel,
+            abad_vel=abad_vel,
+            actual_lin=self.base_lin_vel[:, :2],
+            cmd_lin=self.commands[:, :2],
+            healthy_gate=(~body_contact).float(),
+            scales=full_reward_scales,
+        )
+        rew_energy_per_distance = energy_terms["reward"]
+        energy_cost = energy_terms["energy_cost"]
+        progress_distance = energy_terms["progress_distance"]
+        energy_per_distance = energy_terms["energy_per_distance"]
+        total_reward += rew_energy_per_distance
+        damper_pos_error, damper_vel_rms, damper_pos_mean = self._compute_damper_diagnostics()
+        (
+            abad_target_max_abs,
+            abad_pos_max_abs,
+            abad_pos_limit_violation,
+            abad_forward_lock_error,
+        ) = self._compute_abad_limit_diagnostics()
         
         # ★★★ G4.5 高頻動作懲罰 - 完全移除！★★★
         # 這個懲罰是造成消極的主要原因之一
@@ -3345,8 +3458,8 @@ class RedrhexEnv(DirectRLEnv):
         # 當 S 小（直走）但 ABAD 亂動 → 給懲罰
         # 加強：直走時（is_forward_walk_abad）額外懲罰
         waste_factor = 1.0 - torch.clamp(S / S0, max=1.0)
-        rew_abad_waste = waste_factor * U_abad * self.cfg.rew_scale_abad_waste * dt
-        total_reward += rew_abad_waste
+        # Deprecated velocity-squared ABAD effort penalty, not used in total reward.
+        rew_abad_waste = torch.zeros(self.num_envs, device=self.device)
         
         # G6.3 側向速度追蹤獎勵（ABAD 產生側向速度）
         vy_sign_match = (cmd_vy * actual_vy) > 0
@@ -3496,7 +3609,8 @@ class RedrhexEnv(DirectRLEnv):
                     low_freq_reward = torch.exp(-abad_rate * 3.0)
                     rew_lateral_low_freq = low_freq_reward * getattr(self.cfg, 'rew_scale_lateral_low_freq', 2.0) * dt
                     rew_lateral_low_freq = torch.where(is_lateral_mode, rew_lateral_low_freq, torch.zeros_like(rew_lateral_low_freq))
-                    total_reward += rew_lateral_low_freq
+                    # Deprecated action-smoothness reward, not used in total reward.
+                    rew_lateral_low_freq = torch.zeros_like(rew_lateral_low_freq)
             
             # ==============================================================
             # G6.5.4.7 ★★★ 新增：側移正確方向大獎勵 ★★★
@@ -3524,14 +3638,17 @@ class RedrhexEnv(DirectRLEnv):
                 smoothness = torch.exp(-abad_action_rate * 5.0)  # [0, 1]
                 rew_abad_smooth = smoothness * 0.5 * dt
                 rew_abad_smooth = torch.where(is_lateral_mode, rew_abad_smooth, torch.zeros_like(rew_abad_smooth))
-                total_reward += rew_abad_smooth
+                # Deprecated action-smoothness reward, not used in total reward.
+                rew_abad_smooth = torch.zeros_like(rew_abad_smooth)
                 
                 # 只對極端抖動給予懲罰
                 extreme_jitter = (abad_action_rate > 0.2) & (abad_amplitude < 0.1)
                 rew_abad_jitter = -extreme_jitter.float() * getattr(self.cfg, 'rew_scale_abad_jitter', -5.0) * dt
                 rew_abad_jitter = torch.where(is_lateral_mode, rew_abad_jitter, torch.zeros_like(rew_abad_jitter))
-                total_reward += rew_abad_jitter
+                # Deprecated action-rate jitter penalty, not used in total reward.
+                rew_abad_jitter = torch.zeros_like(rew_abad_jitter)
             else:
+                rew_abad_smooth = torch.zeros(self.num_envs, device=self.device)
                 rew_abad_jitter = torch.zeros(self.num_envs, device=self.device)
             
             # ==============================================================
@@ -3551,7 +3668,8 @@ class RedrhexEnv(DirectRLEnv):
             is_sync_jitter = (all_action_rate > 0.3) & (main_drive_amplitude < 0.5) & (abad_amplitude < 0.15)
             rew_sync_jitter = is_sync_jitter.float() * getattr(self.cfg, 'rew_scale_sync_jitter', -20.0) * dt
             rew_sync_jitter = torch.where(is_lateral_mode, rew_sync_jitter, torch.zeros_like(rew_sync_jitter))
-            total_reward += rew_sync_jitter
+            # Deprecated action-rate jitter penalty, not used in total reward.
+            rew_sync_jitter = torch.zeros_like(rew_sync_jitter)
             
             # ==============================================================
             # G6.5.6 側移方向一致性獎勵
@@ -3593,8 +3711,8 @@ class RedrhexEnv(DirectRLEnv):
                 ),
                 dim=1,
             )
-            rew_abad_action_rate = abad_action_rate_all * getattr(self.cfg, 'rew_scale_abad_action_rate', -0.1) * dt
-            total_reward += rew_abad_action_rate
+            # Deprecated action-rate penalty, not used in total reward.
+            rew_abad_action_rate = torch.zeros_like(abad_action_rate_all)
         else:
             rew_abad_action_rate = torch.zeros(self.num_envs, device=self.device)
 
@@ -3700,6 +3818,17 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["rew_abad_action"] += rew_abad_action
         self.episode_sums["rew_abad_stability"] += rew_abad_stability
         self.episode_sums["rew_action_rate"] += rew_action_rate
+        self.episode_sums["rew_energy_per_distance"] += rew_energy_per_distance
+        self.episode_sums["diag_energy_cost"] += energy_cost
+        self.episode_sums["diag_progress_distance"] += progress_distance
+        self.episode_sums["diag_energy_per_distance"] += energy_per_distance
+        self.episode_sums["diag_damper_pos_error"] += damper_pos_error
+        self.episode_sums["diag_damper_vel_rms"] += damper_vel_rms
+        self.episode_sums["diag_damper_pos_mean"] += damper_pos_mean
+        self.episode_sums["diag_abad_target_max_abs"] += abad_target_max_abs
+        self.episode_sums["diag_abad_pos_max_abs"] += abad_pos_max_abs
+        self.episode_sums["diag_abad_pos_limit_violation"] += abad_pos_limit_violation
+        self.episode_sums["diag_abad_forward_lock_error"] += abad_forward_lock_error
         
         # ★★★ 新增：RHex 步態獎勵記錄 ★★★
         self.episode_sums["rew_tripod_support"] += rew_tripod_support
@@ -3768,9 +3897,20 @@ class RedrhexEnv(DirectRLEnv):
         # 腿速度診斷
         target_leg_vel_abs = torch.abs(self._target_drive_vel).mean(dim=1)
         leg_vel_error = torch.abs(torch.abs(main_drive_vel) - torch.abs(self._target_drive_vel)).mean(dim=1)
+        main_drive_target_vel_mean = target_leg_vel_abs
+        main_drive_vel_mean = torch.abs(main_drive_vel).mean(dim=1)
+        main_drive_vel_error = torch.abs(main_drive_vel - self._target_drive_vel).mean(dim=1)
+        action_nan_count = getattr(
+            self,
+            "_action_nan_count",
+            torch.zeros(self.num_envs, device=self.device),
+        )
         
         self.episode_sums["diag_target_leg_vel"] += target_leg_vel_abs
         self.episode_sums["diag_leg_vel_error"] += leg_vel_error
+        self.episode_sums["diag_main_drive_target_vel_mean"] += main_drive_target_vel_mean
+        self.episode_sums["diag_main_drive_vel_mean"] += main_drive_vel_mean
+        self.episode_sums["diag_main_drive_vel_error"] += main_drive_vel_error
         
         # ★★★ 新增：RHex 步態診斷 ★★★
         self.episode_sums["diag_stance_count_a"] += stance_count_a
@@ -3806,6 +3946,7 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_obs_latency_steps"] += self._obs_latency_steps.float()
         self.episode_sums["diag_push_events"] += self._push_events_step
         self.episode_sums["diag_terrain_level"] += self._terrain_level
+        self.episode_sums["diag_action_nan_count"] += action_nan_count
         
         self.last_main_drive_vel = main_drive_vel.clone()
 
@@ -3939,6 +4080,7 @@ class RedrhexEnv(DirectRLEnv):
         super()._reset_idx(env_ids)  # 呼叫父類別的重置方法
 
         num_reset = len(env_ids)
+        env_ids_tensor = self._as_env_id_tensor(env_ids)
 
         # 重置關節狀態 - 使用配置文件中定義的默認位置
         joint_pos = self.robot.data.default_joint_pos[env_ids].clone()
@@ -3956,6 +4098,14 @@ class RedrhexEnv(DirectRLEnv):
 
         # 減少隨機擾動
         joint_pos += sample_uniform(-0.02, 0.02, joint_pos.shape, device=self.device)
+        # ABAD joints reset to the configured rest pose; policy commands offsets from here.
+        abad_rest_reset = self._abad_rest_pos.expand(num_reset, -1)
+        joint_pos[:, self._abad_indices] = abad_rest_reset
+        joint_vel[:, self._abad_indices] = 0.0
+        # Damper/spring-leg joints reset exactly to their passive rest pose, with zero velocity.
+        damper_rest_reset = self._damper_rest_pos.expand(num_reset, -1)
+        joint_pos[:, self._damper_indices] = damper_rest_reset
+        joint_vel[:, self._damper_indices] = 0.0
 
         # 重置根狀態
         default_root_state = self.robot.data.default_root_state[env_ids].clone()
@@ -4005,7 +4155,9 @@ class RedrhexEnv(DirectRLEnv):
         self.last_actions[env_ids] = 0.0
         self.last_main_drive_vel[env_ids] = 0.0  # 從零開始
         self._target_drive_vel[env_ids] = 0.0
-        self._target_abad_pos[env_ids] = 0.0
+        self._target_abad_pos[env_ids_tensor] = abad_rest_reset
+        self.robot.set_joint_position_target(abad_rest_reset, joint_ids=self._abad_indices, env_ids=env_ids_tensor)
+        self._apply_damper_hold(env_ids_tensor)
         self._base_velocity[env_ids] = 0.0
         
         # 重置模式與側移 state machine 狀態

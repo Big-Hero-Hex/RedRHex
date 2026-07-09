@@ -121,6 +121,47 @@ $ISAACLAB_ROOT/isaaclab.sh -p scripts/rsl_rl/train.py \
   --device cuda:0
 ```
 
+### 5.1.1 一鍵 disposable smoke pipeline
+
+這個指令會建立獨立的 `disposable_smoke_<timestamp>` run，執行 1 次 iteration，然後檢查 checkpoint、TensorBoard event、`params/env.yaml`、`params/agent.yaml`，並確認 Training Panel 的 history backend 看得到該 run：
+
+```bash
+python -m tools.training_panel.smoke_pipeline
+```
+
+只看即將執行的 Isaac 指令，不啟動訓練：
+
+```bash
+python -m tools.training_panel.smoke_pipeline --dry-run
+```
+
+如果 local panel 已經在跑，也可以一起驗證 `/api/runs`：
+
+```bash
+python -m tools.training_panel.smoke_pipeline --panel-url http://127.0.0.1:8080
+```
+
+要把 post-training artifact 也納入檢查：
+
+```bash
+python -m tools.training_panel.smoke_pipeline --include-export
+python -m tools.training_panel.smoke_pipeline --include-video --video-length 120
+```
+
+如果已經有一個 smoke run，只想重新驗證檔案和 panel history discovery：
+
+```bash
+python -m tools.training_panel.smoke_pipeline \
+  --validate-only \
+  --run-dir logs/rsl_rl/redrhex_wheg/<run_name>
+```
+
+成功時 summary JSON 會寫到：
+
+```text
+logs/training_panel/smoke_pipeline_<run_name>.json
+```
+
 ### 5.2 小規模 debug train
 
 用來看 reward、動作、觀測有沒有明顯錯誤：

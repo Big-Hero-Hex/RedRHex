@@ -1,4 +1,4 @@
-import { jobDisplayStatus } from "./status_catalog.js?v=3.4.2-folder-video-fixes";
+import { jobDisplayStatus } from "./status_catalog.js?v=3.4.10-sync-health";
 
 export const PENDING_SYNTHETIC_JOB_MAX_AGE_MS = 30 * 60 * 1000;
 
@@ -69,6 +69,42 @@ export function isDeletedRunLike(run = {}, deletions = normalizeRunDeletions()) 
 export function filterDeletedRuns(runs = [], runDeletions = []) {
   const deletions = normalizeRunDeletions(runDeletions);
   return (runs || []).filter((run) => !isDeletedRunLike(run, deletions));
+}
+
+function canonicalRunScore(run = {}) {
+  const id = clean(run.id);
+  let score = 0;
+  if (id.startsWith("panel_")) score += 8;
+  if (clean(run.source) === "training_panel") score += 4;
+  if (run.client_request_id || run.params?.client_request_id) score += 2;
+  if (run.process_log) score += 1;
+  return score;
+}
+
+export function canonicalizeRealRuns(runs = []) {
+  const byLogDir = new Map();
+  const withoutLogDir = [];
+  for (const run of runs || []) {
+    const logDir = clean(run?.log_dir);
+    if (!logDir) {
+      withoutLogDir.push(run);
+      continue;
+    }
+    const current = byLogDir.get(logDir);
+    if (!current) {
+      byLogDir.set(logDir, run);
+      continue;
+    }
+    const currentScore = canonicalRunScore(current);
+    const nextScore = canonicalRunScore(run);
+    if (
+      nextScore > currentScore
+      || (nextScore === currentScore && historyTimeValue(run) > historyTimeValue(current))
+    ) {
+      byLogDir.set(logDir, run);
+    }
+  }
+  return [...withoutLogDir, ...byLogDir.values()];
 }
 
 export function historyTimeValue(run = {}) {
@@ -200,7 +236,7 @@ export function syntheticRunsFromJobs(jobs = [], realRuns = [], runDeletions = [
 
 export function historyRunsForSnapshot(snapshot = {}, options = {}) {
   const runDeletions = snapshot.runDeletions || [];
-  const realRuns = filterDeletedRuns(snapshot.runs || [], runDeletions);
+  const realRuns = canonicalizeRealRuns(filterDeletedRuns(snapshot.runs || [], runDeletions));
   const jobs = mergedJobs(snapshot.jobs || [], options.localPendingTrainingJobs || snapshot.localPendingTrainingJobs || []);
   return [...syntheticRunsFromJobs(jobs, realRuns, runDeletions, options), ...realRuns]
     .sort((a, b) => compareHistoryRuns(a, b, options.sortBy || "newest"));

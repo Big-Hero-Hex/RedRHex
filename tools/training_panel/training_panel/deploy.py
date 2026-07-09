@@ -21,6 +21,15 @@ import numpy as np
 from .commands import export_onnx_argv, shell_for_isaaclab
 from .config import PanelPaths, timestamp_id
 from .history import latest_onnx
+from .mujoco_rollout import (
+    DEFAULT_PLAYBACK_FPS,
+    DEFAULT_PLAYBACK_HEIGHT,
+    DEFAULT_PLAYBACK_STEPS,
+    DEFAULT_PLAYBACK_WIDTH,
+    default_scenarios,
+    load_calibration_config,
+    run_mujoco_rollouts,
+)
 
 
 REPORT_VERSION = 1
@@ -181,7 +190,17 @@ class DeploymentReport:
 
 
 def deploy_defaults(paths: PanelPaths) -> dict[str, Any]:
-    deps = _deploy_runtime_dependencies()
+    onnx_status = _module_status("onnx")
+    mujoco_status = _module_status("mujoco")
+    viewer_status = _module_status("mujoco.viewer")
+    glfw_status = _module_status("glfw")
+    ort_status = _module_status("onnxruntime")
+    torch_status = _module_status("torch")
+    imageio_status = _module_status("imageio")
+    imageio_ffmpeg_status = _module_status("imageio_ffmpeg")
+    model_path = default_mujoco_model_path(paths)
+    config = load_calibration_config(repo_root=paths.repo_root, model_path=model_path, contract=FALLBACK_CONTRACT)
+    display = os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY") or ""
     return {
         "target": DEPLOY_TARGET,
         "target_runtime": TARGET_RUNTIME,
@@ -194,16 +213,33 @@ def deploy_defaults(paths: PanelPaths) -> dict[str, Any]:
         "rtol": DEFAULT_RTOL,
         "atol": DEFAULT_ATOL,
         "deploy_runtime_python": sys.executable,
-        "onnx_installed": deps["onnx"]["installed"],
-        "onnx_version": deps["onnx"].get("version", ""),
-        "mujoco_model_path": str(default_mujoco_model_path(paths)),
-        "mujoco_installed": deps["mujoco"]["installed"],
-        "mujoco_version": deps["mujoco"].get("version", ""),
-        "onnxruntime_installed": deps["onnxruntime"]["installed"],
-        "onnxruntime_version": deps["onnxruntime"].get("version", ""),
-        "torch_installed": deps["torch"]["installed"],
-        "torch_version": deps["torch"].get("version", ""),
-        "deploy_runtime_dependencies": deps,
+        "onnx_installed": onnx_status["installed"],
+        "onnx_version": onnx_status["version"],
+        "mujoco_model_path": str(model_path),
+        "mujoco_installed": mujoco_status["installed"],
+        "mujoco_version": mujoco_status["version"],
+        "onnxruntime_installed": ort_status["installed"],
+        "onnxruntime_version": ort_status["version"],
+        "torch_installed": torch_status["installed"],
+        "torch_version": torch_status["version"],
+        "deploy_runtime_dependencies": {
+            "onnx": onnx_status,
+            "onnxruntime": ort_status,
+            "mujoco": mujoco_status,
+            "torch": torch_status,
+        },
+        "mujoco_viewer_available": bool(mujoco_status["installed"] and viewer_status["installed"] and glfw_status["installed"] and display),
+        "mujoco_renderer_available": bool(mujoco_status["installed"]),
+        "mujoco_encoder_available": bool(imageio_status["installed"] and imageio_ffmpeg_status["installed"]),
+        "mujoco_display": display,
+        "mujoco_scenarios": [scenario.to_dict() for scenario in default_scenarios(steps=DEFAULT_PLAYBACK_STEPS)],
+        "mujoco_playback_defaults": {
+            "steps": DEFAULT_PLAYBACK_STEPS,
+            "width": DEFAULT_PLAYBACK_WIDTH,
+            "height": DEFAULT_PLAYBACK_HEIGHT,
+            "fps": DEFAULT_PLAYBACK_FPS,
+        },
+        "mujoco_calibrated": bool(config.calibrated),
         "report_version": REPORT_VERSION,
     }
 
@@ -1104,9 +1140,11 @@ def validate_ros_mock(paths: PanelPaths, manifest: PolicyManifest, *, run_ros_mo
 
 
 def validate_mujoco_readiness(
+    paths: PanelPaths,
     manifest: PolicyManifest,
     *,
     model_path: Path,
+    artifact_dir: Path,
     steps: int = DEFAULT_MUJOCO_STEPS,
 ) -> ValidationStageResult:
     if not model_path.is_file():
@@ -1118,65 +1156,53 @@ def validate_mujoco_readiness(
             details={"model_path": str(model_path)},
             next_steps=["Add a calibrated RedRHex MuJoCo model and point the Deploy tab at it."],
         )
-    try:
-        import mujoco
-    except Exception as exc:  # pragma: no cover - optional dependency
+    mujoco_status = _module_status("mujoco")
+    if not mujoco_status["installed"]:
         return _result(
             "mujoco_readiness",
             "MuJoCo Readiness",
             "skipped",
-            f"mujoco Python package is not installed: {exc}",
-            details={"model_path": str(model_path)},
+            f"mujoco Python package is not installed: {mujoco_status.get('error') or 'module not found'}",
+            details={"model_path": str(model_path), "mujoco_status": mujoco_status},
             next_steps=["Install mujoco in the panel environment to run advisory sim-to-sim checks."],
         )
+    ort_status = _module_status("onnxruntime")
+    if not ort_status["installed"]:
+        return _result(
+            "mujoco_readiness",
+            "MuJoCo Readiness",
+            "skipped",
+            f"onnxruntime Python package is not installed: {ort_status.get('error') or 'module not found'}",
+            details={"model_path": str(model_path), "onnxruntime_status": ort_status},
+            next_steps=["Install onnxruntime in the panel environment to run ONNX policy rollouts."],
+        )
     try:
-        model = mujoco.MjModel.from_xml_path(str(model_path))
-        data = mujoco.MjData(model)
-        max_abs_qpos = 0.0
-        diverged_at: int | None = None
-        action = np.zeros(manifest.expected_action_dim, dtype=np.float32)
+        config = load_calibration_config(repo_root=paths.repo_root, model_path=model_path, contract=_contract(paths))
+        obs_dim = manifest.expected_obs_dim
         if Path(manifest.policy_onnx_path).is_file():
             try:
                 session = _ort_session(Path(manifest.policy_onnx_path), ["CPUExecutionProvider"])
                 input_meta = session.get_inputs()[0]
-                output_meta = session.get_outputs()[0]
                 obs_dim = _last_static_dim(list(input_meta.shape)) or manifest.expected_obs_dim
-                action = np.asarray(
-                    session.run([output_meta.name], {input_meta.name: np.zeros((1, obs_dim), dtype=np.float32)})[0],
-                    dtype=np.float32,
-                ).reshape(-1)
             except Exception:
-                action = np.zeros(manifest.expected_action_dim, dtype=np.float32)
-        for step in range(max(1, int(steps))):
-            if model.nu:
-                data.ctrl[: min(model.nu, action.size)] = np.clip(action[: min(model.nu, action.size)], -1.0, 1.0)
-            mujoco.mj_step(model, data)
-            if not np.isfinite(data.qpos).all() or not np.isfinite(data.qvel).all():
-                diverged_at = step
-                break
-            if data.qpos.size:
-                max_abs_qpos = max(max_abs_qpos, float(np.max(np.abs(data.qpos))))
-        status = "warn"
-        summary = "MuJoCo loaded and stepped the model, but the result is advisory until the model is calibrated."
-        if diverged_at is not None:
-            summary = "MuJoCo advisory rollout diverged."
+                obs_dim = manifest.expected_obs_dim
+        report = run_mujoco_rollouts(
+            repo_root=paths.repo_root,
+            model_path=model_path,
+            policy_path=Path(manifest.policy_onnx_path),
+            artifact_dir=artifact_dir,
+            config=config,
+            obs_dim=obs_dim,
+            action_dim=manifest.expected_action_dim,
+        )
         return _result(
             "mujoco_readiness",
             "MuJoCo Readiness",
-            status,
-            summary,
-            details={
-                "model_path": str(model_path),
-                "steps_requested": int(steps),
-                "steps_completed": diverged_at if diverged_at is not None else int(steps),
-                "diverged_at": diverged_at,
-                "nq": int(model.nq),
-                "nv": int(model.nv),
-                "nu": int(model.nu),
-                "max_abs_qpos": max_abs_qpos,
-                "advisory": True,
-            },
-            next_steps=[
+            report.status,
+            report.summary,
+            details=report.to_dict(),
+            artifacts=report.artifacts,
+            next_steps=[] if report.calibrated else [
                 "Calibrate MuJoCo masses, actuator mapping, contacts, and joint limits before treating this as a hard gate."
             ],
         )
@@ -1186,7 +1212,7 @@ def validate_mujoco_readiness(
             "MuJoCo Readiness",
             "warn",
             f"MuJoCo could not compile or step the model: {exc}",
-            details={"model_path": str(model_path), "advisory": True},
+            details={"model_path": str(model_path), "artifact_dir": str(artifact_dir), "advisory": True},
             next_steps=["Convert/repair the RedRHex model for MuJoCo and re-run the advisory stage."],
         )
 
@@ -1325,6 +1351,7 @@ def run_deploy_validation(
     use_cuda: bool = False,
     use_tensorrt: bool = False,
     mujoco_model_path: str | None = None,
+    mujoco_only: bool = False,
     rtol: float = DEFAULT_RTOL,
     atol: float = DEFAULT_ATOL,
 ) -> DeploymentReport:
@@ -1355,7 +1382,7 @@ def run_deploy_validation(
             json_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
             return report
     manifest = build_policy_manifest(paths, run)
-    stage_plan = [
+    stage_plan = [] if mujoco_only else [
         ValidatorSpec(
             "export_integrity",
             "Export Integrity",
@@ -1401,20 +1428,23 @@ def run_deploy_validation(
     ]
     if include_mujoco:
         model_path = Path(mujoco_model_path).expanduser() if mujoco_model_path else default_mujoco_model_path(paths)
+        artifact_dir = Path(manifest.log_dir) / "deploy" / f"mujoco_{pipeline_id}"
         stage_plan.append(
             ValidatorSpec(
                 "mujoco_readiness",
                 "MuJoCo Readiness",
-                lambda: validate_mujoco_readiness(manifest, model_path=model_path),
+                lambda: validate_mujoco_readiness(paths, manifest, model_path=model_path, artifact_dir=artifact_dir),
                 dependencies=["policy.onnx", "onnxruntime", "mujoco", str(model_path)],
             )
         )
     else:
+        model_path = default_mujoco_model_path(paths)
+        artifact_dir = Path(manifest.log_dir) / "deploy" / f"mujoco_{pipeline_id}"
         stage_plan.append(
             ValidatorSpec(
                 "mujoco_readiness",
                 "MuJoCo Readiness",
-                lambda: validate_mujoco_readiness(manifest, model_path=default_mujoco_model_path(paths)),
+                lambda: validate_mujoco_readiness(paths, manifest, model_path=model_path, artifact_dir=artifact_dir),
                 dependencies=["policy.onnx", "onnxruntime", "mujoco"],
                 skip_reason="MuJoCo advisory rollout was disabled for this run.",
                 skip_next_steps=["Enable MuJoCo readiness after a calibrated model is available."],
@@ -1452,6 +1482,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-cuda", action="store_true")
     parser.add_argument("--use-tensorrt", action="store_true")
     parser.add_argument("--mujoco-model-path", default="")
+    parser.add_argument("--mujoco-only", action="store_true")
     parser.add_argument("--rtol", type=float, default=DEFAULT_RTOL)
     parser.add_argument("--atol", type=float, default=DEFAULT_ATOL)
     return parser
@@ -1486,6 +1517,7 @@ def main(argv: list[str] | None = None) -> int:
             use_cuda=args.use_cuda,
             use_tensorrt=args.use_tensorrt,
             mujoco_model_path=args.mujoco_model_path or None,
+            mujoco_only=args.mujoco_only,
             rtol=args.rtol,
             atol=args.atol,
         )

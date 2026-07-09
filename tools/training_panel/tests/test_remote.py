@@ -243,13 +243,17 @@ class RemoteTests(unittest.TestCase):
             config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
             client = FakeClient(job=None)
             worker = RemoteWorker(config, paths, client, executor=FakeExecutor())
-            worker.sync_if_due = MagicMock(return_value="")
+            calls = []
+            worker.sync_if_due = MagicMock(side_effect=lambda: calls.append("history") or "")
+            worker.sync_recent_media_runs_if_due = MagicMock(side_effect=lambda: calls.append("media") or "")
 
             result = worker.poll_once()
 
             self.assertEqual(result["status"], "idle")
             self.assertEqual(client.claim_calls, 1)
             worker.sync_if_due.assert_called_once_with()
+            worker.sync_recent_media_runs_if_due.assert_called_once_with()
+            self.assertEqual(calls, ["history", "media"])
 
     def test_worker_records_team_activity_without_blocking_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,6 +292,9 @@ class RemoteTests(unittest.TestCase):
         )
         self.assertEqual({item["kind"] for item in artifacts}, {"checkpoint", "video", "onnx"})
         self.assertTrue(all(item.get("local_path") for item in artifacts))
+        by_kind = {item["kind"]: item for item in artifacts}
+        self.assertEqual(by_kind["checkpoint"]["checkpoint_iteration"], 1)
+        self.assertEqual(by_kind["video"]["checkpoint_iteration"], 1)
 
     def test_run_artifacts_include_checkpoint_and_video_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,6 +310,25 @@ class RemoteTests(unittest.TestCase):
             self.assertIn("model_10.pt", paths)
             self.assertIn("model_20.pt", paths)
             self.assertIn("model_10_video.mp4", paths)
+            video_artifact = next(item for item in artifacts if Path(item["local_path"]).name == "model_10_video.mp4")
+            self.assertEqual(video_artifact["checkpoint_iteration"], 10)
+
+    def test_run_artifacts_limit_video_inventory_after_eight_iterations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_many"
+            video_dir = log_dir / "videos" / "play"
+            video_dir.mkdir(parents=True)
+            latest = video_dir / "model_12_video.mp4"
+            for iteration in range(12):
+                video = video_dir / f"model_{iteration}_video.mp4"
+                video.write_bytes(b"mp4")
+            latest.write_bytes(b"new-mp4")
+
+            artifacts = run_artifacts({"id": "run_many", "log_dir": str(log_dir), "latest_video": str(latest)})
+
+            videos = [item for item in artifacts if item["kind"] == "video"]
+            self.assertEqual([Path(item["local_path"]).name for item in videos], ["model_12_video.mp4"])
 
     def test_run_artifacts_include_tensorboard_summary_image(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -565,6 +591,30 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(upsert[1][0]["folder_key"], "sprint tests")
             self.assertEqual(upsert[2]["query"]["on_conflict"], "machine_id,folder_key")
 
+    def test_worker_deletes_mother_deleted_remote_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
+            client = FakeClient()
+            worker = RemoteWorker(config, paths, client, executor=FakeExecutor())
+            worker.history.create_folder("Archive")
+            worker.history.delete_folder("Archive")
+            client.select_by_table["team_folders"] = [
+                {
+                    "name": "Archive",
+                    "folder_key": "archive",
+                    "machine_id": "lab-pc",
+                    "updated_at": "2026-05-16T00:00:00+00:00",
+                }
+            ]
+
+            summary = worker.sync_folders()
+
+            self.assertEqual(summary["folders_deleted"], 1)
+            self.assertNotIn("Archive", worker.history.get_folders())
+            self.assertIn(("team_folders", {"machine_id": "eq.lab-pc", "folder_key": "eq.archive"}), client.deletes)
+
     def test_worker_immediately_syncs_launched_training_run_with_requester(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -822,6 +872,70 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(client.completed[0][0], "job_one")
             self.assertIn("sync_error", client.completed[0][1]["payload"])
 
+    def test_worker_sync_writes_runs_even_when_artifact_upsert_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            onnx = root / "policy.onnx"
+            onnx.write_text("onnx", encoding="utf-8")
+            paths = self.make_paths(root)
+            config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
+            client = FakeClient()
+            client.raise_on_artifacts_upsert = True
+            executor = FakeExecutor()
+            executor.sync_runs_payload = MagicMock(return_value=[
+                {
+                    "id": "run_one",
+                    "status": "completed",
+                    "artifacts": [{"kind": "onnx", "run_id": "run_one", "local_path": str(onnx)}],
+                }
+            ])
+            worker = RemoteWorker(config, paths, client, executor=executor)
+
+            summary = worker.sync_runs()
+
+            self.assertEqual(summary["runs_changed"], 1)
+            self.assertTrue(any(item[0] == "runs" for item in client.upserts))
+            self.assertIn("artifact sync failed", worker.last_sync_error)
+
+    def test_worker_idle_sync_skips_heavy_artifact_uploads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "clip.mp4"
+            video.write_bytes(b"mp4-data")
+            checkpoint = root / "model_1.pt"
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            paths = self.make_paths(root)
+            config = RemoteConfig(machine_id="lab-pc", accept_jobs=True, sync_interval_seconds=0)
+            client = FakeClient()
+            client.select_by_table["runs"] = []
+            client.select_by_table["team_folders"] = []
+            client.select_by_table["artifacts"] = [
+                {"id": "old-checkpoint", "local_path": str(root / "old_model.pt"), "kind": "checkpoint"},
+            ]
+            executor = FakeExecutor()
+            executor.sync_runs_payload = MagicMock(return_value=[
+                {
+                    "id": "run_one",
+                    "status": "completed",
+                    "artifacts": [
+                        {"kind": "video", "run_id": "run_one", "local_path": str(video)},
+                        {"kind": "checkpoint", "run_id": "run_one", "local_path": str(checkpoint)},
+                    ],
+                }
+            ])
+            worker = RemoteWorker(config, paths, client, executor=executor)
+            worker.history.create_folder("Archive")
+            worker.history.delete_folder("Archive")
+
+            worker.sync_if_due(force=False)
+
+            self.assertTrue(any(item[0] == "runs" for item in client.upserts))
+            self.assertEqual(client.uploads, [])
+            self.assertFalse(any(item[0] == "team_folders" for item in client.deletes))
+            self.assertFalse(any(item[0] == "artifacts" for item in client.deletes))
+            self.assertEqual(worker.last_sync_summary["artifacts_skipped"], 2)
+            self.assertEqual(worker.last_sync_summary["folders_deleted"], 0)
+
     def test_worker_pulls_newer_remote_run_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -855,6 +969,36 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(run["folder"], "team")
             self.assertEqual(history.get_note("run_one"), "new note")
 
+    def test_worker_sync_runs_clears_explicit_empty_mother_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.ensure_dirs()
+            executor = RemoteJobExecutor(paths)
+            executor.processes.running_isaac_processes = MagicMock(return_value=[])
+            executor.history.add_run({
+                "id": "run_one",
+                "status": "completed",
+                "created_at": "2026-05-16T00:00:00+00:00",
+                "updated_at": "2026-05-16T00:00:00+00:00",
+                "display_name": "",
+                "folder": None,
+            })
+            executor.history.set_note("run_one", "")
+            config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
+            client = FakeClient()
+            client.select_by_table["runs"] = []
+            client.select_by_table["team_folders"] = []
+            worker = RemoteWorker(config, paths, client, executor=executor)
+
+            worker.sync_runs()
+
+            runs_upsert = next(item for item in client.upserts if item[0] == "runs")
+            record = runs_upsert[1][0]
+            self.assertIsNone(record["display_name"])
+            self.assertIsNone(record["folder"])
+            self.assertEqual(record["notes"], "")
+
     def test_worker_does_not_pull_metadata_from_remote_log_dir_alias(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -883,6 +1027,30 @@ class RemoteTests(unittest.TestCase):
             run = history.get_run("panel_canonical")
             self.assertEqual(run["folder"], "tests")
             self.assertEqual(history.get_note("panel_canonical"), "")
+
+    def test_worker_does_not_create_local_stub_from_remote_metadata_only_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.ensure_dirs()
+            executor = FakeExecutor()
+            history = executor.history = RemoteJobExecutor(paths).history
+            config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
+            client = FakeClient()
+            client.select_rows = [{
+                "id": "panel_remote_only",
+                "display_name": None,
+                "folder": None,
+                "notes": None,
+                "log_dir": None,
+                "updated_at": "2026-05-17T12:00:00+00:00",
+            }]
+            worker = RemoteWorker(config, paths, client, executor=executor)
+
+            updated = worker.pull_remote_run_metadata()
+
+            self.assertEqual(updated, 0)
+            self.assertIsNone(history.get_run("panel_remote_only"))
 
     def test_worker_sync_deletes_tombstoned_remote_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1151,6 +1319,35 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(worker.last_sync_summary["targeted_run_ids"], ["run_video"])
             artifact_upsert = next(u for u in client.upserts if u[0] == "artifacts")
             self.assertEqual(artifact_upsert[1][0]["storage_path"], "runs/run_video/videos/clip.mp4")
+
+    def test_worker_targeted_media_sync_repairs_unchanged_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "model_7_video.mp4"
+            video.write_bytes(b"mp4-data")
+            paths = self.make_paths(root)
+            config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
+            client = FakeClient()
+            executor = FakeExecutor()
+            payload = [
+                {
+                    "id": "run_video",
+                    "status": "completed",
+                    "latest_video": str(video),
+                    "artifacts": [{"kind": "video", "run_id": "run_video", "local_path": str(video)}],
+                }
+            ]
+            executor.sync_runs_payload = MagicMock(return_value=payload)
+            worker = RemoteWorker(config, paths, client, executor=executor)
+
+            worker.sync_runs()
+            client.upserts.clear()
+            client.uploads.clear()
+            worker.sync_runs(run_ids={"run_video"}, pull_metadata=False)
+
+            artifact_upsert = next(u for u in client.upserts if u[0] == "artifacts")
+            self.assertEqual(artifact_upsert[1][0]["checkpoint_iteration"], 7)
+            self.assertEqual(worker.last_sync_summary["artifact_repair_runs"], 1)
 
     def test_worker_skips_video_upload_when_artifact_has_storage_path(self):
         with tempfile.TemporaryDirectory() as tmp:

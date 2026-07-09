@@ -18,7 +18,7 @@ from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
 from .history import HistoryStore
 from .presets import PresetStore
-from .processes import ProcessRegistry, ProcessStartError
+from .processes import CudaPreflightError, ProcessRegistry, ProcessStartError
 from .remote_config import RemoteStateStore
 from .remote_manager import RemoteWorkerManager
 from .rewards import reward_defaults, reward_file_index
@@ -60,7 +60,7 @@ class PanelState:
     def __init__(self, paths: PanelPaths):
         self.paths = paths
         self.history = HistoryStore(paths)
-        self.processes = ProcessRegistry(paths, self.history)
+        self.processes = ProcessRegistry(paths, self.history, cuda_preflight=True)
         self.presets = PresetStore(_PRESET_FILE)
         self.terrain_presets = TerrainPresetStore(_TERRAIN_PRESET_FILE)
         self.activity = ActivityStore(paths)
@@ -85,6 +85,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     "rsl_rl_log_root": str(self.state.paths.rsl_rl_log_root),
                     "default_task": DEFAULT_TASK,
                     "version": __version__,
+                    "cuda_health": self.state.processes.cuda_health(),
                     "local_url_hint": "http://127.0.0.1:8080",
                     "lan_hint": "Run with --host 0.0.0.0 and open http://<machine-ip>:8080",
                     "ssh_tunnel_hint": "ssh -L 8080:127.0.0.1:8080 user@host",
@@ -133,6 +134,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._json({"presets": [params.to_dict() for params in VIDEO_PRESETS.values()]})
         if parsed.path == "/api/runs":
             return self._json(self._runs_payload())
+        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/mujoco/video"):
+            run_id = route_id(parsed.path)
+            return self._send_run_mujoco_video(run_id)
         if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/deploy"):
             run_id = route_id(parsed.path)
             run = self.state.history.get_run(run_id)
@@ -572,6 +576,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     use_cuda=bool(payload.get("use_cuda", False)),
                     use_tensorrt=bool(payload.get("use_tensorrt", False)),
                     mujoco_model_path=str(payload.get("mujoco_model_path") or "") or None,
+                    mujoco_only=bool(payload.get("mujoco_only", False)),
                 )
                 self._record_activity(
                     "deploy_readiness_start",
@@ -580,12 +585,50 @@ class PanelHandler(BaseHTTPRequestHandler):
                     payload={**result, "export_first": export_first},
                 )
                 return self._json(result, status=201)
+            if parsed.path.startswith("/api/runs/") and (
+                parsed.path.endswith("/mujoco/viewer/start") or parsed.path.endswith("/mujoco/video/start")
+            ):
+                run_id = route_id(parsed.path)
+                run = self.state.history.get_run(run_id)
+                if not run:
+                    return self._json({"error": "Run not found"}, status=404)
+                if not run.get("onnx_path"):
+                    return self._json({"error": "No exported policy.onnx found for run"}, status=404)
+                defaults = deploy_defaults(self.state.paths)
+                mode = "viewer" if parsed.path.endswith("/mujoco/viewer/start") else "record"
+                if mode == "viewer" and not defaults.get("mujoco_viewer_available"):
+                    return self._json({"error": "MuJoCo viewer is not available on this display.", "defaults": defaults}, status=409)
+                if mode == "record" and not defaults.get("mujoco_encoder_available"):
+                    return self._json({"error": "MuJoCo MP4 encoder dependencies are missing.", "defaults": defaults}, status=409)
+                result = self.state.processes.start_mujoco_playback(
+                    run_id=run_id,
+                    mode=mode,
+                    scenario=str(payload.get("scenario") or "stand_zero"),
+                    steps=int(payload.get("steps") or defaults.get("mujoco_playback_defaults", {}).get("steps") or 1250),
+                    width=int(payload.get("width") or defaults.get("mujoco_playback_defaults", {}).get("width") or 1280),
+                    height=int(payload.get("height") or defaults.get("mujoco_playback_defaults", {}).get("height") or 720),
+                    fps=int(payload.get("fps") or defaults.get("mujoco_playback_defaults", {}).get("fps") or 30),
+                    mujoco_model_path=str(payload.get("mujoco_model_path") or "") or None,
+                )
+                self._record_activity(
+                    "mujoco_playback_start",
+                    summary=f"Started MuJoCo {mode} for {run_id}",
+                    subject_id=run_id,
+                    payload={**result, "mode": mode},
+                )
+                return self._json(result, status=201)
             if parsed.path.startswith("/api/deploy/") and parsed.path.endswith("/stop"):
                 pipeline_id = route_id(parsed.path)
                 stopped = self.state.processes.stop(pipeline_id)
                 if stopped:
                     self._record_activity("deploy_readiness_stop", summary=f"Stopped deploy readiness {pipeline_id}", subject_id=pipeline_id)
                 return self._json({"stopped": stopped, "pipeline_id": pipeline_id})
+            if parsed.path.startswith("/api/mujoco/") and parsed.path.endswith("/stop"):
+                process_id = route_id(parsed.path)
+                stopped = self.state.processes.stop(process_id)
+                if stopped:
+                    self._record_activity("mujoco_playback_stop", summary=f"Stopped MuJoCo playback {process_id}", subject_id=process_id)
+                return self._json({"stopped": stopped, "process_id": process_id})
             if parsed.path == "/api/open-location":
                 return self._json(self._open_location(str(payload.get("path") or "")))
             if parsed.path == "/api/tensorboard/start":
@@ -689,6 +732,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                 return self._json({"saved": True, "config": asdict(cfg), "presets": PRESETS})
         except ProcessStartError as exc:
             return self._json(exc.payload, status=500)
+        except CudaPreflightError as exc:
+            return self._json(exc.payload, status=409)
         except ValueError as exc:
             return self._json({"error": str(exc)}, status=400)
         self._not_found()
@@ -842,6 +887,20 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._json({"error": "Video path is outside the RSL-RL log root"}, status=403)
         self._send_file_response(resolved_video, "video/mp4")
 
+    def _send_run_mujoco_video(self, run_id: str) -> None:
+        run = self.state.history.get_run(run_id)
+        video = Path(str(run.get("latest_mujoco_video"))) if run and run.get("latest_mujoco_video") else None
+        if not video or not video.exists() or not video.is_file():
+            return self._json({"error": "No recorded MuJoCo video found for run"}, status=404)
+        log_dir = Path(str(run.get("log_dir") or ""))
+        if not log_dir.is_dir():
+            return self._json({"error": "No log directory found for run"}, status=404)
+        resolved_video = video.resolve()
+        resolved_root = log_dir.resolve()
+        if resolved_video != resolved_root and resolved_root not in resolved_video.parents:
+            return self._json({"error": "MuJoCo video path is outside the run log directory"}, status=403)
+        self._send_file_response(resolved_video, "video/mp4")
+
     def _send_run_tensorboard_summary(self, run_id: str) -> None:
         run = self.state.history.get_run(run_id)
         if not run:
@@ -925,6 +984,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _not_found(self) -> None:
+        self._json({"error": "not found"}, status=404)
+
     def _runs_payload(self) -> dict:
         self.state.processes.reconcile_stale_history()
         runs = self.state.history.list_runs()
@@ -936,10 +998,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     for key, value in latest.items()
                     if key in {"path", "pipeline_id", "created_at", "completed_at", "overall_status", "readiness_level", "stage_counts"}
                 }
-        return {"runs": runs}
-
-    def _not_found(self) -> None:
-        self._json({"error": "not found"}, status=404)
+        return {"runs": runs, "folders": self.state.history.folders_for_runs(runs)}
 
 
 def main() -> None:

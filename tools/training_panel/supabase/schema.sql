@@ -220,13 +220,17 @@ create table if not exists public.artifacts (
   storage_path text,
   public_url text,
   bytes bigint,
+  checkpoint_iteration integer,
   created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
   unique (run_id, kind, local_path)
 );
 
 alter table public.artifacts add column if not exists storage_path text;
 alter table public.artifacts add column if not exists public_url text;
 alter table public.artifacts add column if not exists bytes bigint;
+alter table public.artifacts add column if not exists checkpoint_iteration integer;
+alter table public.artifacts add column if not exists updated_at timestamptz not null default now();
 
 alter table public.run_events drop constraint if exists run_events_run_id_event_type_key;
 alter table public.run_events add column if not exists recipient_id uuid references auth.users(id);
@@ -305,6 +309,11 @@ create trigger set_terrain_presets_updated_at
 drop trigger if exists set_machines_updated_at on public.machines;
 create trigger set_machines_updated_at
   before update on public.machines
+  for each row execute function public.set_redrhex_updated_at();
+
+drop trigger if exists set_artifacts_updated_at on public.artifacts;
+create trigger set_artifacts_updated_at
+  before update on public.artifacts
   for each row execute function public.set_redrhex_updated_at();
 
 drop trigger if exists set_run_deletions_updated_at on public.run_deletions;
@@ -646,6 +655,9 @@ create index if not exists idx_run_deletions_log_dir_name on public.run_deletion
 create index if not exists idx_jobs_machine_id      on public.jobs(machine_id);
 create index if not exists idx_jobs_status          on public.jobs(status);
 create index if not exists idx_artifacts_run_id     on public.artifacts(run_id);
+create index if not exists idx_artifacts_machine_run_kind_iter on public.artifacts(machine_id, run_id, kind, checkpoint_iteration);
+create index if not exists idx_artifacts_run_kind_local_path on public.artifacts(run_id, kind, local_path);
+create index if not exists idx_artifacts_storage_path on public.artifacts(storage_path);
 create index if not exists idx_run_events_run_id    on public.run_events(run_id);
 create unique index if not exists idx_run_events_event_key_unique on public.run_events(event_key) where event_key is not null;
 create index if not exists idx_run_events_recipient_id on public.run_events(recipient_id);

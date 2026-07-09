@@ -1,4 +1,4 @@
-import { HEARTBEAT_STALE_MS } from "./config.js?v=3.4.2-folder-video-fixes";
+import { HEARTBEAT_STALE_MS } from "./config.js?v=3.4.10-sync-health";
 import {
   convergenceLabel as catalogConvergenceLabel,
   jobDisplayStatus as catalogJobDisplayStatus,
@@ -7,7 +7,7 @@ import {
   statusDescription as catalogStatusDescription,
   statusLabel as catalogStatusLabel,
   statusTone as catalogStatusTone,
-} from "./status_catalog.js?v=3.4.2-folder-video-fixes";
+} from "./status_catalog.js?v=3.4.10-sync-health";
 
 export const BUILT_IN_REWARD_PRESETS = [
   {
@@ -555,6 +555,12 @@ export function checkpointIteration(path = "") {
   return match ? Number(match[1]) : null;
 }
 
+export function artifactCheckpointIteration(artifact = {}) {
+  const explicit = Number(artifact.checkpoint_iteration);
+  if (Number.isFinite(explicit)) return explicit;
+  return checkpointIteration(`${artifact.local_path || artifact.path || ""} ${artifact.storage_path || ""}`);
+}
+
 export function checkpointArtifactsForRun(run = {}, artifacts = []) {
   const byPath = new Map();
   if (run.latest_checkpoint) {
@@ -571,7 +577,7 @@ export function checkpointArtifactsForRun(run = {}, artifacts = []) {
     .forEach((artifact) => {
       const path = String(artifact.local_path || artifact.path || "");
       if (!path) return;
-      byPath.set(path, { ...artifact, iteration: checkpointIteration(path) });
+      byPath.set(path, { ...artifact, iteration: artifactCheckpointIteration(artifact) });
     });
   let values = [...byPath.values()];
   if ((run.compacted_at || run.compacted_deleted_count || run.compacted_bytes_freed) && run.latest_checkpoint) {
@@ -603,7 +609,7 @@ export function checkpointArtifactsForRun(run = {}, artifacts = []) {
 export function checkpointOptionsForRun(run = {}, artifacts = []) {
   return checkpointArtifactsForRun(run, artifacts).map((artifact) => {
     const path = String(artifact.local_path || artifact.path || "");
-    const iteration = checkpointIteration(path);
+    const iteration = Number.isFinite(artifact.iteration) ? artifact.iteration : artifactCheckpointIteration(artifact);
     const label = Number.isFinite(iteration) ? `Iteration ${iteration}` : path.split("/").pop() || "Checkpoint";
     return { path, iteration, label };
   });
@@ -619,7 +625,7 @@ export function videoArtifactForCheckpoint(run = {}, artifacts = [], checkpoint 
     .filter((artifact) => artifact.storage_path)
     .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
   if (Number.isFinite(iteration)) {
-    const exact = videos.find((artifact) => checkpointIteration(`${artifact.local_path || ""} ${artifact.storage_path || ""}`) === iteration);
+    const exact = videos.find((artifact) => artifactCheckpointIteration(artifact) === iteration);
     if (exact) return exact;
   }
   if (!checkpoint && !Number.isFinite(iteration)) {
@@ -628,13 +634,25 @@ export function videoArtifactForCheckpoint(run = {}, artifacts = [], checkpoint 
   return null;
 }
 
+function latestVideoMatchesCheckpoint(run = {}, checkpoint = "") {
+  if (!runLocalPathBelongsToRun(run, run.latest_video)) return false;
+  if (!checkpoint) return true;
+  const checkpointIter = checkpointIteration(checkpoint);
+  const videoIter = checkpointIteration(String(run.latest_video || ""));
+  if (Number.isFinite(checkpointIter) && Number.isFinite(videoIter)) {
+    return checkpointIter === videoIter;
+  }
+  const latestCheckpointIter = checkpointIteration(String(run.latest_checkpoint || ""));
+  return Number.isFinite(checkpointIter) && checkpointIter === latestCheckpointIter;
+}
+
 export function hasVideoRecordForCheckpoint(run = {}, artifacts = [], checkpoint = "") {
   if (videoArtifactForCheckpoint(run, artifacts, checkpoint)) return true;
   const iteration = checkpointIteration(checkpoint);
   if (!Number.isFinite(iteration)) return !checkpoint && hasAnyVideoRecord(run, artifacts);
-  return Boolean(runLocalPathBelongsToRun(run, run.latest_video) && checkpointIteration(String(run.latest_video)) === iteration) || artifactsForRun(run, artifacts).some((artifact) => (
+  return latestVideoMatchesCheckpoint(run, checkpoint) || artifactsForRun(run, artifacts).some((artifact) => (
     artifact.kind === "video"
-    && checkpointIteration(`${artifact.local_path || ""} ${artifact.storage_path || ""}`) === iteration
+    && artifactCheckpointIteration(artifact) === iteration
   ));
 }
 

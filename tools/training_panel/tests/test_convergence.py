@@ -2,9 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from tools.training_panel.training_panel.convergence import (
+    CONVERGENCE_MAX_EVENT_BYTES,
     PRESETS,
     ConvergenceChecker,
     ConvergenceConfig,
@@ -75,6 +75,18 @@ class ConvergenceCheckerTests(unittest.TestCase):
             self.assertFalse(result.detected)
         except Exception as exc:
             self.fail(f"check() raised unexpectedly: {exc}")
+
+    def test_large_event_logs_are_skipped_without_tensorboard_parse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            event_file = log_dir / "events.out.tfevents.large"
+            with event_file.open("wb") as handle:
+                handle.truncate(CONVERGENCE_MAX_EVENT_BYTES + 1)
+
+            checker = ConvergenceChecker()
+            scalars = checker.read_scalars(log_dir, "Train/mean_reward")
+
+            self.assertEqual(scalars, [])
 
 
 class ConvergenceConfigTests(unittest.TestCase):
