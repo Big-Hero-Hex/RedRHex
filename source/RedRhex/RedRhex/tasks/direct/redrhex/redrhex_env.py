@@ -397,6 +397,8 @@ class RedrhexEnv(DirectRLEnv):
         ).unsqueeze(0).expand(self.num_envs, 4)
         gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, 3)
         self.reference_projected_gravity = quat_apply_inverse(init_quat, gravity_vec)
+        # 快取世界座標重力方向，避免 _update_state 每步重新配置張量
+        self._gravity_vec_w = gravity_vec
 
         # =================================================================
         # 獎勵追蹤緩衝區（用於訓練監控和分析）
@@ -618,7 +620,7 @@ class RedrhexEnv(DirectRLEnv):
         # 站姿高度參考（給 simplified reward 使用）
         init_height = 0.30
         try:
-            init_height = float(self.cfg.robot.init_state.pos[2])
+            init_height = float(self.cfg.robot_cfg.init_state.pos[2])
         except Exception:
             init_height = float(getattr(self.cfg, "target_base_height", 0.30))
         self._reward_target_base_height = float(getattr(self.cfg, "reward_target_base_height", init_height))
@@ -844,11 +846,13 @@ class RedrhexEnv(DirectRLEnv):
     def _update_commands(self):
         """更新命令
         """
-        # 外部控制時跳過
+        # 步數計數與外部控制無關（curriculum/push 排程依賴它，play/eval 也要前進）
+        self._global_step_count += 1
+
+        # 外部控制時跳過自動命令重採樣
         if self.external_control:
             return
 
-        self._global_step_count += 1
         stage = self._update_curriculum_stage()
         if stage != self._last_curriculum_stage:
             self._last_curriculum_stage = stage
@@ -2434,8 +2438,7 @@ class RedrhexEnv(DirectRLEnv):
         self.base_ang_vel = torch.nan_to_num(self.base_ang_vel, nan=0.0)
 
         # 投影重力
-        gravity_vec = torch.tensor([0.0, 0.0, -1.0], device=self.device).expand(self.num_envs, 3)
-        self.projected_gravity = quat_apply_inverse(root_quat, gravity_vec)
+        self.projected_gravity = quat_apply_inverse(root_quat, self._gravity_vec_w)
         self.projected_gravity = torch.nan_to_num(self.projected_gravity, nan=0.0)
 
         # 更新步態相位
@@ -3673,15 +3676,9 @@ class RedrhexEnv(DirectRLEnv):
                 rew_abad_smooth = torch.zeros(self.num_envs, device=self.device)
                 rew_abad_jitter = torch.zeros(self.num_envs, device=self.device)
             
-            # ==============================================================
-            # G6.5.6 側移方向一致性獎勵
-            # ==============================================================
-            lateral_direction = torch.sign(cmd_vy)
-            abad_direction_correct = (lateral_direction * (abad_right_mean - abad_left_mean)) > 0.05
-            rew_lateral_direction = abad_direction_correct.float() * 1.0 * dt
-            rew_lateral_direction = torch.where(is_lateral_mode, rew_lateral_direction, torch.zeros_like(rew_lateral_direction))
-            total_reward += rew_lateral_direction
-            
+            # (G6.5.6 側移方向一致性獎勵原本在此重複出現一次，導致同一獎勵被累加兩次；
+            #  已移除，保留下方較完整的版本。)
+
             # 全身同步抖動懲罰（只對極端情況）
             all_action_rate = torch.sum(torch.square(self.actions - self.last_actions), dim=1)
             main_drive_amplitude = torch.abs(main_drive_vel).mean(dim=1)
@@ -4041,7 +4038,7 @@ class RedrhexEnv(DirectRLEnv):
         if self._curriculum_stage == 1:
             min_height = float(getattr(self.cfg, "stage1_min_base_height", min_height))
         too_low = base_height < min_height  # 使用 config 中的值
-        too_high = base_height > 2.0   # 高於 2 公尺（飛上天了？）
+        too_high = base_height > float(getattr(self.cfg, "max_base_height", 2.0))  # 飛上天了？
         
         # =================================================================
         # 終止條件 5：身體觸地（摔倒）

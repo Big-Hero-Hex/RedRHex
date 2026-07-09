@@ -24,7 +24,7 @@ import os
 import isaaclab.sim as sim_utils
 
 # Get the USD path - config file is at source/RedRhex/RedRhex/tasks/direct/redrhex/
-# USD file is at project root: /home/jasonliao/RedRhex/RedRhex/RedRhex.usd
+# USD file is at the repo root: <repo>/RedRhex.usd
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REDRHEX_USD_PATH = os.path.normpath(os.path.join(
     _THIS_DIR, "..", "..", "..", "..", "..", "..", "RedRhex.usd"
@@ -133,8 +133,7 @@ REDRHEX_CFG = ArticulationCfg(
     # -------------------------------------------------------------------------
     init_state=ArticulationCfg.InitialStateCfg(
         # 初始位置 (x, y, z)
-        # ★★★ 降低初始高度，避免落地時前傾/後仰 ★★★
-        # 目標站立高度約 0.12m，設為 0.15m 讓機器人穩定落地
+        # 從 0.3m 落下，讓機器人落地後穩定站立（目標站立高度約 0.12m）
         pos=(0.0, 0.0, 0.3),
         
         # 初始旋轉（四元數格式 w, x, y, z）
@@ -301,7 +300,7 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # - 所以 AI 控制頻率 = 120 ÷ 2 = 60 Hz（每秒決策 60 次）
     decimation = 2
     
-    # 每個訓練回合（episode）持續 30 秒
+    # 每個訓練回合（episode）持續 60 秒
     # 越長的回合讓機器人有更多時間學習和探索
     episode_length_s = 60
 
