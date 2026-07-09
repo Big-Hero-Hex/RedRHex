@@ -27,7 +27,7 @@ class MujocoCalibrationConfig:
     source_model_path: str = ""
     generated_model_path: str = ""
     package_roots: dict[str, str] = field(default_factory=dict)
-    policy_hz: float = 125.0
+    policy_hz: float = 60.0
     timestep: float = 0.002
     base_body_name: str = "base_link"
     main_drive_joint_names: list[str] = field(default_factory=list)
@@ -204,7 +204,7 @@ def load_calibration_config(
     config = MujocoCalibrationConfig(
         source_model_path=str(model_path),
         package_roots={"test_7_description": str(package_root)},
-        policy_hz=float(getattr(contract, "POLICY_HZ", 125.0)),
+        policy_hz=float(getattr(contract, "POLICY_HZ", 60.0)),
         main_drive_joint_names=list(getattr(contract, "MAIN_DRIVE_JOINT_NAMES", [])),
         abad_joint_names=list(getattr(contract, "ABAD_JOINT_NAMES", [])),
     )

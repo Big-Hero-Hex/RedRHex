@@ -74,7 +74,7 @@ Generated MuJoCo artifacts are evidence for the selected run only. Do not commit
 
 ## MuJoCo Calibration
 
-The default MuJoCo rollout config uses the RedRHex deploy contract: 56 or 280 observations, 12 actions, a 125 Hz policy loop, 6 main-drive motors, and 6 ABAD motors. The default config sets `calibrated=false`, so clean rollouts produce a `warn` stage result rather than a hard `pass`.
+The default MuJoCo rollout config uses the RedRHex deploy contract: 56 or 280 observations, 12 actions, a 60 Hz policy loop, 6 main-drive motors, and 6 ABAD motors. The default config sets `calibrated=false`, so clean rollouts produce a `warn` stage result rather than a hard `pass`.
 
 The built-in smoke scenarios are:
 
@@ -85,7 +85,7 @@ The built-in smoke scenarios are:
 
 Each scenario records compile status, completed steps, fall/divergence flags, NaN/Inf detection, base height and roll/pitch ranges, joint-limit violations, actuator saturation, action min/max, latency percentiles, and a final state summary. Once the model is calibrated against real robot or trusted simulator behavior, set the calibration config to `calibrated=true` so threshold failures can become blocking evidence.
 
-Viewer and MP4 playback use the same scenarios and policy/controller path. The policy is evaluated at 125 Hz and its action is held across MuJoCo substeps according to the model timestep.
+Viewer and MP4 playback use the same scenarios and policy/controller path. The policy is evaluated at 60 Hz and its action is held across MuJoCo substeps according to the model timestep.
 
 ## Jetson Handoff
 

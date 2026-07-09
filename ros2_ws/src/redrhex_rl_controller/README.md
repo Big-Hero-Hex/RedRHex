@@ -1553,9 +1553,9 @@ motor_feedback 有 NaN / Inf：
 - action space：12
 - single observation space：56
 - 新版 RSL-RL config 可能使用 `policy + history`，ONNX input 可能是 56 或 280；請用 `check_onnx_io.py` 確認
-- control dt：`sim.dt * decimation = (1/250) * 2 = 0.008 s`
-- policy frequency：`125 Hz`
-- repo 註解有些地方寫 120 Hz / 60 Hz，但實際程式參數是 250 Hz sim、decimation 2、policy 125 Hz
+- control dt：`sim.dt * decimation = (1/120) * 2 = 1/60 s`
+- policy frequency：`60 Hz`
+- 訓練環境實際參數是 120 Hz sim、decimation 2、policy 60 Hz（早期文件誤寫為 250 Hz sim / 125 Hz policy，已修正）
 - exported ONNX 字串可見 `normalizer._mean` 時代表 normalizer 已在圖內
 - 原始訓練 repo 先前沒有 ROS2 deployment package；本 MVP 已新增 `redrhex_msgs`、`redrhex_rl_controller`、`redrhex_lowlevel_bridge`
 - 原始訓練 repo 目前沒有 ROS2 真機通訊層；本 MVP 已新增 mock、serial、sbRIO UDP skeleton，並新增可對接 `JasonLiaoJCS/BioRoLaROS2` 的 `biorola_ros` backend
@@ -1911,7 +1911,7 @@ I. 最後才允許 policy 接管完整 locomotion
 
 - `base_lin_vel` 若長期設為 0，真機 locomotion 可能失效或出現嚴重 sim2real mismatch
 - normalizer 是否已包含在 ONNX 必須用 `check_onnx_io.py` 或 Netron/strings 確認；若 ONNX 已包含 normalizer，不可重複 normalize
-- policy frequency 必須與訓練一致，本 repo 實際是 125 Hz
+- policy frequency 必須與訓練一致，本 repo 實際是 60 Hz
 - 真實馬達方向可能和 IsaacLab joint axis 相反
 - encoder zero offset 可能導致 INIT_STAND 姿態錯誤
 - BioRoLaROS2 ROS2 message protocol 已可對接，但 sbRIO/CORE 內部 watchdog、限流、PWM 標定、servo encoder scale 仍需真機確認

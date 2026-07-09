@@ -14,7 +14,9 @@ OBS_DIM_SINGLE = 56
 ACTION_DIM = 12
 POLICY_HISTORY_LENGTH = 5
 
-SIM_DT = 1.0 / 250.0
+# Must match RedrhexEnvCfg: sim.dt = 1/120, decimation = 2 -> 60 Hz control.
+# (Was wrongly 1/250 -> 125 Hz; the policy must be stepped at its training rate.)
+SIM_DT = 1.0 / 120.0
 DECIMATION = 2
 CONTROL_DT = SIM_DT * DECIMATION
 POLICY_HZ = 1.0 / CONTROL_DT
@@ -81,7 +83,8 @@ INIT_DAMPER_POS = [
 ]
 
 MAIN_DRIVE_VEL_SCALE = 8.0
-ABAD_POS_SCALE = 0.61096
+# Obs normalization divisor; must equal RedrhexEnvCfg.abad_pos_scale.
+ABAD_POS_SCALE = 0.60
 
 # Stage-5 deployment defaults from the inspected training config.
 STAGE_ID = 5
@@ -102,7 +105,9 @@ STAGE_DIAG_ABAD_POLICY_BLEND = 0.58
 STAGE_YAW_ABAD_ACTION_SCALE = 0.46
 STAGE_YAW_ABAD_STANCE_BIAS = 0.12
 STAGE_YAW_ABAD_POLICY_BLEND = 0.56
-STAGE_ABAD_POS_LIMIT = 0.62
+# Sim clamp is +/-60 deg; hardware-specific tighter clamps belong in
+# redrhex_policy.yaml (action.abad_pos_limit), not here.
+STAGE_ABAD_POS_LIMIT = math.radians(60.0)
 STAGE_ACTION_WARMUP_STEPS = 120
 STAGE_FORWARD_POLICY_DRIVE_RESIDUAL_SCALE = 0.06
 STAGE_DIAG_POLICY_DRIVE_RESIDUAL_SCALE = 0.20

@@ -6,7 +6,7 @@ redrhex_rl_controller:
       use_tensorrt: false
       expected_obs_dim: 56
       expected_action_dim: 12
-      policy_hz: 0.0  # 0 means use repo-derived 125 Hz: sim.dt(1/250) * decimation(2)
+      policy_hz: 0.0  # 0 means use repo-derived 60 Hz: sim.dt(1/120) * decimation(2)
       allow_history_dim: true
 
     observation:
