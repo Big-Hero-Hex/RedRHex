@@ -147,6 +147,8 @@ def training_argv(params: TrainingParams) -> list[str]:
         "--device",
         params.device,
     ]
+    # train.py only applies active_*_override.json when this flag is present.
+    argv.append("--panel_overrides")
     if params.headless:
         argv.append("--headless")
     if params.seed is not None:

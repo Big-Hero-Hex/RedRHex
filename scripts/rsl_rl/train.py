@@ -40,6 +40,16 @@ parser.add_argument(
     help="Store git code-state snapshots in the run folder (disabled by default to avoid unicode git-diff errors).",
 )
 parser.add_argument(
+    "--panel_overrides",
+    action="store_true",
+    default=False,
+    help=(
+        "Apply reward/terrain override files written by the training panel "
+        "(tools/training_panel/active_*_override.json). The panel passes this flag itself; "
+        "manual runs ignore stale override files unless it is given explicitly."
+    ),
+)
+parser.add_argument(
     "--resume_policy_only",
     action="store_true",
     default=False,
@@ -241,27 +251,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # Apply reward scale overrides written by the training panel or Reward Agent Lab (if any)
+    # Reward/terrain override files written by the training panel or Reward Agent Lab.
+    # Only applied when --panel_overrides is passed (the panel adds it when spawning
+    # train.py); otherwise a stale override file must not silently reshape manual runs.
     _override_file = Path(__file__).parents[2] / "tools" / "training_panel" / "active_reward_override.json"
-    if _override_file.exists():
-        import json as _json
-        from tools.training_panel.training_panel.reward_overrides import apply_reward_overrides
-
-        _overrides = _json.loads(_override_file.read_text(encoding="utf-8"))
-        _applied = apply_reward_overrides(env_cfg, _overrides)
-        if _applied:
-            print(f"[INFO] Training panel reward overrides applied: {', '.join(_applied)}")
-
-    # Apply terrain overrides written by the training panel (if any)
     _terrain_override_file = Path(__file__).parents[2] / "tools" / "training_panel" / "active_terrain_override.json"
-    if _terrain_override_file.exists():
-        import json as _json
-        from tools.training_panel.training_panel.terrain import apply_terrain_overrides
+    if args_cli.panel_overrides:
+        if _override_file.exists():
+            import json as _json
+            from tools.training_panel.training_panel.reward_overrides import apply_reward_overrides
 
-        _terrain_overrides = _json.loads(_terrain_override_file.read_text(encoding="utf-8"))
-        _applied = apply_terrain_overrides(env_cfg, _terrain_overrides)
-        if _applied:
-            print(f"[INFO] Training panel terrain overrides applied: {', '.join(_applied)}")
+            _overrides = _json.loads(_override_file.read_text(encoding="utf-8"))
+            _applied = apply_reward_overrides(env_cfg, _overrides)
+            if _applied:
+                print(f"[INFO] Training panel reward overrides applied: {', '.join(_applied)}")
+
+        if _terrain_override_file.exists():
+            import json as _json
+            from tools.training_panel.training_panel.terrain import apply_terrain_overrides
+
+            _terrain_overrides = _json.loads(_terrain_override_file.read_text(encoding="utf-8"))
+            _applied = apply_terrain_overrides(env_cfg, _terrain_overrides)
+            if _applied:
+                print(f"[INFO] Training panel terrain overrides applied: {', '.join(_applied)}")
+    else:
+        for _stale in (_override_file, _terrain_override_file):
+            if _stale.exists():
+                print(
+                    f"[WARN] Ignoring training panel override file {_stale} "
+                    "(pass --panel_overrides to apply it)."
+                )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
