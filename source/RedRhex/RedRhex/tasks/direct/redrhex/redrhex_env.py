@@ -612,6 +612,8 @@ class RedrhexEnv(DirectRLEnv):
         self._forward_vel_ratio_proxy = torch.zeros(self.num_envs, device=self.device)
         self._forward_transition_weight = torch.zeros(self.num_envs, device=self.device)
         self._action_warmup_scale = torch.ones(self.num_envs, device=self.device)
+        # 每個 control step 只計算一次 action targets（見 _apply_action）
+        self._action_targets_computed = False
 
         # 站姿高度參考（給 simplified reward 使用）
         init_height = 0.30
@@ -1507,6 +1509,10 @@ class RedrhexEnv(DirectRLEnv):
         self._action_nan_count = torch.isnan(actions).float().sum(dim=1)
         safe_actions = torch.nan_to_num(actions.clone(), nan=0.0, posinf=1.0, neginf=-1.0)
         self.actions = safe_actions.clamp(-1.0, 1.0)       # 接收並限制新動作
+        # _apply_action() 會被每個 physics substep 呼叫（decimation 次）。
+        # 完整的 gating/FSM/時間累積邏輯只能跑一次，否則側移計時器與 CPG 相位會以
+        # decimation 倍速前進。這個旗標讓第一個 substep 計算目標，其餘 substep 重用。
+        self._action_targets_computed = False
 
     def _resolve_command_modes(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """根據命令分出 FWD/LAT/DIAG/YAW/OTHER 五種模式。"""
@@ -1980,7 +1986,17 @@ class RedrhexEnv(DirectRLEnv):
         )
 
     def _apply_action(self) -> None:
-        """將策略輸出轉為關節控制（含 FWD/LAT/DIAG/YAW 模式 gating）。"""
+        """將策略輸出轉為關節控制（含 FWD/LAT/DIAG/YAW 模式 gating）。
+
+        DirectRLEnv 在每個 physics substep 都會呼叫本方法（共 decimation 次）。
+        目標計算（含時間累積的 LAT FSM / lateral CPG）只在第一個 substep 執行，
+        其餘 substep 直接重寫入快取的目標，避免計時器以 decimation 倍速前進。
+        """
+        if getattr(self, "_action_targets_computed", False):
+            self.robot.set_joint_velocity_target(self._target_drive_vel, joint_ids=self._main_drive_indices)
+            self.robot.set_joint_position_target(self._target_abad_pos, joint_ids=self._abad_indices)
+            self._apply_damper_hold()
+            return
         raw_drive_actions = self.actions[:, self._main_action_slice].clone()
         main_drive_pos = self.joint_pos[:, self._main_drive_indices]
         effective_pos = main_drive_pos * self._direction_multiplier
@@ -2311,6 +2327,7 @@ class RedrhexEnv(DirectRLEnv):
 
         # Damper/spring-leg joints are passive supports: fixed rest pose + zero velocity target.
         self._apply_damper_hold()
+        self._action_targets_computed = True
 
     def _get_observations(self) -> dict:
         """
