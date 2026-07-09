@@ -1177,17 +1177,22 @@ class RedrhexEnv(DirectRLEnv):
             obs[:, 0:3] += torch.randn_like(obs[:, 0:3]) * float(getattr(self.cfg, "noise_lin_vel", 0.1)) * noise_scale
             obs[:, 3:6] += torch.randn_like(obs[:, 3:6]) * float(getattr(self.cfg, "noise_ang_vel", 0.2)) * noise_scale
             obs[:, 6:9] += torch.randn_like(obs[:, 6:9]) * float(getattr(self.cfg, "noise_gravity", 0.05)) * noise_scale
-            joint_pos_end = 9 + 2 * self.num_main_drive_joints + self.num_abad_joints
-            joint_vel_end = joint_pos_end + self.num_main_drive_joints + self.num_abad_joints
-            obs[:, 9:joint_pos_end] += (
-                torch.randn_like(obs[:, 9:joint_pos_end])
-                * float(getattr(self.cfg, "noise_joint_pos", 0.01))
-                * noise_scale
+            # Obs layout: sin(9:15) cos(15:21) main_vel(21:27) abad_pos(27:33) abad_vel(33:39)
+            sincos_end = 9 + 2 * self.num_main_drive_joints
+            main_vel_end = sincos_end + self.num_main_drive_joints
+            abad_pos_end = main_vel_end + self.num_abad_joints
+            abad_vel_end = abad_pos_end + self.num_abad_joints
+            noise_joint_pos = float(getattr(self.cfg, "noise_joint_pos", 0.01)) * noise_scale
+            noise_joint_vel = float(getattr(self.cfg, "noise_joint_vel", 1.5)) * noise_scale
+            obs[:, 9:sincos_end] += torch.randn_like(obs[:, 9:sincos_end]) * noise_joint_pos
+            obs[:, main_vel_end:abad_pos_end] += (
+                torch.randn_like(obs[:, main_vel_end:abad_pos_end]) * noise_joint_pos
             )
-            obs[:, joint_pos_end:joint_vel_end] += (
-                torch.randn_like(obs[:, joint_pos_end:joint_vel_end])
-                * float(getattr(self.cfg, "noise_joint_vel", 1.5))
-                * noise_scale
+            obs[:, sincos_end:main_vel_end] += (
+                torch.randn_like(obs[:, sincos_end:main_vel_end]) * noise_joint_vel
+            )
+            obs[:, abad_pos_end:abad_vel_end] += (
+                torch.randn_like(obs[:, abad_pos_end:abad_vel_end]) * noise_joint_vel
             )
 
             if getattr(self.cfg, "dr_obs_noise_bias_enable", False):
