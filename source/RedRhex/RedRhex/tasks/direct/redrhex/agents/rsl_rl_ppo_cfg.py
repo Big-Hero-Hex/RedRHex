@@ -55,8 +55,14 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        # Left-right mirror augmentation is DISABLED: the tripod grouping
+        # (A={0,3,5}, B={1,2,4}) is not mirror-symmetric — mirroring swaps legs
+        # 2<->5 across tripods while the gait-phase clock obs stays unchanged,
+        # so mirrored samples pair legs 2/5 with the wrong CPG phase offsets.
+        # Re-enable only if tripods are regrouped mirror-symmetrically
+        # (classic alternating tripod: A={0,4,2}, B={3,1,5}).
         symmetry_cfg=RslRlSymmetryCfg(
-            use_data_augmentation=True,
+            use_data_augmentation=False,
             data_augmentation_func=redrhex_symmetry.compute_symmetric_states,
         ),
     )
@@ -100,8 +106,14 @@ class PPORunnerPrivilegedTeacherCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        # Left-right mirror augmentation is DISABLED: the tripod grouping
+        # (A={0,3,5}, B={1,2,4}) is not mirror-symmetric — mirroring swaps legs
+        # 2<->5 across tripods while the gait-phase clock obs stays unchanged,
+        # so mirrored samples pair legs 2/5 with the wrong CPG phase offsets.
+        # Re-enable only if tripods are regrouped mirror-symmetrically
+        # (classic alternating tripod: A={0,4,2}, B={3,1,5}).
         symmetry_cfg=RslRlSymmetryCfg(
-            use_data_augmentation=True,
+            use_data_augmentation=False,
             data_augmentation_func=redrhex_symmetry.compute_symmetric_states,
         ),
     )
@@ -145,8 +157,14 @@ class PPORunnerForwardFastCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        # Left-right mirror augmentation is DISABLED: the tripod grouping
+        # (A={0,3,5}, B={1,2,4}) is not mirror-symmetric — mirroring swaps legs
+        # 2<->5 across tripods while the gait-phase clock obs stays unchanged,
+        # so mirrored samples pair legs 2/5 with the wrong CPG phase offsets.
+        # Re-enable only if tripods are regrouped mirror-symmetrically
+        # (classic alternating tripod: A={0,4,2}, B={3,1,5}).
         symmetry_cfg=RslRlSymmetryCfg(
-            use_data_augmentation=True,
+            use_data_augmentation=False,
             data_augmentation_func=redrhex_symmetry.compute_symmetric_states,
         ),
     )
@@ -190,8 +208,14 @@ class PPORunnerForwardFastPrivilegedTeacherCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+        # Left-right mirror augmentation is DISABLED: the tripod grouping
+        # (A={0,3,5}, B={1,2,4}) is not mirror-symmetric — mirroring swaps legs
+        # 2<->5 across tripods while the gait-phase clock obs stays unchanged,
+        # so mirrored samples pair legs 2/5 with the wrong CPG phase offsets.
+        # Re-enable only if tripods are regrouped mirror-symmetrically
+        # (classic alternating tripod: A={0,4,2}, B={3,1,5}).
         symmetry_cfg=RslRlSymmetryCfg(
-            use_data_augmentation=True,
+            use_data_augmentation=False,
             data_augmentation_func=redrhex_symmetry.compute_symmetric_states,
         ),
     )
