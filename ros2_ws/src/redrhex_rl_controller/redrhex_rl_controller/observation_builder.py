@@ -75,6 +75,22 @@ def _wrap_angle_diff(new: float, old: float) -> float:
     return math.atan2(math.sin(new - old), math.cos(new - old))
 
 
+def _rpy_deg_to_matrix(rpy_deg: Iterable[float]) -> np.ndarray:
+    """Rotation matrix R = Rz(yaw) @ Ry(pitch) @ Rx(roll) from degrees."""
+    roll, pitch, yaw = (math.radians(float(v)) for v in rpy_deg)
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    return np.array(
+        [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ],
+        dtype=np.float64,
+    )
+
+
 class ObservationBuilder:
     """Stateful observation builder.
 
@@ -93,6 +109,26 @@ class ObservationBuilder:
         self.abad_pos_scale = float(self.cfg.get("abad_pos_scale", C.ABAD_POS_SCALE))
         self.base_gait_frequency_hz = float(self.cfg.get("base_gait_frequency_hz", C.BASE_GAIT_FREQUENCY_HZ))
         self.base_lin_vel_source = str(self.cfg.get("base_lin_vel_source", "zero"))
+        # Fixed IMU mount rotation: orientation of the IMU frame expressed in the
+        # policy body frame (the IsaacLab USD root frame the policy was trained in).
+        # Vectors measured in the IMU frame are mapped to the body frame with
+        # v_body = R_mount @ v_imu. Identity keeps legacy behavior.
+        self.imu_mount_rpy_deg = [float(v) for v in self.cfg.get("imu_mount_rpy_deg", [0.0, 0.0, 0.0])]
+        self._imu_mount_rot = _rpy_deg_to_matrix(self.imu_mount_rpy_deg)
+        self._imu_mount_is_identity = bool(np.allclose(self._imu_mount_rot, np.eye(3), atol=1.0e-9))
+        # Expected projected gravity (body frame) when the robot rests in its
+        # trained neutral pose. The IsaacLab root frame is rotated ~90 deg about X
+        # (Y-up USD), so this is NOT necessarily (0,0,-1); read it from sim obs[6:9]
+        # at rest. None disables the rest-attitude gate.
+        # None or a zero vector (the ROS-param friendly sentinel) disables the gate.
+        rest_gravity = self.cfg.get("expected_rest_projected_gravity")
+        self.expected_rest_projected_gravity: np.ndarray | None = None
+        if rest_gravity is not None:
+            vec = np.asarray([float(v) for v in rest_gravity], dtype=np.float64)
+            if vec.shape != (3,):
+                raise ValueError("expected_rest_projected_gravity must be a 3-vector")
+            if np.linalg.norm(vec) >= 1.0e-6:
+                self.expected_rest_projected_gravity = vec / np.linalg.norm(vec)
         self.odom_twist_in_body_frame = bool(self.cfg.get("odom_twist_in_body_frame", True))
         self.abad_feedback_source = str(self.cfg.get("abad_feedback_source", "commanded"))
         self.estimate_missing_joint_velocity = bool(self.cfg.get("estimate_missing_joint_velocity", True))
@@ -172,7 +208,10 @@ class ObservationBuilder:
         self.imu_quat_xyzw = np.array(
             [orientation.x, orientation.y, orientation.z, orientation.w], dtype=np.float64
         )
-        self.imu_ang_vel = np.array([angular_velocity.x, angular_velocity.y, angular_velocity.z], dtype=np.float64)
+        ang_vel = np.array([angular_velocity.x, angular_velocity.y, angular_velocity.z], dtype=np.float64)
+        if not self._imu_mount_is_identity:
+            ang_vel = self._imu_mount_rot @ ang_vel
+        self.imu_ang_vel = ang_vel
         self.imu_time = now_s if now_s is not None else _stamp_to_float(msg)
 
     def update_joint_state(self, msg: object, now_s: float | None = None) -> None:
@@ -275,7 +314,7 @@ class ObservationBuilder:
         else:
             base_lin_vel = np.zeros(3, dtype=np.float64)
 
-        projected_gravity = _quat_inverse_rotate_xyzw(self.imu_quat_xyzw, np.array([0.0, 0.0, -1.0]))
+        projected_gravity = self.projected_gravity_body()
         main_pos = np.array([self.joint_pos[name] for name in self.main_drive_joint_names], dtype=np.float64)
         main_vel = np.array([self.joint_vel.get(name, 0.0) for name in self.main_drive_joint_names], dtype=np.float64)
         if self.abad_feedback_source == "joint_states":
@@ -324,6 +363,27 @@ class ObservationBuilder:
         if stacked.shape != (expected_history_dim,):
             raise RuntimeError(f"Stacked observation dim {stacked.shape[0]} != {expected_history_dim}.")
         return stacked
+
+    def projected_gravity_body(self) -> np.ndarray:
+        """Unit gravity direction in the policy body frame (mount rotation applied)."""
+        if self.imu_quat_xyzw is None:
+            raise RuntimeError("Cannot compute projected gravity before IMU is received.")
+        gravity = _quat_inverse_rotate_xyzw(self.imu_quat_xyzw, np.array([0.0, 0.0, -1.0]))
+        if not self._imu_mount_is_identity:
+            gravity = self._imu_mount_rot @ gravity
+        return gravity
+
+    def rest_attitude_error_deg(self) -> float | None:
+        """Angle (deg) between current projected gravity and the configured rest
+        reference from training. None when the gate is unconfigured or no IMU yet."""
+        if self.expected_rest_projected_gravity is None or self.imu_quat_xyzw is None:
+            return None
+        gravity = self.projected_gravity_body()
+        norm = np.linalg.norm(gravity)
+        if norm < 1.0e-9:
+            return 180.0
+        cos_angle = float(np.clip(np.dot(gravity / norm, self.expected_rest_projected_gravity), -1.0, 1.0))
+        return math.degrees(math.acos(cos_angle))
 
     def get_roll_pitch_yaw(self) -> tuple[float, float, float]:
         if self.imu_quat_xyzw is None:

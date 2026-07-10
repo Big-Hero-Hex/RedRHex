@@ -86,6 +86,12 @@ def _validate_deployment_config(params: dict, policy_input_dim: int, result: dic
                 "estimate_missing_joint_velocity": bool(
                     _nested(params, "observation", "estimate_missing_joint_velocity", default=True)
                 ),
+                "imu_mount_rpy_deg": list(
+                    _nested(params, "observation", "imu_mount_rpy_deg", default=[0.0, 0.0, 0.0])
+                ),
+                "expected_rest_projected_gravity": list(
+                    _nested(params, "observation", "expected_rest_projected_gravity", default=[0.0, 0.0, 0.0])
+                ),
                 "command_limits": command_limits,
             }
         )

@@ -75,8 +75,20 @@ class RedRhexRLControllerNode(Node):
             "odom_twist_in_body_frame": bool(_declare_get(self, "observation.odom_twist_in_body_frame", True)),
             "abad_feedback_source": str(_declare_get(self, "observation.abad_feedback_source", "commanded")),
             "estimate_missing_joint_velocity": bool(_declare_get(self, "observation.estimate_missing_joint_velocity", True)),
+            # IMU frame vs. trained (IsaacLab USD root) body frame; see observation_builder.py.
+            "imu_mount_rpy_deg": [
+                float(v) for v in _declare_get(self, "observation.imu_mount_rpy_deg", [0.0, 0.0, 0.0])
+            ],
+            # Projected gravity in the trained body frame at rest (sim obs[6:9]).
+            # [0,0,0] disables the rest-attitude gate.
+            "expected_rest_projected_gravity": [
+                float(v) for v in _declare_get(self, "observation.expected_rest_projected_gravity", [0.0, 0.0, 0.0])
+            ],
             "command_limits": command_limits,
         }
+        self.max_rest_attitude_error_deg = float(
+            _declare_get(self, "observation.max_rest_attitude_error_deg", 15.0)
+        )
         decoder_cfg = {
             "action_clip": float(_declare_get(self, "safety.action_clip", 1.0)),
             "main_drive_vel_limit_rad_s": float(_declare_get(self, "safety.main_drive_vel_limit_rad_s", 30.0)),
@@ -125,6 +137,13 @@ class RedRhexRLControllerNode(Node):
         }
 
         self.observation_builder = ObservationBuilder(builder_cfg)
+        if self.observation_builder.expected_rest_projected_gravity is None:
+            self.get_logger().warn(
+                "observation.expected_rest_projected_gravity is unset -> the rest-attitude "
+                "sim-frame gate is DISABLED. The trained body frame is the IsaacLab USD root "
+                "(rotated ~90 deg about X), so record obs[6:9] from sim at rest and set this "
+                "parameter before real-robot policy runs."
+            )
         self.action_decoder = ActionDecoder(decoder_cfg)
         self.safety_filter = SafetyFilter(safety_cfg)
         self.abad_feedback_source = self.observation_builder.abad_feedback_source
@@ -238,6 +257,16 @@ class RedRhexRLControllerNode(Node):
             self.enable_policy = False
             self.get_logger().warn(
                 f"Rejecting policy enable while state={self.state_machine.state.value}, estop={self.estop}"
+            )
+            return
+        rest_error = self.observation_builder.rest_attitude_error_deg()
+        if rest_error is not None and rest_error > self.max_rest_attitude_error_deg:
+            self.enable_policy = False
+            self.get_logger().error(
+                "Rejecting policy enable: projected gravity deviates "
+                f"{rest_error:.1f} deg from the trained rest frame "
+                f"(limit {self.max_rest_attitude_error_deg:.1f} deg). Check IMU mounting / "
+                "observation.imu_mount_rpy_deg before enabling the policy."
             )
             return
         self.enable_policy = True

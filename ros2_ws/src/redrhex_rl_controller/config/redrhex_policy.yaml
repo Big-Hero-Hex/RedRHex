@@ -18,6 +18,20 @@ redrhex_rl_controller:
       abad_feedback_source: "commanded"  # commanded or joint_states
       estimate_missing_joint_velocity: true
       policy_history_length: 5
+      # --- IMU frame vs. trained body frame ------------------------------
+      # The policy was trained in the IsaacLab USD root frame, which is
+      # rotated ~90 deg about X relative to a conventional z-up robot frame
+      # (Y-up authored USD). If the IMU reports a z-up frame, its vectors
+      # must be rotated into the trained frame or the policy sees a robot
+      # tilted 90 deg. imu_mount_rpy_deg is the orientation of the IMU frame
+      # expressed in the trained body frame (deg, applied as Rz*Ry*Rx).
+      imu_mount_rpy_deg: [0.0, 0.0, 0.0]
+      # Projected-gravity obs (sim obs[6:9]) with the robot at rest in sim.
+      # Record it via play.py and set it here; [0,0,0] disables the gate.
+      # When set, /redrhex/enable_policy is rejected while the measured
+      # projected gravity deviates more than max_rest_attitude_error_deg.
+      expected_rest_projected_gravity: [0.0, 0.0, 0.0]
+      max_rest_attitude_error_deg: 15.0
 
     state_machine:
       enable_policy_on_start: false
