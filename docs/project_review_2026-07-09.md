@@ -65,3 +65,30 @@ If context was compacted: continue from the first unchecked area. Final delivera
 17. [STRUCT][LOW] Stale comments: init pos comment says 0.15m but pos z=0.3; episode_length comment says 30s but =60; USD path comment refers to /home/jasonliao.
 18. [STRUCT][LOW] obs `abad_vel` unnormalized while other channels normalized; add_noise path also noises commands.
 19. [LOG][LOW] Episode reward logging divides by max_episode_length_s regardless of actual episode length → early-terminating episodes under-report per-second reward.
+
+---
+
+## Fix status (2026-07-10, branch fix/review-2026-07)
+
+FIXED (one commit each; see git log on this branch):
+- #4/#22/#27 train.py override gating: `--panel_overrides` flag now required; panel passes it automatically.
+- #3 (#1 in env list) `_apply_action` per-substep time accumulation: targets computed once per control step.
+- #6 (#2 in env list) DR obs-noise slice indices corrected.
+- #13 (#4) `cfg.robot` -> `cfg.robot_cfg` typo.
+- #17 (#6/#7) `too_high` uses cfg.max_base_height; `_global_step_count` no longer freezes under external_control.
+- #11 (#3) legacy duplicated lateral-direction reward removed.
+- #5 (#20) mirror data augmentation disabled in all 4 PPO cfgs (tripod grouping not mirror-symmetric).
+- #1/#7 (#31/#33) deploy contract: SIM_DT 1/250 -> 1/120 (60 Hz), ABAD_POS_SCALE 0.60, STAGE_ABAD_POS_LIMIT radians(60); all 125 Hz fallbacks/docs updated; NEW tools/training_panel/tests/test_contract_parity.py (AST-based) prevents future drift.
+- #2 (#32) IMU frame: observation.imu_mount_rpy_deg + expected_rest_projected_gravity rest-attitude gate on /redrhex/enable_policy; still requires recording sim obs[6:9] at rest and hardware verification.
+- #8 (#26) HistoryStore: RLock + atomic tmp+os.replace writes.
+- Hygiene: MUJOCO_LOG.TXT gitignored; stale comments fixed; world-gravity tensor cached.
+
+DEFERRED (need owner decision / hardware / larger refactor):
+- #9 contact sensors (USD needs contact-reporter API authoring).
+- #10 base_lin_vel=zero at deploy (needs estimator or lin-vel-dropout training).
+- #12 diag sign double-count in simplified rewards (ambiguous intent; changes reward magnitudes).
+- #14 reward-on-stale-state / state mutation in _get_observations (refactor, subtle training change).
+- #15 density-based mass, #16 actuator damping softness, body damping (physics tuning; retrain to validate).
+- #18 convergence reservoir/window semantics.
+- #19 episode_sums perf refactor; legacy reward path removal; cfg modularization (#22-24).
+- #25 stale .patch/test files at repo root; #26 panel auth.
