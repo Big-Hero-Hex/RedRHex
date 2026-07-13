@@ -519,6 +519,43 @@ def test_biorola_constructor_accepts_finite_reviewed_conversion_parameters(monke
     assert backend.publisher_conflict_latched is False
 
 
+def test_biorola_connect_rejects_remapped_preview_alias_before_creating_publishers(
+    monkeypatch,
+):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    rinbo_msgs = types.ModuleType("rinbo_msgs")
+    rinbo_msgs_msg = types.ModuleType("rinbo_msgs.msg")
+    rinbo_msgs_msg.MotorCmdStamped = _MotorCmd
+    rinbo_msgs_msg.MotorStateStamped = object
+    rinbo_msgs.msg = rinbo_msgs_msg
+    monkeypatch.setitem(sys.modules, "rinbo_msgs", rinbo_msgs)
+    monkeypatch.setitem(sys.modules, "rinbo_msgs.msg", rinbo_msgs_msg)
+    publisher_topics = []
+
+    def resolve_topic_name(topic):
+        remaps = {
+            "/motor/command": "/hardware/motor_command",
+            "/preview": "/hardware/motor_command",
+        }
+        return remaps[topic]
+
+    node = SimpleNamespace(
+        resolve_topic_name=resolve_topic_name,
+        create_publisher=lambda _msg_type, topic, _qos: publisher_topics.append(topic),
+        create_subscription=lambda *_args: object(),
+        get_logger=lambda: SimpleNamespace(info=lambda _message: None),
+    )
+    kwargs = _rinbo_init_kwargs()
+    kwargs["node"] = node
+    backend = module.RinboRosBackend(**kwargs)
+
+    with pytest.raises(RuntimeError, match="resolve to the same ROS topic"):
+        backend.connect()
+
+    assert publisher_topics == []
+    assert backend.connected is False
+
+
 def _configured_rinbo(module):
     backend = module.RinboRosBackend.__new__(module.RinboRosBackend)
     backend.MotorCmdStamped = _MotorCmd

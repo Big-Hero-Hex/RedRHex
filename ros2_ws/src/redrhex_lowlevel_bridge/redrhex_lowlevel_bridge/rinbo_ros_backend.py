@@ -208,6 +208,14 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.publisher_conflict_reason = ""
 
     def connect(self) -> None:
+        resolved_command_topic = self.node.resolve_topic_name(self.command_topic)
+        resolved_preview_topic = self.node.resolve_topic_name(self.preview_topic)
+        if resolved_command_topic == resolved_preview_topic:
+            raise RuntimeError(
+                "rinbo command and preview topics resolve to the same ROS topic "
+                f"({resolved_command_topic}); choose distinct topics/remaps"
+            )
+
         try:
             from rinbo_msgs.msg import MotorCmdStamped, MotorStateStamped
         except Exception as exc:  # pragma: no cover - requires external BioRoLaROS2 overlay
