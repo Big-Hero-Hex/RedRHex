@@ -62,9 +62,14 @@ class ReplaySchedule:
 
 @dataclass(frozen=True)
 class ReplayInitialState:
-    joint: str
-    source_channel: str
-    position_rad: float
+    joint_order: tuple[str, ...]
+    position_source_channel: str
+    position_rad: tuple[float, ...]
+    velocity_rad_s: tuple[float, ...]
+    velocity_source: str
+    fixture_mode: str
+    fixture_frame: str
+    root_pose_source: str
     sample_time_s: float
     scenario_time_s: float
     sample_offset_s: float
@@ -73,9 +78,14 @@ class ReplayInitialState:
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version,
-            "joint": self.joint,
-            "source_channel": self.source_channel,
-            "position_rad": self.position_rad,
+            "joint_order": list(self.joint_order),
+            "position_source_channel": self.position_source_channel,
+            "position_rad": list(self.position_rad),
+            "velocity_rad_s": list(self.velocity_rad_s),
+            "velocity_source": self.velocity_source,
+            "fixture_mode": self.fixture_mode,
+            "fixture_frame": self.fixture_frame,
+            "root_pose_source": self.root_pose_source,
             "sample_time_s": self.sample_time_s,
             "scenario_time_s": self.scenario_time_s,
             "sample_offset_s": self.sample_offset_s,
@@ -333,9 +343,14 @@ def _replay_initial_state(
         raise ContractError("replay trace is missing its initial state declaration and hash")
     expected_fields = {
         "schema_version",
-        "joint",
-        "source_channel",
+        "joint_order",
+        "position_source_channel",
         "position_rad",
+        "velocity_rad_s",
+        "velocity_source",
+        "fixture_mode",
+        "fixture_frame",
+        "root_pose_source",
         "sample_time_s",
         "scenario_time_s",
         "sample_offset_s",
@@ -347,10 +362,22 @@ def _replay_initial_state(
         raise ContractError("replay initial state hash does not match its declaration")
     if payload["schema_version"] != 1 or isinstance(payload["schema_version"], bool):
         raise ContractError("replay initial state schema version must be 1")
-    if payload["joint"] != scenario.joint:
-        raise ContractError("replay initial state joint does not match the scenario")
-    if payload["source_channel"] != "position":
-        raise ContractError("replay initial state must use the selected position channel")
+    expected_joint_order = tuple(f"main_{index}" for index in range(6))
+    raw_joint_order = payload["joint_order"]
+    if not isinstance(raw_joint_order, list) or tuple(raw_joint_order) != expected_joint_order:
+        raise ContractError("replay initial state must bind all six canonical main joints")
+    if scenario.joint not in expected_joint_order:
+        raise ContractError("replay initial state scenario does not select a main joint")
+    if payload["position_source_channel"] != "main_joint_position_canonical":
+        raise ContractError("replay initial state must use canonical main-joint positions")
+    if payload["fixture_mode"] != scenario.scene_mode or scenario.scene_mode != "fixed_base":
+        raise ContractError("replay initial state fixture mode does not match the scenario")
+    if payload["fixture_frame"] != "world":
+        raise ContractError("replay initial state fixture frame must be world")
+    if payload["root_pose_source"] != "production_asset_default":
+        raise ContractError("replay initial state root pose source is unsupported")
+    if payload["velocity_source"] != "reviewed_initial_neutral":
+        raise ContractError("replay initial state velocity source is unsupported")
 
     def finite_number(field: str) -> float:
         value = payload[field]
@@ -361,7 +388,27 @@ def _replay_initial_state(
             raise ContractError(f"replay initial state {field} must be finite")
         return result
 
-    position_rad = finite_number("position_rad")
+    def finite_vector(field: str) -> tuple[float, ...]:
+        value = payload[field]
+        if not isinstance(value, list) or len(value) != len(expected_joint_order):
+            raise ContractError(
+                f"replay initial state {field} must contain six numeric values"
+            )
+        result: list[float] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise ContractError(
+                    f"replay initial state {field} must contain six numeric values"
+                )
+            result.append(float(item))
+        if not np.isfinite(result).all():
+            raise ContractError(f"replay initial state {field} must be finite")
+        return tuple(result)
+
+    position_rad = finite_vector("position_rad")
+    velocity_rad_s = finite_vector("velocity_rad_s")
+    if any(not math.isclose(value, 0.0, abs_tol=1.0e-12) for value in velocity_rad_s):
+        raise ContractError("reviewed initial-neutral velocity must be zero")
     sample_time_s = finite_number("sample_time_s")
     declared_scenario_time_s = finite_number("scenario_time_s")
     sample_offset_s = finite_number("sample_offset_s")
@@ -381,13 +428,14 @@ def _replay_initial_state(
     ):
         raise ContractError("replay initial state sample offset is inconsistent")
 
-    time_name = loaded.manifest.time_bases.get("position")
+    source_channel = str(payload["position_source_channel"])
+    time_name = loaded.manifest.time_bases.get(source_channel)
     if time_name is None:
-        raise ContractError("replay trace has no position time base for initial state")
+        raise ContractError("replay trace has no canonical position time base")
     position_time = np.asarray(loaded.arrays[time_name], dtype=np.float64)
-    position = np.asarray(loaded.arrays["position"], dtype=np.float64)
-    if position.ndim != 1:
-        raise ContractError("replay initial state position channel must be one-dimensional")
+    position = np.asarray(loaded.arrays[source_channel], dtype=np.float64)
+    if position.ndim != 2 or position.shape[1] != len(expected_joint_order):
+        raise ContractError("replay canonical position channel must have shape (samples, 6)")
     distances = np.abs(position_time - scenario_time_s)
     nearest_distance = float(np.min(distances))
     if nearest_distance > 1.0 / 60.0 + tolerance:
@@ -405,18 +453,23 @@ def _replay_initial_state(
         abs_tol=tolerance,
     ):
         raise ContractError("replay initial state does not select the nearest position sample")
-    if not math.isclose(
-        position_rad,
-        float(position[sample_index]),
-        rel_tol=0.0,
-        abs_tol=tolerance,
+    if not np.allclose(
+        np.asarray(position_rad),
+        position[sample_index],
+        rtol=0.0,
+        atol=tolerance,
     ):
         raise ContractError("replay initial state position does not match the verified trace")
     return (
         ReplayInitialState(
-            joint=scenario.joint,
-            source_channel="position",
+            joint_order=expected_joint_order,
+            position_source_channel=source_channel,
             position_rad=position_rad,
+            velocity_rad_s=velocity_rad_s,
+            velocity_source=str(payload["velocity_source"]),
+            fixture_mode=str(payload["fixture_mode"]),
+            fixture_frame=str(payload["fixture_frame"]),
+            root_pose_source=str(payload["root_pose_source"]),
             sample_time_s=sample_time_s,
             scenario_time_s=declared_scenario_time_s,
             sample_offset_s=sample_offset_s,
@@ -434,6 +487,7 @@ def load_replay_schedule(
 ) -> ReplaySchedule:
     """Load and zero-order-hold one verified real command trace onto physics steps."""
 
+    from .provenance import validate_real_trace_provenance
     from .traces import load_trace
 
     resolve_scenario_steps(scenario, steps, physics_dt)
@@ -445,9 +499,9 @@ def load_replay_schedule(
         scenario=scenario,
         expected_units={"command": command_unit, "position": "rad"},
         expected_frames={"command": scenario.joint, "position": scenario.joint},
+        require_managed_dataset=True,
     )
-    if loaded.manifest.source != "real":
-        raise ContractError("replay trace must have source='real'")
+    validate_real_trace_provenance(loaded, scenario)
 
     time_name = loaded.manifest.time_bases.get("command")
     if time_name is None:

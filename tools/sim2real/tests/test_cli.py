@@ -974,11 +974,17 @@ def test_bound_probe_import_authenticates_commands_separately_from_position_mapp
     profile = CalibrationProfileV1.from_dict(
         {
             "schema_version": 1,
-            "profile_id": "encoder-only-main-0",
+            "profile_id": "encoder-audited-all-main",
             "hardware_mapping": {
-                "encoder_counts_per_rev": {"main_0": 54984.83},
-                "encoder_zero_count": {"main_0": 0.0},
-                "encoder_sign": {"main_0": 1.0},
+                "encoder_counts_per_rev": {
+                    f"main_{index}": 54984.83 for index in range(6)
+                },
+                "encoder_zero_count": {
+                    f"main_{index}": 0.0 for index in range(6)
+                },
+                "encoder_sign": {
+                    f"main_{index}": 1.0 for index in range(6)
+                },
             },
             "sensor_timing": {},
             "simulation_physics": {},
@@ -994,10 +1000,16 @@ def test_bound_probe_import_authenticates_commands_separately_from_position_mapp
         profile=profile,
     )
     trace = load_trace(tmp_path / "episode")
+    np.testing.assert_allclose(
+        trace.arrays["main_joint_position_canonical"], np.zeros((1, 6))
+    )
+    assert trace.manifest.metadata["frames"]["main_joint_position_canonical"] == (
+        "canonical_main_joint_order"
+    )
     constants = trace.manifest.metadata["calibration_constants"]
     scenario = load_scenario("suspended-main-0-step-coast")
 
-    assert constants["position_mapping_source"] == "profile:encoder-only-main-0"
+    assert constants["position_mapping_source"] == "profile:encoder-audited-all-main"
     assert constants["requested_command_source"] == (
         f"authenticated_probe_events:{sha256_json(scenario.to_dict())}"
     )
@@ -1005,9 +1017,14 @@ def test_bound_probe_import_authenticates_commands_separately_from_position_mapp
     initial_state = constants["replay_initial_state"]
     assert initial_state == {
         "schema_version": 1,
-        "joint": "main_0",
-        "source_channel": "position",
-        "position_rad": 0.0,
+        "joint_order": [f"main_{index}" for index in range(6)],
+        "position_source_channel": "main_joint_position_canonical",
+        "position_rad": [0.0] * 6,
+        "velocity_rad_s": [0.0] * 6,
+        "velocity_source": "reviewed_initial_neutral",
+        "fixture_mode": "fixed_base",
+        "fixture_frame": "world",
+        "root_pose_source": "production_asset_default",
         "sample_time_s": pytest.approx(0.01),
         "scenario_time_s": pytest.approx(0.0),
         "sample_offset_s": pytest.approx(0.01),

@@ -60,6 +60,7 @@ _JOINT_TO_LEG = {
     "main_4": "l2",
     "main_5": "l3",
 }
+_MAIN_JOINT_ORDER = tuple(_JOINT_TO_LEG)
 _ENCODER_SIGN = {"l1": -1.0, "l2": -1.0, "l3": -1.0, "r1": 1.0, "r2": 1.0, "r3": 1.0}
 _POSITIVE_DIRECTION = {"l1": True, "l2": True, "l3": True, "r1": False, "r2": False, "r3": False}
 _COUNTS_PER_REV = 54984.83
@@ -371,11 +372,16 @@ def _load_rosbag(
         raise ContractError(f"unsupported main-drive joint for rosbag import: {scenario.joint}")
     hardware = profile.hardware_mapping if profile is not None else {}
 
-    def calibrated(field: str, fallback: float) -> tuple[float, bool]:
+    def calibrated_for_joint(
+        field: str, joint: str, fallback: float
+    ) -> tuple[float, bool]:
         mapping = hardware.get(field, {})
-        if isinstance(mapping, Mapping) and scenario.joint in mapping:
-            return float(mapping[scenario.joint]), True
+        if isinstance(mapping, Mapping) and joint in mapping:
+            return float(mapping[joint]), True
         return fallback, False
+
+    def calibrated(field: str, fallback: float) -> tuple[float, bool]:
+        return calibrated_for_joint(field, scenario.joint, fallback)
 
     counts_per_rev, has_counts = calibrated("encoder_counts_per_rev", _COUNTS_PER_REV)
     encoder_zero, has_zero = calibrated("encoder_zero_count", 0.0)
@@ -397,6 +403,23 @@ def _load_rosbag(
     )
     position_fully_profiled = all((has_counts, has_zero, has_sign))
     command_fully_profiled = all((has_joint_direction, has_pwm_scale, has_pwm_cap))
+    main_position_mapping: dict[str, tuple[float, float, float]] = {}
+    all_main_position_profiled = profile is not None
+    for joint in _MAIN_JOINT_ORDER:
+        leg = _JOINT_TO_LEG[joint]
+        joint_counts, joint_has_counts = calibrated_for_joint(
+            "encoder_counts_per_rev", joint, _COUNTS_PER_REV
+        )
+        joint_zero, joint_has_zero = calibrated_for_joint(
+            "encoder_zero_count", joint, 0.0
+        )
+        joint_sign, joint_has_sign = calibrated_for_joint(
+            "encoder_sign", joint, _ENCODER_SIGN[leg]
+        )
+        main_position_mapping[joint] = (joint_counts, joint_zero, joint_sign)
+        all_main_position_profiled &= all(
+            (joint_has_counts, joint_has_zero, joint_has_sign)
+        )
 
     def mapping_source(measured: bool) -> str:
         if profile is None:
@@ -418,6 +441,7 @@ def _load_rosbag(
         "motor_command_pwm_raw": [],
         "motor_command_canonical": [],
         "motor_state_encoder_raw": [],
+        "main_joint_position_canonical": [],
         "imu_acceleration": [],
         "imu_angular_velocity": [],
         "imu_orientation_xyzw": [],
@@ -478,6 +502,18 @@ def _load_rosbag(
             encoder = [float(leg.position) for leg in legs]
             times["position_time_s"].append(timestamp_s)
             values["motor_state_encoder_raw"].append(encoder)
+            canonical_positions: list[float] = []
+            for joint in _MAIN_JOINT_ORDER:
+                raw_index = _LEG_ORDER.index(_JOINT_TO_LEG[joint])
+                joint_counts, joint_zero, joint_sign = main_position_mapping[joint]
+                canonical_positions.append(
+                    (encoder[raw_index] - joint_zero)
+                    * joint_sign
+                    * 2.0
+                    * math.pi
+                    / joint_counts
+                )
+            values["main_joint_position_canonical"].append(canonical_positions)
             selected_index = _LEG_ORDER.index(selected_leg)
             position_rad = (
                 (encoder[selected_index] - encoder_zero)
@@ -552,15 +588,24 @@ def _load_rosbag(
         sample_index = int(nearest[0])
         sample_time_s = float(position_time[sample_index]) - earliest
         scenario_time_s = scenario_start - earliest
-        replay_initial_state = {
-            "schema_version": 1,
-            "joint": scenario.joint,
-            "source_channel": "position",
-            "position_rad": float(position[sample_index]),
-            "sample_time_s": sample_time_s,
-            "scenario_time_s": scenario_time_s,
-            "sample_offset_s": sample_time_s - scenario_time_s,
-        }
+        if all_main_position_profiled:
+            canonical = np.asarray(
+                values["main_joint_position_canonical"], dtype=np.float64
+            )
+            replay_initial_state = {
+                "schema_version": 1,
+                "joint_order": list(_MAIN_JOINT_ORDER),
+                "position_source_channel": "main_joint_position_canonical",
+                "position_rad": canonical[sample_index].tolist(),
+                "velocity_rad_s": [0.0] * len(_MAIN_JOINT_ORDER),
+                "velocity_source": "reviewed_initial_neutral",
+                "fixture_mode": scenario.scene_mode,
+                "fixture_frame": "world",
+                "root_pose_source": "production_asset_default",
+                "sample_time_s": sample_time_s,
+                "scenario_time_s": scenario_time_s,
+                "sample_offset_s": sample_time_s - scenario_time_s,
+            }
     arrays: dict[str, np.ndarray] = {}
     for time_name, samples in times.items():
         if samples:
@@ -573,6 +618,7 @@ def _load_rosbag(
         ("motor_command_pwm_raw", "motor_command_time_s"),
         ("motor_command_canonical", "motor_command_time_s"),
         ("motor_state_encoder_raw", "position_time_s"),
+        ("main_joint_position_canonical", "position_time_s"),
         ("imu_acceleration", "imu_time_s"),
         ("imu_angular_velocity", "imu_time_s"),
         ("imu_orientation_xyzw", "imu_time_s"),
@@ -584,6 +630,9 @@ def _load_rosbag(
     constants = {
         "calibration_source": mapping_source(fully_profiled),
         "position_mapping_source": mapping_source(position_fully_profiled),
+        "all_main_position_mapping_source": mapping_source(
+            bool(all_main_position_profiled)
+        ),
         "requested_command_source": (
             f"authenticated_probe_events:{probe_evidence['scenario_sha256']}"
             if probe_evidence is not None
@@ -651,6 +700,11 @@ def import_real_trace(
             str(calibration_constants["motor_command_conversion_unit"]),
         )
         details["frames"].setdefault("motor_command_canonical", spec.joint)
+    if "main_joint_position_canonical" in arrays:
+        details["units"].setdefault("main_joint_position_canonical", "rad")
+        details["frames"].setdefault(
+            "main_joint_position_canonical", "canonical_main_joint_order"
+        )
     details.setdefault("joint_order", [] if spec.joint in {"all", "root"} else [spec.joint])
     details["clock"] = {
         "source": clock,
