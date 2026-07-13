@@ -14,7 +14,7 @@ from tools.sim2real.compare import compare_traces
 from tools.sim2real.contracts import CalibrationProfileV1, ContractError, load_profile
 from tools.sim2real.metrics import compute_subsystem_metrics
 from tools.sim2real.profile_measurements import apply_measurements_to_profile
-from tools.sim2real.promotion import evaluate_promotion
+from tools.sim2real.promotion import _validate_changed_field_evidence, evaluate_promotion
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.traces import (
     load_trace,
@@ -600,6 +600,10 @@ def _sweep_evidence(
         "git_sha": "1" * 40,
         "asset_sha256": "a" * 64,
         "config_sha256": "b" * 64,
+        "redrhex_module_path": "/repo/source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py",
+        "redrhex_module_sha256": "b" * 64,
+        "isaaclab_version": "0.54.2",
+        "isaacsim_version": "5.1.0-test",
         "characterization_runner_sha256": "c" * 64,
         "sweep_runner_sha256": "d" * 64,
         "runtime_bundle_sha256": "e" * 64,
@@ -1760,3 +1764,193 @@ def test_effort_candidate_itself_must_match_confirmed_known_load_envelope(
     assert any(
         "direct-measurement envelope" in reason for reason in failed["failures"]
     )
+
+
+def _tamper_bound_episode_metadata(
+    root: Path,
+    binding: dict[str, str],
+    *,
+    section: str,
+    channel: str,
+    value: str,
+) -> None:
+    episode = root / binding["path"]
+    metadata_path = episode / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["metadata"][section][channel] = value
+    metadata_sha = _write_json(metadata_path, metadata)
+
+    dataset_manifest_path = episode.parent.parent / "manifest.json"
+    dataset_manifest = json.loads(
+        dataset_manifest_path.read_text(encoding="utf-8")
+    )
+    matching = [
+        item
+        for item in dataset_manifest["episodes"]
+        if item["episode_id"] == binding["episode_id"]
+    ]
+    assert len(matching) == 1
+    matching[0]["metadata_sha256"] = metadata_sha
+    _write_json(dataset_manifest_path, dataset_manifest)
+    binding["metadata_sha256"] = metadata_sha
+
+
+@pytest.mark.parametrize(
+    ("condition_index", "section", "channel", "value", "message"),
+    [
+        (0, "units", "load_force", "lbf", "unit.*load_force"),
+        (1, "frames", "load_force", "force_gauge", "frame.*load_force"),
+    ],
+    ids=("calibration-unit-lbf", "holdout-wrong-frame"),
+)
+def test_promotion_authenticates_expected_metadata_for_every_condition_trace(
+    tmp_path: Path,
+    condition_index: int,
+    section: str,
+    channel: str,
+    value: str,
+    message: str,
+) -> None:
+    candidate, evidence = _known_load_promotion_fixture(tmp_path)
+    binding = evidence["conditions"][condition_index]["real_episodes"][0]
+    _tamper_bound_episode_metadata(
+        tmp_path,
+        binding,
+        section=section,
+        channel=channel,
+        value=value,
+    )
+
+    with pytest.raises(ContractError, match=message):
+        evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("profile_section", "field", "value", "message"),
+    [
+        ("simulation_physics", "damping", 999.0, "main-drive response evidence"),
+        ("hardware_mapping", "gear_ratio", 999.0, "unidentifiable profile change"),
+        (
+            "hardware_mapping",
+            "pwm_scale",
+            0.01,
+            "mapping-specific measured/source evidence",
+        ),
+        (
+            "hardware_mapping",
+            "pwm_cap",
+            4.0,
+            "mapping-specific measured/source evidence",
+        ),
+    ],
+    ids=(
+        "manual-load-does-not-cover-damping",
+        "manual-load-does-not-cover-gear-ratio",
+        "manual-load-does-not-cover-pwm-scale",
+        "manual-load-does-not-cover-pwm-cap",
+    ),
+)
+def test_manual_effort_evidence_cannot_validate_unrelated_profile_fields(
+    tmp_path: Path,
+    profile_section: str,
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    candidate, evidence = _known_load_promotion_fixture(tmp_path)
+    payload = candidate.to_dict()
+    payload["profile_id"] = f"unrelated-{field}"
+    if profile_section == "simulation_physics":
+        payload[profile_section].setdefault("main_drive", {})[field] = value
+    else:
+        payload[profile_section].setdefault(field, {})["main_0"] = value
+    unrelated = CalibrationProfileV1.from_dict(payload)
+    evidence["candidate_profile_sha256"] = sha256_json(unrelated.to_dict())
+
+    with pytest.raises(ContractError, match=message):
+        evaluate_promotion(unrelated, evidence, artifact_root=tmp_path)
+
+
+def test_velocity_limit_change_requires_conditions_that_reach_saturation() -> None:
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "velocity-baseline",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {"main_drive": {"velocity_limit": 2.0}},
+        }
+    )
+    candidate = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "velocity-candidate",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {"main_drive": {"velocity_limit": 1.0}},
+        }
+    )
+    conditions = {
+        "ordinary-cal": {
+            "role": "calibration",
+            "scenario": load_scenario("suspended-main-0-step-coast"),
+            "real_traces": [],
+        },
+        "ordinary-held": {
+            "role": "holdout",
+            "scenario": load_scenario("suspended-main-5-step-coast"),
+            "real_traces": [],
+        },
+    }
+
+    with pytest.raises(ContractError, match="velocity-limit.*saturation"):
+        _validate_changed_field_evidence(baseline, candidate, conditions)
+
+
+def test_independently_evidenced_effort_and_response_changes_can_be_combined() -> None:
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "combined-baseline",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {
+                "main_drive": {"damping": 0.1, "effort_limit": 1.0}
+            },
+        }
+    )
+    candidate = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "combined-candidate",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {
+                "main_drive": {"damping": 0.2, "effort_limit": 2.0}
+            },
+        }
+    )
+    conditions = {
+        "response-cal": {
+            "role": "calibration",
+            "scenario": load_scenario("suspended-main-0-step-coast"),
+            "real_traces": [],
+        },
+        "response-held": {
+            "role": "holdout",
+            "scenario": load_scenario("suspended-main-5-step-coast"),
+            "real_traces": [],
+        },
+        "effort-cal": {
+            "role": "calibration",
+            "scenario": load_scenario("manual-load"),
+            "real_traces": [],
+        },
+        "effort-held": {
+            "role": "holdout",
+            "scenario": load_scenario("manual-load-holdout"),
+            "real_traces": [],
+        },
+    }
+
+    _validate_changed_field_evidence(baseline, candidate, conditions)

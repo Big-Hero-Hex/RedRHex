@@ -14,7 +14,7 @@ from .characterization import EXPECTED_FOOT_BODY_NAMES, PHYSICS_DT
 from .metrics import compute_subsystem_metrics
 from .provenance import validate_real_trace_provenance
 from .scenarios import load_scenario
-from .sweep import candidate_cache_key
+from .sweep import candidate_cache_key, validate_sweep_candidates
 from .traces import LoadedTrace, load_trace, sha256_file, sha256_json
 
 
@@ -203,6 +203,105 @@ def _trace_binding(
     return loaded, binding
 
 
+def _expected_condition_metadata(
+    scenario: Any,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return the reviewed unit/frame contract for a runnable condition."""
+
+    kind = scenario.experiment_kind
+    if kind in {"step", "coast", "step_coast"}:
+        units = {"command": "rad/s", "position": "rad"}
+        frames = {name: scenario.joint for name in units}
+    elif kind == "abad_static":
+        units = {
+            "command": "rad",
+            "position": "rad",
+            "repeat_index": "1",
+            "settled": "1",
+        }
+        frames = {name: scenario.joint for name in units}
+    elif kind == "friction":
+        units = {
+            "breakaway_force": "N",
+            "static_normal_load": "N",
+            "static_repeat_index": "1",
+            "dynamic_pull_force": "N",
+            "dynamic_normal_load": "N",
+            "dynamic_speed": "m/s",
+            "dynamic_repeat_index": "1",
+        }
+        frames = {name: f"{scenario.joint}/ground" for name in units}
+    elif kind == "static_settle":
+        units = {
+            "root_position": "m",
+            "contact_force_n": "N",
+            "repeat_index": "1",
+            "settled": "1",
+        }
+        frames = {
+            "root_position": "world",
+            "contact_force_n": "feet/ground",
+            "repeat_index": "annotation",
+            "settled": "annotation",
+        }
+    elif kind == "mass_com":
+        units = {
+            "scale_mass": "kg",
+            "support_force": "N",
+            "support_position": "m",
+            "repeat_index": "1",
+        }
+        frames = {name: "root" for name in units}
+    elif kind == "spring":
+        units = {
+            "load_force": "N",
+            "lever_arm": "m",
+            "angle": "rad",
+            "repeat_index": "1",
+        }
+        frames = {name: scenario.joint for name in units}
+    elif kind == "manual_load":
+        units = {
+            "load_force": "N",
+            "lever_arm": "m",
+            "command": "normalized",
+            "direction": "1",
+            "saturation_confirmed": "1",
+            "repeat_index": "1",
+        }
+        frames = {name: scenario.joint for name in units}
+    else:
+        raise ContractError(
+            f"scenario {scenario.scenario_id} has no reviewed trace metadata contract"
+        )
+    missing = set(scenario.required_channels) - set(units)
+    if missing:
+        raise ContractError(
+            f"scenario {scenario.scenario_id} has no reviewed metadata for: "
+            + ", ".join(sorted(missing))
+        )
+    return units, frames
+
+
+def _validate_condition_trace_metadata(loaded: LoadedTrace, scenario: Any) -> None:
+    expected_units, expected_frames = _expected_condition_metadata(scenario)
+    actual_units = loaded.manifest.metadata["units"]
+    actual_frames = loaded.manifest.metadata["frames"]
+    for channel in scenario.required_channels:
+        expected_unit = expected_units[channel]
+        actual_unit = actual_units.get(channel)
+        if actual_unit != expected_unit:
+            raise ContractError(
+                f"expected unit for {channel} is {expected_unit}, got {actual_unit}"
+            )
+        expected_frame = expected_frames[channel]
+        actual_frame = actual_frames.get(channel)
+        if actual_frame != expected_frame:
+            raise ContractError(
+                f"expected frame for {channel} is {expected_frame}, got {actual_frame}"
+            )
+
+
 def _changed_subsystems(
     baseline: CalibrationProfileV1, candidate: CalibrationProfileV1
 ) -> set[str]:
@@ -319,6 +418,36 @@ def _validate_identifiable_changes(
             ):
                 unsupported.append(f"simulation_physics.{section}.{joint}")
 
+    supported_hardware = {
+        "encoder_counts_per_rev",
+        "encoder_zero_count",
+        "encoder_sign",
+        "joint_direction",
+        "abad_target_scale",
+        "abad_target_offset_rad",
+    }
+    for field in set(baseline.hardware_mapping) | set(candidate.hardware_mapping):
+        if (
+            baseline.hardware_mapping.get(field)
+            != candidate.hardware_mapping.get(field)
+            and field not in supported_hardware
+        ):
+            if field in {"pwm_scale", "pwm_cap"}:
+                unsupported.append(
+                    f"hardware_mapping.{field} requires mapping-specific "
+                    "measured/source evidence"
+                )
+            else:
+                unsupported.append(f"hardware_mapping.{field}")
+
+    supported_timing = {"aggregate_command_delay_s"}
+    for field in set(baseline.sensor_timing) | set(candidate.sensor_timing):
+        if (
+            baseline.sensor_timing.get(field) != candidate.sensor_timing.get(field)
+            and field not in supported_timing
+        ):
+            unsupported.append(f"sensor_timing.{field}")
+
     old_mass = before.get("mass", {})
     new_mass = after.get("mass", {})
     for field in {"scale", "added_mass_kg", "com_offset_m"}:
@@ -333,6 +462,110 @@ def _validate_identifiable_changes(
         raise ContractError(
             "unidentifiable profile change: " + ", ".join(sorted(unsupported))
         )
+
+
+def _profile_field_changed(
+    baseline: Mapping[str, Any], candidate: Mapping[str, Any], field: str
+) -> bool:
+    return baseline.get(field) != candidate.get(field)
+
+
+def _validate_changed_field_evidence(
+    baseline: CalibrationProfileV1,
+    candidate: CalibrationProfileV1,
+    conditions: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Require evidence for each changed field, not just its broad subsystem."""
+
+    before_main = baseline.simulation_physics.get("main_drive", {})
+    after_main = candidate.simulation_physics.get("main_drive", {})
+    velocity_limit_changed = False
+    response_changed = False
+    if isinstance(before_main, Mapping) and isinstance(after_main, Mapping):
+        velocity_limit_changed = (
+            before_main.get("velocity_limit") != after_main.get("velocity_limit")
+        )
+        response_changed = any(
+            before_main.get(field) != after_main.get(field)
+            for field in {"damping", "velocity_limit", "armature", "friction"}
+        )
+
+    for section in (
+        "joint_friction",
+        "joint_dynamic_friction",
+        "joint_viscous_friction",
+    ):
+        before = baseline.simulation_physics.get(section, {})
+        after = candidate.simulation_physics.get(section, {})
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+            continue
+        response_changed |= any(
+            str(joint).startswith("main_")
+            and before.get(joint) != after.get(joint)
+            for joint in set(before) | set(after)
+        )
+
+    mapping_changed = any(
+        _profile_field_changed(
+            baseline.hardware_mapping, candidate.hardware_mapping, field
+        )
+        for field in ("joint_direction", "pwm_scale", "pwm_cap")
+    )
+    response_changed |= mapping_changed
+    response_changed |= (
+        baseline.sensor_timing.get("aggregate_command_delay_s")
+        != candidate.sensor_timing.get("aggregate_command_delay_s")
+    )
+    if not response_changed:
+        return
+
+    response_conditions = [
+        internal
+        for internal in conditions.values()
+        if internal["scenario"].experiment_kind in {"step", "coast", "step_coast"}
+        and internal["scenario"].scene_mode != "manual"
+    ]
+    roles = {internal["role"] for internal in response_conditions}
+    if velocity_limit_changed and roles == {"calibration", "holdout"}:
+        new_limit = after_main.get("velocity_limit")
+        if isinstance(new_limit, bool) or not isinstance(new_limit, (int, float)):
+            raise ContractError(
+                "velocity-limit changes require a finite saturation target"
+            )
+        limit = float(new_limit)
+        saturation_roles = {
+            internal["role"]
+            for internal in response_conditions
+            if max(
+                abs(float(segment["value"]))
+                for segment in internal["scenario"].command_segments
+            )
+            >= limit
+        }
+        if saturation_roles != {"calibration", "holdout"}:
+            raise ContractError(
+                "velocity-limit changes require calibration and holdout commands "
+                "that demonstrably excite saturation"
+            )
+    if not response_conditions:
+        raise ContractError(
+            "changed actuator/timing fields require independent calibration and "
+            "held-out main-drive response evidence"
+        )
+    if roles != {"calibration", "holdout"}:
+        return
+
+    if mapping_changed:
+        candidate_hash = sha256_json(candidate.to_dict())
+        for internal in response_conditions:
+            if not any(
+                trace.manifest.provenance.get("profile_sha256") == candidate_hash
+                for trace in internal["real_traces"]
+            ):
+                raise ContractError(
+                    "changed main-drive command mapping requires candidate-bound "
+                    "response evidence"
+                )
 
 
 def _scenario_supports(subsystem: str, scenario_subsystem: str) -> bool:
@@ -1354,6 +1587,7 @@ def _verify_sweep_for_holdout(
     *,
     holdout: Mapping[str, Any],
     internal: Mapping[str, Any],
+    baseline_profile: CalibrationProfileV1,
     effort_limit_changed: bool,
     known_load_traces: list[LoadedTrace],
     audit_artifact_sha256: str,
@@ -1415,6 +1649,10 @@ def _verify_sweep_for_holdout(
         "git_sha",
         "asset_sha256",
         "config_sha256",
+        "redrhex_module_path",
+        "redrhex_module_sha256",
+        "isaaclab_version",
+        "isaacsim_version",
         "characterization_runner_sha256",
         "sweep_runner_sha256",
         "runtime_bundle_sha256",
@@ -1435,6 +1673,7 @@ def _verify_sweep_for_holdout(
     for field in (
         "asset_sha256",
         "config_sha256",
+        "redrhex_module_sha256",
         "characterization_runner_sha256",
         "sweep_runner_sha256",
         "runtime_bundle_sha256",
@@ -1442,6 +1681,15 @@ def _verify_sweep_for_holdout(
         "audit_report_sha256",
     ):
         _sha(provenance[field], f"actuator sweep provenance {field}")
+    if provenance["redrhex_module_sha256"] != provenance["config_sha256"]:
+        raise ContractError("actuator sweep RedRhex module/config hash mismatch")
+    if not isinstance(provenance["redrhex_module_path"], str) or not Path(
+        provenance["redrhex_module_path"]
+    ).is_absolute():
+        raise ContractError("actuator sweep RedRhex module path must be absolute")
+    for field in ("isaaclab_version", "isaacsim_version"):
+        if not isinstance(provenance[field], str) or not provenance[field]:
+            raise ContractError(f"actuator sweep provenance {field} is invalid")
     if provenance["audit_artifact_sha256"] != audit_artifact_sha256:
         raise ContractError("actuator sweep pre-fit audit artifact mismatch")
     if provenance["audit_report_sha256"] != audit_report_sha256:
@@ -1560,6 +1808,10 @@ def _verify_sweep_for_holdout(
             "git_sha",
             "asset_sha256",
             "config_sha256",
+            "redrhex_module_path",
+            "redrhex_module_sha256",
+            "isaaclab_version",
+            "isaacsim_version",
             "characterization_runner_sha256",
             "runtime_bundle_sha256",
         ):
@@ -1607,6 +1859,12 @@ def _verify_sweep_for_holdout(
         candidate_inside |= passes
     if holdout_sim_hash not in observed_sim_hashes:
         raise ContractError("holdout simulator artifact is absent from its complete sweep")
+    validate_sweep_candidates(
+        baseline_profile,
+        candidate_profiles,
+        scenario,
+        sweep_mode=results["sweep_mode"],
+    )
     expected_sweep_sha = sha256_json(
         {
             "schema_version": 1,
@@ -1723,6 +1981,7 @@ def evaluate_promotion(
                 raise ContractError("real raw sources must be unique across conditions")
             real_source_roles[source_hash] = role
             episode_scenario = load_scenario(loaded.manifest.scenario_id)
+            _validate_condition_trace_metadata(loaded, episode_scenario)
             validate_real_trace_provenance(loaded, episode_scenario)
             if episode_scenario.split != role:
                 raise ContractError(
@@ -1867,6 +2126,7 @@ def evaluate_promotion(
                     scenario=scenario,
                     profile=candidate,
                 )
+                _validate_condition_trace_metadata(sim_trace, scenario)
                 if _condition_coordinates(sim_trace, scenario) != coordinates:
                     raise ContractError("simulator artifact coordinates do not match real holdout")
                 if not raw_metrics:
@@ -1965,6 +2225,7 @@ def evaluate_promotion(
                     f"held-out dimension {dimension} does not differ from calibration"
                 )
 
+    _validate_changed_field_evidence(baseline, candidate, condition_internal)
     measurement_source_report = _validate_measurement_sources(
         baseline, candidate, condition_internal
     )
@@ -2004,6 +2265,11 @@ def evaluate_promotion(
             raise ContractError("main_drive actuator sweeps must be an array")
         if len(sweeps) != len(holdouts):
             raise ContractError("every main_drive holdout requires exactly one actuator sweep")
+        if effort_limit_changed and not known_load_traces:
+            # The result is already ineligible below. A response sweep cannot
+            # substitute for the missing direct effort-saturation measurement.
+            sweeps = []
+            holdouts = []
         inside_by_holdout: list[bool] = []
         for sweep, holdout in zip(sweeps, holdouts, strict=True):
             internal = condition_internal[holdout["condition_id"]]
@@ -2013,6 +2279,7 @@ def evaluate_promotion(
                     sweep,
                     holdout=holdout,
                     internal=internal,
+                    baseline_profile=baseline,
                     effort_limit_changed=effort_limit_changed,
                     known_load_traces=known_load_traces,
                     audit_artifact_sha256=sha256_json(data["audit_artifact"]),

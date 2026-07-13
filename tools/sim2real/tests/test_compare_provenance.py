@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from tools.sim2real.characterization import scenario_schedule, scenario_step_count
-from tools.sim2real.compare import compare_traces
+from tools.sim2real.compare import _delta, compare_traces
 from tools.sim2real.contracts import CalibrationProfileV1, ContractError
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.traces import sha256_json, write_trace
@@ -90,6 +90,31 @@ def _write_pair(
         },
     )
     return real, sim
+
+
+def test_metric_delta_handles_nested_repeat_records_without_losing_identity() -> None:
+    real = {
+        "aggregate": {"fit_rmse_rad": 0.10},
+        "repeats": [
+            {"repeat_index": 0.0, "fit_rmse_rad": 0.08},
+            {"repeat_index": 1.0, "fit_rmse_rad": 0.12},
+        ],
+    }
+    sim = {
+        "aggregate": {"fit_rmse_rad": 0.13},
+        "repeats": [
+            {"repeat_index": 0.0, "fit_rmse_rad": 0.10},
+            {"repeat_index": 1.0, "fit_rmse_rad": 0.16},
+        ],
+    }
+
+    delta = _delta(real, sim)
+
+    assert delta["aggregate"]["fit_rmse_rad"] == pytest.approx(0.03)
+    assert delta["repeats"] == [
+        {"repeat_index": 0.0, "fit_rmse_rad": pytest.approx(0.02)},
+        {"repeat_index": 1.0, "fit_rmse_rad": pytest.approx(0.04)},
+    ]
 
 
 @pytest.mark.parametrize(

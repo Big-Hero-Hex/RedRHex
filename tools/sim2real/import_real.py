@@ -75,6 +75,7 @@ _MAIN_DRIVE_EXPERIMENTS = frozenset({"step", "coast", "step_coast"})
 _PROBE_EVENT_TOPIC = "/redrhex/sim2real_probe/events"
 _PROBE_RATE_HZ = 60.0
 _PROBE_RECEIVE_JITTER_BOUND_S = 1.0 / _PROBE_RATE_HZ
+_PROBE_PHYSICAL_PWM_CAP = 30.0
 
 
 def _unit_quaternion(value: Any, name: str) -> list[float]:
@@ -377,6 +378,13 @@ def _validate_probe_events(
             raise ContractError("probe event main index mismatch")
         if event.get("abad_output_enable") is not False:
             raise ContractError("probe event does not prove ABAD output remained disabled")
+        if not math.isclose(
+            _event_number(event, "physical_pwm_cap"),
+            _PROBE_PHYSICAL_PWM_CAP,
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        ):
+            raise ContractError("probe event physical PWM cap mismatch")
 
     exact_ticks_per_cycle = sum(
         float(segment["duration_s"]) * _PROBE_RATE_HZ
@@ -514,10 +522,112 @@ def _validate_probe_events(
             "complete_ticks": expected_ticks,
             "receive_duration_s": complete_receive_elapsed_s,
             "receive_jitter_bound_s": _PROBE_RECEIVE_JITTER_BOUND_S,
+            "physical_pwm_cap": _PROBE_PHYSICAL_PWM_CAP,
             "abad_output_disabled_verified": True,
         },
         command_times_s,
         command_values,
+    )
+
+
+def _validate_probe_raw_commands(
+    *,
+    command_times_s: list[float],
+    raw_pwm: list[Any],
+    scenario: ScenarioSpecV1,
+    scenario_start_s: float,
+) -> tuple[list[float], list[float], dict[str, Any]]:
+    """Authenticate every low-level probe packet against the reviewed schedule."""
+
+    expected_values: list[float] = []
+    for _ in range(scenario.repeats):
+        for segment in scenario.command_segments:
+            ticks = int(round(float(segment["duration_s"]) * _PROBE_RATE_HZ))
+            expected_values.extend([float(segment["value"])] * ticks)
+    expected_count = len(expected_values)
+    expected_duration_s = expected_count / _PROBE_RATE_HZ
+    stop_s = scenario_start_s + expected_duration_s
+
+    times = np.asarray(command_times_s, dtype=np.float64)
+    pwm = np.asarray(raw_pwm, dtype=np.float64)
+    if times.ndim != 1 or pwm.ndim != 2 or pwm.shape != (times.size, len(_LEG_ORDER)):
+        raise ContractError("raw probe command arrays have invalid shapes")
+    selected_leg = _JOINT_TO_LEG[scenario.joint]
+    selected_index = _LEG_ORDER.index(selected_leg)
+    tolerance = 1.0e-9
+    in_schedule = (times >= scenario_start_s - tolerance) & (times < stop_s - tolerance)
+    raw_times = times[in_schedule]
+    raw_selected_pwm = pwm[in_schedule, selected_index]
+    enabled = np.abs(raw_selected_pwm) > 1.0e-12
+    active_times = raw_times[enabled]
+    active_pwm = raw_selected_pwm[enabled]
+
+    expected = np.asarray(expected_values, dtype=np.float64)
+    active_expected = ~np.isclose(expected, 0.0, rtol=0.0, atol=1.0e-12)
+    expected_active_times = (
+        scenario_start_s
+        + np.flatnonzero(active_expected).astype(np.float64) / _PROBE_RATE_HZ
+    )
+    if active_times.size != expected_active_times.size:
+        raise ContractError(
+            "raw probe active command tick count/enable duration does not match "
+            "the reviewed scenario"
+        )
+    if np.any(
+        np.abs(active_times - expected_active_times) > _PROBE_RECEIVE_JITTER_BOUND_S
+    ):
+        raise ContractError(
+            "raw probe active commands are not aligned to the reviewed 60 Hz schedule"
+        )
+    if raw_times.size > 1 and np.any(np.diff(raw_times) <= 0.0):
+        raise ContractError("raw probe command timestamps must be strictly monotonic")
+
+    expected_active = expected[active_expected]
+    if np.any(active_pwm[expected_active > 0.0] <= 0.0) or np.any(
+        active_pwm[expected_active < 0.0] >= 0.0
+    ):
+        raise ContractError("raw probe command direction does not match the reviewed waveform")
+    active_magnitude = np.abs(active_pwm)
+    if active_magnitude.size == 0 or np.any(
+        active_magnitude > _PROBE_PHYSICAL_PWM_CAP + 1.0e-12
+    ):
+        raise ContractError("raw probe command exceeds the immutable physical PWM cap")
+    if not np.allclose(
+        active_magnitude, active_magnitude[0], rtol=0.0, atol=1.0e-6
+    ):
+        raise ContractError("raw probe command amplitude changes within the reviewed waveform")
+
+    transition_ticks = np.flatnonzero(active_expected[:-1] & ~active_expected[1:]) + 1
+    disabled_times = raw_times[~enabled]
+    transition_disable_count = 0
+    for tick in transition_ticks:
+        transition_time = scenario_start_s + float(tick) / _PROBE_RATE_HZ
+        packet_count = int(
+            np.count_nonzero(
+                np.abs(disabled_times - transition_time)
+                <= _PROBE_RECEIVE_JITTER_BOUND_S
+            )
+        )
+        if packet_count < 2:
+            raise ContractError(
+                "raw probe command is missing repeated disable packets at an "
+                "active-to-coast transition"
+            )
+        transition_disable_count += packet_count
+
+    after_schedule = times >= stop_s - tolerance
+    if np.any(np.abs(pwm[after_schedule, selected_index]) > 1.0e-12):
+        raise ContractError("raw probe command remains enabled after reviewed completion")
+    expected_times = scenario_start_s + np.arange(expected_count) / _PROBE_RATE_HZ
+    return (
+        expected_times.tolist(),
+        expected_values,
+        {
+            "raw_active_tick_count": int(active_times.size),
+            "raw_transition_disable_packet_count": transition_disable_count,
+            "raw_pwm_peak": float(np.max(active_magnitude)),
+            "raw_command_rate_hz": _PROBE_RATE_HZ,
+        },
     )
 
 
@@ -750,7 +860,7 @@ def _load_rosbag(
     probe_evidence: dict[str, Any] | None = None
     replay_initial_state: dict[str, Any] | None = None
     if is_bound_probe:
-        probe_evidence, event_command_times, event_commands = _validate_probe_events(
+        probe_evidence, _, _ = _validate_probe_events(
             probe_events, scenario
         )
         scenario_start = float(probe_evidence["scenario_receive_time_s"])
@@ -758,11 +868,17 @@ def _load_rosbag(
             raise ContractError(
                 "probe scenario marker must precede the first raw motor command"
             )
-        # The raw bridge intentionally suppresses globally-disabled packets. The
-        # authenticated segment markers are therefore the authoritative requested
-        # command timeline; raw PWM remains on its own untouched clock for mapping.
-        times["command_time_s"] = event_command_times
-        values["command"] = event_commands
+        raw_command_times, requested_commands, raw_evidence = (
+            _validate_probe_raw_commands(
+                command_times_s=times["motor_command_time_s"],
+                raw_pwm=values["motor_command_pwm_raw"],
+                scenario=scenario,
+                scenario_start_s=scenario_start,
+            )
+        )
+        probe_evidence.update(raw_evidence)
+        times["command_time_s"] = raw_command_times
+        values["command"] = requested_commands
         if not times["position_time_s"]:
             raise ContractError("probe replay initial state has no position samples")
         position_time = np.asarray(times["position_time_s"], dtype=np.float64)

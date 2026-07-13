@@ -52,8 +52,30 @@ def _delta(real: dict[str, Any], sim: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(real_value, dict) and isinstance(sim_value, dict):
             result[key] = _delta(real_value, sim_value)
         elif isinstance(real_value, list) and isinstance(sim_value, list):
-            left = np.asarray(real_value, dtype=float)
-            right = np.asarray(sim_value, dtype=float)
+            if len(real_value) != len(sim_value):
+                continue
+            if all(isinstance(item, dict) for item in real_value) and all(
+                isinstance(item, dict) for item in sim_value
+            ):
+                records: list[dict[str, Any]] = []
+                for real_record, sim_record in zip(
+                    real_value, sim_value, strict=True
+                ):
+                    record = _delta(real_record, sim_record)
+                    for identity in ("repeat_index", "direction", "label"):
+                        if (
+                            identity in real_record
+                            and real_record.get(identity) == sim_record.get(identity)
+                        ):
+                            record[identity] = real_record[identity]
+                    records.append(record)
+                result[key] = records
+                continue
+            try:
+                left = np.asarray(real_value, dtype=float)
+                right = np.asarray(sim_value, dtype=float)
+            except (TypeError, ValueError):
+                continue
             if left.shape == right.shape:
                 result[key] = (right - left).tolist()
     return result

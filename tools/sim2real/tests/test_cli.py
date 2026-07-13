@@ -127,6 +127,7 @@ def _probe_events(
         "scenario_sha256": digest,
         "main_index": main_index,
         "abad_output_enable": False,
+        "physical_pwm_cap": 30.0,
     }
     timestamp_ns = 1_000_000_000
     payloads: list[dict[str, object]] = [
@@ -209,6 +210,73 @@ def _fake_main_messages(*, enabled: bool = True, voltage: float = 125.0):
         }
     )
     return command, state
+
+
+def _probe_raw_command_records(
+    *,
+    scenario_id: str = "suspended-main-0-step-coast",
+    omit_tick: int | None = None,
+    over_cap_tick: int | None = None,
+    wrong_enable_tick: int | None = None,
+    wrong_direction_tick: int | None = None,
+) -> list[tuple[str, SimpleNamespace, int]]:
+    scenario = load_scenario(scenario_id)
+    selected_leg = ("r1", "r2", "r3", "l1", "l2", "l3")[
+        int(scenario.joint.removeprefix("main_"))
+    ]
+    positive_direction = {
+        "l1": True,
+        "l2": True,
+        "l3": True,
+        "r1": False,
+        "r2": False,
+        "r3": False,
+    }
+    values: list[float] = []
+    for _ in range(scenario.repeats):
+        for segment in scenario.command_segments:
+            values.extend(
+                [float(segment["value"])]
+                * round(float(segment["duration_s"]) * 60.0)
+            )
+
+    records: list[tuple[str, SimpleNamespace, int]] = []
+    for tick, value in enumerate(values):
+        enabled = not np.isclose(value, 0.0)
+        direction = positive_direction[selected_leg] if value >= 0.0 else not positive_direction[selected_leg]
+        voltage = 30.0 if enabled else 0.0
+        if tick == over_cap_tick:
+            enabled = True
+            voltage = 30.1
+        if tick == wrong_enable_tick:
+            enabled = True
+            voltage = 30.0
+        if tick == wrong_direction_tick:
+            direction = not direction
+        packet_count = 1 if enabled else 0
+        if not enabled and tick > 0 and not np.isclose(values[tick - 1], 0.0):
+            packet_count = 5
+        if tick == omit_tick:
+            packet_count = 0
+        for packet in range(packet_count):
+            legs = {
+                name: SimpleNamespace(
+                    enable=enabled and name == selected_leg,
+                    voltage=voltage if name == selected_leg else 0.0,
+                    direction=direction if name == selected_leg else False,
+                )
+                for name in ("l1", "l2", "l3", "r1", "r2", "r3")
+            }
+            records.append(
+                (
+                    "/motor/command",
+                    SimpleNamespace(**legs),
+                    1_000_010_000
+                    + round(tick / 60.0 * 1.0e9)
+                    + packet,
+                )
+            )
+    return records
 
 
 @pytest.mark.parametrize("clock", ["", " ", "\t\n"])
@@ -834,6 +902,49 @@ def test_bound_probe_import_requires_completion_events(
 
 
 @pytest.mark.parametrize(
+    ("raw_kwargs", "message"),
+    [
+        ({"omit_tick": 30}, "raw probe active command tick count"),
+        ({"over_cap_tick": 30}, "physical PWM cap"),
+        ({"wrong_enable_tick": 0}, "enable duration"),
+        ({"wrong_direction_tick": 30}, "direction.*reviewed waveform"),
+    ],
+    ids=(
+        "missing-tick",
+        "over-physical-cap",
+        "wrong-enable-duration",
+        "wrong-direction",
+    ),
+)
+def test_bound_probe_import_authenticates_the_raw_tick_waveform(
+    tmp_path: Path,
+    monkeypatch,
+    raw_kwargs: dict[str, int],
+    message: str,
+) -> None:
+    _, state = _fake_main_messages()
+    _install_fake_rosbag_reader(
+        monkeypatch,
+        [
+            *_probe_events(),
+            *_probe_raw_command_records(**raw_kwargs),
+            ("/motor/state", state, 1_010_000_000),
+        ],
+    )
+    bag = tmp_path / "bag"
+    bag.mkdir()
+
+    with pytest.raises(ContractError, match=message):
+        import_real_trace(
+            bag,
+            tmp_path / "episode",
+            scenario="suspended-main-0-step-coast",
+        )
+
+    assert not (tmp_path / "episode").exists()
+
+
+@pytest.mark.parametrize(
     ("events", "message"),
     [
         (_probe_events(scenario_sha256="0" * 64), "scenario hash"),
@@ -970,16 +1081,14 @@ def test_bound_probe_import_rejects_per_event_receive_clock_jitter(
 def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
     tmp_path: Path, monkeypatch
 ) -> None:
-    enabled, state = _fake_main_messages(enabled=True)
-    disabled, _ = _fake_main_messages(enabled=False)
+    _, state = _fake_main_messages(enabled=True)
     _install_fake_rosbag_reader(
         monkeypatch,
         [
             *_probe_events(),
+            *_probe_raw_command_records(),
             ("/motor/state", state, 1_010_000_000),
-            ("/motor/command", enabled, 2_000_000_000),
             ("/motor/state", state, 2_010_000_000),
-            ("/motor/command", disabled, 2_100_000_000),
             ("/motor/state", state, 2_110_000_000),
         ],
     )
@@ -994,9 +1103,15 @@ def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
     trace = load_trace(tmp_path / "episode")
 
     scenario = load_scenario("suspended-main-0-step-coast")
-    expected_commands = np.tile(
-        [float(segment["value"]) for segment in scenario.command_segments],
-        scenario.repeats,
+    expected_commands = np.concatenate(
+        [
+            np.full(
+                round(float(segment["duration_s"]) * 60.0),
+                float(segment["value"]),
+            )
+            for _ in range(scenario.repeats)
+            for segment in scenario.command_segments
+        ]
     )
     np.testing.assert_allclose(trace.arrays["command"], expected_commands)
     assert trace.arrays["command_time_s"][0] >= 0.0
@@ -1007,13 +1122,9 @@ def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
         transitions,
         [0.0, 0.25, 0.0, -0.25, 0.0, 0.25, 0.0, -0.25, 0.0, 0.25, 0.0, -0.25, 0.0],
     )
-    np.testing.assert_allclose(
-        trace.arrays["motor_command_pwm_raw"][:, 3], [125.0, 0.0]
-    )
-    np.testing.assert_allclose(trace.arrays["motor_command_canonical"], [0.25, 0.0])
-    np.testing.assert_allclose(
-        trace.arrays["motor_command_time_s"], [1.0, 1.1], atol=1.0e-9
-    )
+    assert trace.arrays["motor_command_pwm_raw"].shape == (390, 6)
+    assert np.max(np.abs(trace.arrays["motor_command_pwm_raw"][:, 3])) == 30.0
+    assert np.max(np.abs(trace.arrays["motor_command_canonical"])) == pytest.approx(0.06)
     assert manifest.time_bases["motor_command_pwm_raw"] == "motor_command_time_s"
     evidence = manifest.metadata["calibration_constants"]["probe_event_evidence"]
     assert evidence["scenario_sha256"] == sha256_json(
@@ -1022,18 +1133,21 @@ def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
     assert evidence["repetition_count"] == 3
     assert evidence["segment_count"] == 21
     assert evidence["complete_ticks"] == 990
+    assert evidence["raw_active_tick_count"] == 360
+    assert evidence["raw_transition_disable_packet_count"] == 30
+    assert evidence["raw_pwm_peak"] == 30.0
 
 
 def test_bound_probe_import_authenticates_commands_separately_from_position_mapping(
     tmp_path: Path, monkeypatch
 ) -> None:
-    command, state = _fake_main_messages()
+    _, state = _fake_main_messages()
     _install_fake_rosbag_reader(
         monkeypatch,
         [
             *_probe_events(),
+            *_probe_raw_command_records(),
             ("/motor/state", state, 1_010_000_000),
-            ("/motor/command", command, 2_000_000_000),
         ],
     )
     profile = CalibrationProfileV1.from_dict(
@@ -1090,17 +1204,6 @@ def test_imported_normal_probe_exposes_all_three_bidirectional_repetitions(
 
     names = ("l1", "l2", "l3", "r1", "r2", "r3")
 
-    def raw_command(*, enabled: bool, direction: bool):
-        legs = {
-            name: SimpleNamespace(
-                enable=enabled and name == "r1",
-                voltage=125.0,
-                direction=direction,
-            )
-            for name in names
-        }
-        return SimpleNamespace(**legs)
-
     def raw_state(position_count: float):
         return SimpleNamespace(
             **{
@@ -1110,7 +1213,7 @@ def test_imported_normal_probe_exposes_all_three_bidirectional_repetitions(
         )
 
     base_ns = 1_000_000_000
-    records = list(_probe_events())
+    records = [*_probe_events(), *_probe_raw_command_records()]
     position_rad = 0.0
     dt = 1.0 / 60.0
     for tick in range(990):
@@ -1130,21 +1233,6 @@ def test_imported_normal_probe_exposes_all_three_bidirectional_repetitions(
         records.append(
             ("/motor/state", raw_state(count), base_ns + round(elapsed * 1.0e9) - 100)
         )
-    for repetition in range(3):
-        cycle_start = repetition * 5.5
-        for elapsed, enabled, direction in (
-            (cycle_start + 0.5, True, False),
-            (cycle_start + 1.5, False, False),
-            (cycle_start + 3.0, True, True),
-            (cycle_start + 4.0, False, False),
-        ):
-            records.append(
-                (
-                    "/motor/command",
-                    raw_command(enabled=enabled, direction=direction),
-                    base_ns + round(elapsed * 1.0e9) + 100,
-                )
-            )
     _install_fake_rosbag_reader(monkeypatch, records)
     bag = tmp_path / "bag"
     bag.mkdir()
