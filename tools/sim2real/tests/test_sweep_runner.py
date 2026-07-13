@@ -176,7 +176,7 @@ def _write_standalone_real_reference(output: Path, scenario: ScenarioSpecV1) -> 
     )
 
 
-def _write_known_load_reference(output: Path) -> None:
+def _write_known_load_reference(output: Path, *, torque_scale: float = 2.0) -> None:
     scenario = load_scenario("manual-load")
     dataset = output.parent.parent
     raw = dataset / "raw" / f"{output.name}.bin"
@@ -187,7 +187,7 @@ def _write_known_load_reference(output: Path) -> None:
         output,
         {
             "load_force_time_s": time_s,
-            "load_force": np.array([10.0, 11.0, 9.0]),
+            "load_force": np.array([10.0, 10.5, 9.5]) * torque_scale,
             "lever_arm_time_s": time_s,
             "lever_arm": np.full(3, 0.1),
             "command_time_s": time_s,
@@ -215,10 +215,9 @@ def _write_known_load_reference(output: Path) -> None:
                 "direction": "main_0",
                 "repeat_index": "main_0",
             },
-            "calibration_constants": {
-                "position_mapping_source": "profile:baseline",
-                "requested_command_source": "profile:baseline",
-            },
+            # Manual load evidence has no encoder-position channel and therefore
+            # must not pretend to carry encoder-mapping provenance.
+            "calibration_constants": {},
         },
     )
     dataset_manifest = {
@@ -549,6 +548,43 @@ def test_effort_limit_sweep_binds_managed_known_load_evidence(
     assert result["counts"]["completed"] == 1
     assert len(provenance["known_load_trace_sha256"]) == 64
     assert len(provenance["known_load_metadata_sha256"]) == 64
+
+
+def test_effort_limit_sweep_must_cover_measured_known_load_envelope(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.sweep_runner import execute_sweep
+
+    baseline, candidate = _effort_profiles()
+    payload = candidate.to_dict()
+    payload["simulation_physics"]["main_drive"]["effort_limit"] = 4.0
+    candidate = CalibrationProfileV1.from_dict(payload)
+    scenario = load_scenario("main-step")
+    real = tmp_path / "datasets" / "sim2real" / "main" / "episodes" / "response"
+    known_load = tmp_path / "datasets" / "sim2real" / "load" / "episodes" / "known"
+    _write_real_reference(real, scenario)
+    _write_known_load_reference(known_load)
+
+    with pytest.raises(ContractError, match="effort-limit candidates.*known-load envelope"):
+        execute_sweep(
+            output=tmp_path / "sweep",
+            scenario=scenario,
+            base_profile=baseline,
+            candidates=[candidate],
+            sweep_mode="one-factor",
+            scene_mode="fixed-base",
+            headless=True,
+            seed=17,
+            device="cpu",
+            provenance={},
+            provenance_provider=lambda: _runtime_provenance(),
+            command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
+            real_trace=real,
+            known_load_trace=known_load,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("mismatched known-load evidence must fail before running")
+            ),
+        )
 
 
 def test_cached_comparison_is_recomputed_against_bound_real_trace(

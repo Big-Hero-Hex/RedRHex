@@ -573,6 +573,27 @@ def execute_sweep(
             or float(effort_nm) <= 0.0
         ):
             raise ContractError("known-load trace does not identify positive effort saturation")
+        if effort_limit_changed:
+            repeat_std = known_load_metrics.get("torque_saturation_nm_std", 0.0)
+            if (
+                isinstance(repeat_std, bool)
+                or not isinstance(repeat_std, (int, float))
+                or not math.isfinite(float(repeat_std))
+                or float(repeat_std) < 0.0
+            ):
+                raise ContractError("known-load trace has invalid repeat variation")
+            tolerance_nm = max(2.0 * float(repeat_std), 1.0e-9)
+            candidate_limits = [_main_effort_limit(item) for item in clean_candidates]
+            if not any(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                and abs(float(value) - float(effort_nm)) <= tolerance_nm
+                for value in candidate_limits
+            ):
+                raise ContractError(
+                    "effort-limit candidates do not cover the measured known-load envelope"
+                )
     prefix = None if generate_only else _command_prefix(command_prefix)
     effective_provenance = _execution_provenance(
         _bind_runtime_provenance(provenance, provenance_provider),

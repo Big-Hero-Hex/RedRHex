@@ -173,7 +173,14 @@ def validate_real_trace_provenance(
         scenario.to_dict()
     ):
         raise ContractError("scenario hash mismatch")
-    if scenario.subsystem == "main_drive":
+    # Encoder mapping provenance is meaningful only for experiments that
+    # actually contain encoder position.  Manual known-load traces contain
+    # force/geometry/PWM observations and must not fabricate a position source.
+    if scenario.subsystem == "main_drive" and scenario.experiment_kind in {
+        "step",
+        "coast",
+        "step_coast",
+    }:
         position_profile, mapping = _validate_main_drive_mapping(real, scenario)
         if require_all_main_positions:
             constants = real.manifest.metadata.get("calibration_constants", {})
