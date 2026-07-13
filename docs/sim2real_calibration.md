@@ -239,6 +239,8 @@ python -m tools.sim2real sweep profiles/candidate-v1.json \
 
 The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Executed sweeps require a verified real episode and a hash-bound audit artifact whose every derived check passes, and persist separate real, simulator, and delta metrics for every candidate. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac; generation does not claim that fitting is safe. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind the audit artifact and derived report hashes, real trace, scenario, profile, seed, mode, device, Git revision, production asset/config, and runner hashes. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
 
+An executed sweep requires a replay-ready real episode imported with a reviewed fixture and complete six-encoder initial state. Every candidate replays that episode's authenticated command timeline and initial fixture; the nominal scenario waveform is never substituted for captured evidence.
+
 ## Build a profile from managed direct measurements
 
 Mass/CoM, spring stiffness, and main-drive effort saturation use the same immutable managed-dataset path as the actuator traces. They are applied as measured quantities rather than included in a simulator parameter sweep:
@@ -282,6 +284,8 @@ Path("profiles/candidate-v2.json").write_text(
 ```
 
 The helper accepts only hash-verified real episodes linked by a managed dataset, enforces each reviewed scenario's units, frames, and repeat count, and recomputes the metrics itself. It preserves unrelated profile values and records dataset/episode identity plus actual trace, metadata, and scenario hashes in `measurement_sources`; caller-supplied metrics and hashes are not accepted. It maps mass/CoM to the absolute mass target, spring slope to passive stiffness, known-load torque to the main-drive effort limit, ABAD results to `hardware_mapping.abad_target_scale` and `abad_target_offset_rad`, and friction to `simulation_physics.ground`.
+
+Promotion recomputes those direct measurements again and requires the candidate fields to match exactly. Manually nudging a measured mass, CoM, spring, effort limit, ABAD mapping, or friction value invalidates the candidate even when it would still fall inside the held-out uncertainty band.
 
 Characterization, training, and playback apply the ABAD relation and then clamp the final target to the configured physical joint range. Measured foot/ground friction uses explicit max-combine materials on both sides, with runtime robot collision coefficients overwritten to the measured pair values, so the effective coefficient is the measurement rather than its square. With no measured ABAD fields, scale `1` and offset `0` preserve existing behavior.
 
