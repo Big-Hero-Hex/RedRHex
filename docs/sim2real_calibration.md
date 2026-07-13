@@ -4,7 +4,9 @@ This workflow calibrates one observable subsystem at a time. It does not change 
 
 ## Current blocking audit result
 
-The production USD currently resolves to a runtime mass of approximately `1.7985 kg`, while comments elsewhere refer to `14 kg`. Do not assume either value is correct. Weigh the assembled robot and complete the mass/CoM audit before fitting actuators or contact. The measured correction belongs in a candidate profile; it must not be copied into the default training configuration without held-out validation and review.
+The production USD currently resolves to a runtime mass of approximately `1.7985 kg`, while comments elsewhere refer to `14 kg`. Do not assume either value is correct. Weigh the assembled robot and complete the mass/CoM audit before fitting actuators or contact. The measured total mass and planar CoM belong in a candidate profile; they must not be copied into the default training configuration without held-out validation and review.
+
+The same live audit currently reports all 18 production joints as continuous. If any ABAD, main-drive, or damper joint has a real mechanical stop, record that limited range in the physical audit and correct the USD range before fitting: the mechanical-range gate intentionally fails when a physically limited joint is modeled as continuous.
 
 ## Non-negotiable hardware prerequisites
 
@@ -234,9 +236,18 @@ python -m tools.sim2real sweep profiles/candidate-v1.json \
 
 The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Executed sweeps require a verified real episode and a hash-bound audit artifact whose every derived check passes, and persist separate real, simulator, and delta metrics for every candidate. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac; generation does not claim that fitting is safe. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind the audit artifact and derived report hashes, real trace, scenario, profile, seed, mode, device, Git revision, production asset/config, and runner hashes. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
 
-## Enter ABAD and friction measurements
+## Build a profile from managed direct measurements
 
-`abad-static` identifies only the static measured relation
+Mass/CoM, spring stiffness, and main-drive effort saturation use the same immutable managed-dataset path as the actuator traces. They are applied as measured quantities rather than included in a simulator parameter sweep:
+
+- `mass-com` requires three repeats and at least three non-collinear planar support positions. It writes an absolute `target_total_mass_kg` and `reference_planar_com_xy_m`, bound to the reviewed neutral reference pose. At runtime Isaac applies and verifies the achieved whole-robot mass and planar CoM; the audit fails if the target, achieved value, or reference pose does not agree.
+- `spring` computes the damper's torsional stiffness from measured force, lever arm, and deflection. It changes only `passive_spring.<joint>.stiffness`; spring damping and rest angle remain separate, currently unidentifiable parameters.
+- `manual-load` computes main-drive effort saturation from short, manually supervised, hardware-current-limited measurements. Every sample must set numeric `saturation_confirmed=1`, and every repeat must contain both positive and negative directions. This is not permission to automate a stalled-motor sweep. The result updates `main_drive.effort_limit`; any later effort-limit sweep must supply the managed known-load trace, and every candidate must remain within its measured repeat envelope.
+
+Use a distinct calibration and holdout episode for each direct measurement. The holdout should change a support geometry, spring load range, or known-load condition that was excluded from fitting.
+
+ABAD and friction are direct managed measurements too. `abad-static` identifies only the static measured relation
+
 `actual_angle = target_scale * requested_angle + target_offset_rad`; it does not claim a dynamic gain. Record at least three distinct settled poses in each of the three repeats. The `repeat_index` and `settled` numeric annotations use the position clock; only samples with `settled=1` enter the fit. Results include the aggregate fit plus per-repeat scale, offset, residual, mean, standard deviation, and count.
 
 `friction` is a manual scenario and cannot run in Isaac. Enter exactly one `breakaway_force` and positive `static_normal_load` for every `static_repeat_index`. Dynamic samples use their own `dynamic_time_s` clock and include `dynamic_pull_force`, `dynamic_normal_load`, `dynamic_speed`, and `dynamic_repeat_index`. Each repeat must contain at least two nonzero, slow, constant-speed samples. The report keeps static and dynamic coefficients separate and includes dimensionless units, the foot/ground frame, and repeat variation.
@@ -254,6 +265,9 @@ candidate = apply_measurements_to_profile(
     load_profile("profiles/candidate-v1.json"),
     profile_id="candidate-v2",
     trace_paths=[
+        "datasets/sim2real/rigid-body/episodes/mass-com-calibration",
+        "datasets/sim2real/springs/episodes/damper-0-calibration",
+        "datasets/sim2real/main-drive-load/episodes/main-0-calibration",
         "datasets/sim2real/abad/episodes/abad-0",
         "datasets/sim2real/contact/episodes/friction",
     ],
@@ -264,7 +278,9 @@ Path("profiles/candidate-v2.json").write_text(
 )
 ```
 
-The helper accepts only hash-verified real episodes linked by a managed dataset, enforces each reviewed scenario's units, frames, and repeat count, and recomputes the metrics itself. It preserves unrelated profile values, maps ABAD results to `hardware_mapping.abad_target_scale` and `abad_target_offset_rad`, maps friction to `simulation_physics.ground`, and records dataset/episode identity plus actual trace, metadata, and scenario hashes in `measurement_sources`; caller-supplied metrics and hashes are not accepted. Characterization, training, and playback apply the ABAD relation and then clamp the final target to the configured physical joint range. Measured foot/ground friction uses explicit max-combine materials on both sides, with runtime robot collision coefficients overwritten to the measured pair values, so the effective coefficient is the measurement rather than its square. With no measured fields, scale `1` and offset `0` preserve existing behavior.
+The helper accepts only hash-verified real episodes linked by a managed dataset, enforces each reviewed scenario's units, frames, and repeat count, and recomputes the metrics itself. It preserves unrelated profile values and records dataset/episode identity plus actual trace, metadata, and scenario hashes in `measurement_sources`; caller-supplied metrics and hashes are not accepted. It maps mass/CoM to the absolute mass target, spring slope to passive stiffness, known-load torque to the main-drive effort limit, ABAD results to `hardware_mapping.abad_target_scale` and `abad_target_offset_rad`, and friction to `simulation_physics.ground`.
+
+Characterization, training, and playback apply the ABAD relation and then clamp the final target to the configured physical joint range. Measured foot/ground friction uses explicit max-combine materials on both sides, with runtime robot collision coefficients overwritten to the measured pair values, so the effective coefficient is the measurement rather than its square. With no measured ABAD fields, scale `1` and offset `0` preserve existing behavior.
 
 ## Profile validation and explicit use
 
@@ -294,7 +310,7 @@ A candidate remains experimental until all of the following are reviewed:
 
 - every mandatory real condition has at least three repetitions;
 - each fitted subsystem has an unused leg, direction, level, or load condition;
-- every held-out simulated metric lies within `max(instrument uncertainty, 2 × real-run standard deviation)` of the real mean;
+- every executable simulator holdout metric, or direct profile value for a manual holdout, lies within `max(instrument uncertainty, 2 × real-run standard deviation)` of the held-out real mean;
 - actuator, timing, rigid-body, spring, and contact results are reported independently;
 - the audit has no unresolved unit, frame, joint order/axis/range, encoder
   scale/zero/sign, mass/CoM/inertia, collision, IMU, or contact failure;
@@ -312,6 +328,6 @@ python -m tools.sim2real validate-promotion \
   --output outputs/sim2real/candidate-v1-promotion-report.json
 ```
 
-The evidence binds each real episode and simulator trace by SHA-256, declares calibration versus holdout conditions and what was held out, records instrument uncertainty, and reports whether bounded actuator candidates entered the real envelope. The command returns nonzero when any audit, repetition, holdout, metric, or actuator-model check fails. A passing report says only `eligible_for_review`; it never edits training defaults or promotes a profile automatically.
+The evidence binds each real episode and each applicable simulator trace by SHA-256, declares calibration versus holdout conditions and what was held out, records instrument uncertainty, and reports whether bounded actuator candidates entered the real envelope. Executable main-drive step/coast, ABAD, and static-contact holdouts require simulator artifacts. Manual mass/CoM, passive-spring, and known-load holdouts must not claim an Isaac artifact; the gate instead compares the exact candidate profile target with the managed held-out measurements. Their mandatory metrics are total mass plus planar CoM, spring stiffness, and positive plus negative saturation torque, respectively.
 
-Main-drive, ABAD, and static-contact holdouts have executable Isaac routes. Mass/CoM and passive-spring calibration/holdout scenarios are repeat-authenticated manual measurements, but their honest simulator-side held-out runners are not implemented in this MVP; the promotion gate reports those subsystems ineligible instead of accepting fabricated simulator artifacts. Add those runners before promoting a profile that changes mass/CoM or spring parameters.
+Executable sweeps are accepted only after the hash-bound pre-fit audit passes every derived geometry, mapping, mass/CoM, IMU, collision, and contact check. This prevents a candidate sweep from becoming evidence for a profile built on a known-bad asset or frame convention. The promotion command returns nonzero when any audit, repetition, holdout, metric, measurement-source, identifiability, or actuator-model check fails. A passing report says only `eligible_for_review`; it never edits training defaults or promotes a profile automatically.
