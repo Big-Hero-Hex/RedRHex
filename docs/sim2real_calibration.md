@@ -162,7 +162,7 @@ $ISAACLAB_ROOT/isaaclab.sh -p -m tools.sim2real run-sim \
   --headless
 ```
 
-The importer binds replay to the selected joint's initial encoder position, a zero initial velocity, and the scenario's fixed/free-root fixture. The runner verifies that declaration and its hash, applies it before frame zero, and records the effective initial state in the simulator results. `sensor_timing.aggregate_command_delay_s` is quantized to the 120 Hz physics clock and applied to requested versus applied targets in characterization, training, and playback. Other timing/filter fields are measurement metadata only and are rejected by simulation profile application instead of being silently treated as active physics.
+Replay accepts only a managed dataset episode with a hash-bound manifest, metadata file, raw source, complete six-encoder mapping, and six canonical initial main-joint positions. The importer declares zero initial joint velocities plus the scenario's fixed/free-root fixture and root-state source. The runner verifies those declarations and hashes, applies all six observable joint states before frame zero, and records the effective initial state in the simulator results. `sensor_timing.aggregate_command_delay_s` is quantized to the 120 Hz physics clock and applied to requested versus applied targets in characterization, training, and playback. Other timing/filter fields are measurement metadata only and are rejected by simulation profile application instead of being silently treated as active physics.
 
 ## Compare and generate bounded candidates
 
