@@ -9,6 +9,7 @@ import pytest
 from tools.sim2real.characterization import scenario_schedule, scenario_step_count
 from tools.sim2real.compare import compare_traces
 from tools.sim2real.contracts import CalibrationProfileV1, ContractError
+from tools.sim2real.dataset import import_real_dataset
 from tools.sim2real.provenance import validate_real_trace_provenance
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.traces import load_trace, sha256_json, write_trace
@@ -174,6 +175,47 @@ def test_profile_command_source_requires_selected_joint_pwm_mapping(
 
     with pytest.raises(ContractError, match="pwm_scale.*main_0"):
         compare_traces(real, _write_sim(tmp_path / "sim"))
+
+
+def test_public_import_accepts_manual_load_without_encoder_provenance(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "known-load.npz"
+    time_s = np.arange(3, dtype=float)
+    np.savez(
+        source,
+        load_force_time_s=time_s,
+        load_force=np.array([20.0, 21.0, 19.0]),
+        lever_arm_time_s=time_s,
+        lever_arm=np.full(3, 0.1),
+        command_time_s=time_s,
+        command=np.full(3, 0.25),
+        direction_time_s=time_s,
+        direction=np.ones(3),
+        repeat_index=np.arange(3),
+    )
+    units = {
+        "load_force": "N",
+        "lever_arm": "m",
+        "command": "normalized",
+        "direction": "1",
+        "repeat_index": "1",
+    }
+    imported = import_real_dataset(
+        source,
+        tmp_path / "managed",
+        dataset_id="known-load",
+        episode_id="load-1",
+        scenario="manual-load",
+        units=units,
+        frames={name: "main_0" for name in units},
+        latency_clock="operator_monotonic",
+        profile=_profile(),
+    )
+
+    trace = load_trace(imported.episode, require_managed_dataset=True)
+    validate_real_trace_provenance(trace, load_scenario("manual-load"))
+    assert "position_mapping_source" not in trace.manifest.metadata["calibration_constants"]
 
 
 def test_replay_mapping_requires_all_six_encoder_snapshots(tmp_path: Path) -> None:
