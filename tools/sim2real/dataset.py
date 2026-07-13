@@ -43,6 +43,7 @@ def import_real_dataset(
     latency_clock: str | None = None,
     time_bases: Mapping[str, str] | None = None,
     profile: CalibrationProfileV1 | None = None,
+    replay_fixture: Mapping[str, Any] | None = None,
 ) -> DatasetImport:
     dataset_name = _id(dataset_id, "dataset_id")
     episode_name = _id(episode_id, "episode_id")
@@ -101,6 +102,7 @@ def import_real_dataset(
             latency_clock=clock,
             time_bases=time_bases,
             profile=profile,
+            replay_fixture=replay_fixture,
         )
         raw_hash = sha256_path(raw_stage)
         metadata_hash = sha256_file(episode_stage / "metadata.json")

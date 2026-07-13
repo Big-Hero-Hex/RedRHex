@@ -14,6 +14,12 @@ from .contracts import (
     ScenarioSpecV1,
     TraceManifestV1,
 )
+from .characterization import (
+    REPLAY_FIXTURE_ORIENTATION_TOLERANCE_RAD,
+    REPLAY_IMU_STATIONARITY_LIMIT_RAD_S,
+    REPLAY_JOINT_STATIONARITY_LIMIT_RAD_S,
+    REPLAY_STATIONARY_WINDOW_S,
+)
 from .scenarios import load_scenario
 from .traces import sha256_json, write_trace
 
@@ -69,6 +75,195 @@ _MAIN_DRIVE_EXPERIMENTS = frozenset({"step", "coast", "step_coast"})
 _PROBE_EVENT_TOPIC = "/redrhex/sim2real_probe/events"
 _PROBE_RATE_HZ = 60.0
 _PROBE_RECEIVE_JITTER_BOUND_S = 1.0 / _PROBE_RATE_HZ
+
+
+def _unit_quaternion(value: Any, name: str) -> list[float]:
+    if not isinstance(value, list) or len(value) != 4:
+        raise ContractError(f"{name} must contain four numeric values")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value):
+        raise ContractError(f"{name} must contain four numeric values")
+    quaternion = np.asarray(value, dtype=np.float64)
+    if not np.isfinite(quaternion).all():
+        raise ContractError(f"{name} must be finite")
+    norm = float(np.linalg.norm(quaternion))
+    if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1.0e-6):
+        raise ContractError(f"{name} must be normalized")
+    return [float(item) for item in quaternion]
+
+
+def validate_replay_fixture(
+    value: Mapping[str, Any], scenario: ScenarioSpecV1
+) -> dict[str, Any]:
+    """Validate the operator-reviewed physical fixture used for replay."""
+
+    if not isinstance(value, Mapping):
+        raise ContractError("replay fixture must be a JSON object")
+    required = {
+        "schema_version",
+        "fixture_id",
+        "scene_mode",
+        "fixture_frame",
+        "root_orientation_wxyz",
+        "expected_imu_orientation_xyzw",
+    }
+    if set(value) != required:
+        raise ContractError("replay fixture has missing or unknown fields")
+    if value["schema_version"] != 1 or isinstance(value["schema_version"], bool):
+        raise ContractError("replay fixture schema_version must be 1")
+    fixture_id = value["fixture_id"]
+    if not isinstance(fixture_id, str) or not fixture_id.strip():
+        raise ContractError("replay fixture_id must be a non-empty string")
+    if value["scene_mode"] != scenario.scene_mode or scenario.scene_mode != "fixed_base":
+        raise ContractError("replay fixture scene_mode must match a fixed-base scenario")
+    if value["fixture_frame"] != "world":
+        raise ContractError("replay fixture frame must be world")
+    return {
+        "schema_version": 1,
+        "fixture_id": fixture_id,
+        "scene_mode": "fixed_base",
+        "fixture_frame": "world",
+        "root_orientation_wxyz": _unit_quaternion(
+            value["root_orientation_wxyz"], "replay fixture root_orientation_wxyz"
+        ),
+        "expected_imu_orientation_xyzw": _unit_quaternion(
+            value["expected_imu_orientation_xyzw"],
+            "replay fixture expected_imu_orientation_xyzw",
+        ),
+    }
+
+
+def derive_replay_initial_state(
+    *,
+    position_time_s: np.ndarray,
+    canonical_position_rad: np.ndarray,
+    imu_time_s: np.ndarray,
+    imu_orientation_xyzw: np.ndarray,
+    imu_angular_velocity_rad_s: np.ndarray,
+    scenario_start_s: float,
+    time_origin_s: float,
+    scenario: ScenarioSpecV1,
+    fixture: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive a hashable replay state only from a verified stationary window."""
+
+    reviewed_fixture = validate_replay_fixture(fixture, scenario)
+    first_segment = scenario.command_segments[0]
+    if (
+        not math.isclose(float(first_segment["value"]), 0.0, abs_tol=1.0e-12)
+        or float(first_segment["duration_s"]) < REPLAY_STATIONARY_WINDOW_S
+    ):
+        raise ContractError("replay scenario has no reviewed initial neutral window")
+    position_time = np.asarray(position_time_s, dtype=np.float64)
+    position = np.asarray(canonical_position_rad, dtype=np.float64)
+    if position_time.ndim != 1 or position.ndim != 2 or position.shape[1] != 6:
+        raise ContractError("replay canonical positions must have shape (samples, 6)")
+    if position.shape[0] != position_time.size:
+        raise ContractError("replay canonical position time/value shapes do not match")
+    window_end_s = scenario_start_s + REPLAY_STATIONARY_WINDOW_S
+    tolerance = 1.0e-9
+    position_mask = (position_time >= scenario_start_s - tolerance) & (
+        position_time <= window_end_s + tolerance
+    )
+    if int(np.count_nonzero(position_mask)) < 3:
+        raise ContractError("replay stationary window requires at least three position samples")
+    window_time = position_time[position_mask]
+    centered_time = window_time - float(np.mean(window_time))
+    denominator = float(np.dot(centered_time, centered_time))
+    if denominator <= 0.0:
+        raise ContractError("replay stationary position samples have no time span")
+    velocity = np.sum(
+        centered_time[:, None] * position[position_mask], axis=0
+    ) / denominator
+    if float(np.max(np.abs(velocity))) > REPLAY_JOINT_STATIONARITY_LIMIT_RAD_S:
+        raise ContractError("replay initial joint state is not stationary")
+    distances = np.abs(position_time - scenario_start_s)
+    nearest_distance = float(np.min(distances))
+    if nearest_distance > 1.0 / _PROBE_RATE_HZ + tolerance:
+        raise ContractError("replay initial state has no position sample at scenario start")
+    nearest = np.flatnonzero(
+        np.isclose(distances, nearest_distance, rtol=0.0, atol=tolerance)
+    )
+    if nearest.size != 1:
+        raise ContractError("replay initial position sample is ambiguous")
+    sample_index = int(nearest[0])
+
+    imu_time = np.asarray(imu_time_s, dtype=np.float64)
+    orientation = np.asarray(imu_orientation_xyzw, dtype=np.float64)
+    angular_velocity = np.asarray(imu_angular_velocity_rad_s, dtype=np.float64)
+    if (
+        imu_time.ndim != 1
+        or orientation.ndim != 2
+        or orientation.shape[1] != 4
+        or angular_velocity.ndim != 2
+        or angular_velocity.shape[1] != 3
+        or orientation.shape[0] != imu_time.size
+        or angular_velocity.shape[0] != imu_time.size
+    ):
+        raise ContractError("replay IMU time/orientation/angular-velocity shapes are invalid")
+    imu_mask = (imu_time >= scenario_start_s - tolerance) & (
+        imu_time <= window_end_s + tolerance
+    )
+    if int(np.count_nonzero(imu_mask)) < 3:
+        raise ContractError("replay stationary window requires at least three IMU samples")
+    quaternions = np.array(orientation[imu_mask], copy=True)
+    norms = np.linalg.norm(quaternions, axis=1)
+    if np.any(norms <= 0.0) or not np.isfinite(quaternions).all():
+        raise ContractError("replay IMU trace contains an invalid quaternion")
+    quaternions /= norms[:, None]
+    reference = quaternions[0]
+    quaternions[np.sum(quaternions * reference, axis=1) < 0.0] *= -1.0
+    measured_orientation = np.mean(quaternions, axis=0)
+    measured_orientation /= np.linalg.norm(measured_orientation)
+    expected_orientation = np.asarray(
+        reviewed_fixture["expected_imu_orientation_xyzw"], dtype=np.float64
+    )
+    orientation_error = 2.0 * math.acos(
+        float(
+            np.clip(
+                abs(float(np.dot(measured_orientation, expected_orientation))),
+                0.0,
+                1.0,
+            )
+        )
+    )
+    if orientation_error > REPLAY_FIXTURE_ORIENTATION_TOLERANCE_RAD:
+        raise ContractError("replay IMU orientation does not match the reviewed fixture")
+    max_imu_speed = float(np.max(np.linalg.norm(angular_velocity[imu_mask], axis=1)))
+    if max_imu_speed > REPLAY_IMU_STATIONARITY_LIMIT_RAD_S:
+        raise ContractError("replay fixture is not stationary according to the IMU")
+
+    sample_time_s = float(position_time[sample_index]) - time_origin_s
+    scenario_time_s = scenario_start_s - time_origin_s
+    return {
+        "schema_version": 2,
+        "joint_order": list(_MAIN_JOINT_ORDER),
+        "position_source_channel": "main_joint_position_canonical",
+        "position_rad": position[sample_index].tolist(),
+        "velocity_rad_s": velocity.tolist(),
+        "velocity_source": "stationary_window_linear_fit",
+        "velocity_window_start_s": scenario_time_s,
+        "velocity_window_end_s": scenario_time_s + REPLAY_STATIONARY_WINDOW_S,
+        "velocity_stationarity_limit_rad_s": REPLAY_JOINT_STATIONARITY_LIMIT_RAD_S,
+        "fixture_mode": reviewed_fixture["scene_mode"],
+        "fixture_frame": reviewed_fixture["fixture_frame"],
+        "root_pose_source": "reviewed_fixture",
+        "fixture_id": reviewed_fixture["fixture_id"],
+        "fixture_sha256": sha256_json(reviewed_fixture),
+        "root_orientation_wxyz": reviewed_fixture["root_orientation_wxyz"],
+        "imu_orientation_source_channel": "imu_orientation_xyzw",
+        "measured_imu_orientation_xyzw": measured_orientation.tolist(),
+        "expected_imu_orientation_xyzw": reviewed_fixture[
+            "expected_imu_orientation_xyzw"
+        ],
+        "imu_orientation_error_rad": orientation_error,
+        "imu_orientation_tolerance_rad": REPLAY_FIXTURE_ORIENTATION_TOLERANCE_RAD,
+        "imu_angular_velocity_source_channel": "imu_angular_velocity",
+        "max_imu_angular_speed_rad_s": max_imu_speed,
+        "imu_stationarity_limit_rad_s": REPLAY_IMU_STATIONARITY_LIMIT_RAD_S,
+        "sample_time_s": sample_time_s,
+        "scenario_time_s": scenario_time_s,
+        "sample_offset_s": sample_time_s - scenario_time_s,
+    }
 
 
 def _rosbag_dependencies():
@@ -330,6 +525,7 @@ def _load_rosbag(
     path: Path,
     scenario: ScenarioSpecV1,
     profile: CalibrationProfileV1 | None,
+    replay_fixture: Mapping[str, Any] | None,
 ) -> tuple[dict[str, np.ndarray], dict[str, str], dict[str, Any]]:
     rosbag2_py, deserialize_message, get_message = _rosbag_dependencies()
     reader = rosbag2_py.SequentialReader()
@@ -570,7 +766,6 @@ def _load_rosbag(
         if not times["position_time_s"]:
             raise ContractError("probe replay initial state has no position samples")
         position_time = np.asarray(times["position_time_s"], dtype=np.float64)
-        position = np.asarray(values["position"], dtype=np.float64)
         distances = np.abs(position_time - scenario_start)
         nearest_distance = float(np.min(distances))
         tolerance = 1.0e-9
@@ -585,27 +780,32 @@ def _load_rosbag(
             raise ContractError(
                 "probe replay initial state position sample is ambiguous at scenario start"
             )
-        sample_index = int(nearest[0])
-        sample_time_s = float(position_time[sample_index]) - earliest
-        scenario_time_s = scenario_start - earliest
-        if all_main_position_profiled:
-            canonical = np.asarray(
-                values["main_joint_position_canonical"], dtype=np.float64
+        if replay_fixture is not None:
+            if not all_main_position_profiled:
+                raise ContractError(
+                    "replay fixture requires measured mappings for all six main encoders"
+                )
+            if not times["imu_time_s"]:
+                raise ContractError(
+                    "replay fixture verification requires IMU orientation and angular velocity"
+                )
+            replay_initial_state = derive_replay_initial_state(
+                position_time_s=position_time,
+                canonical_position_rad=np.asarray(
+                    values["main_joint_position_canonical"], dtype=np.float64
+                ),
+                imu_time_s=np.asarray(times["imu_time_s"], dtype=np.float64),
+                imu_orientation_xyzw=np.asarray(
+                    values["imu_orientation_xyzw"], dtype=np.float64
+                ),
+                imu_angular_velocity_rad_s=np.asarray(
+                    values["imu_angular_velocity"], dtype=np.float64
+                ),
+                scenario_start_s=scenario_start,
+                time_origin_s=earliest,
+                scenario=scenario,
+                fixture=replay_fixture,
             )
-            replay_initial_state = {
-                "schema_version": 1,
-                "joint_order": list(_MAIN_JOINT_ORDER),
-                "position_source_channel": "main_joint_position_canonical",
-                "position_rad": canonical[sample_index].tolist(),
-                "velocity_rad_s": [0.0] * len(_MAIN_JOINT_ORDER),
-                "velocity_source": "reviewed_initial_neutral",
-                "fixture_mode": scenario.scene_mode,
-                "fixture_frame": "world",
-                "root_pose_source": "production_asset_default",
-                "sample_time_s": sample_time_s,
-                "scenario_time_s": scenario_time_s,
-                "sample_offset_s": sample_time_s - scenario_time_s,
-            }
     arrays: dict[str, np.ndarray] = {}
     for time_name, samples in times.items():
         if samples:
@@ -676,17 +876,20 @@ def import_real_trace(
     metadata: Mapping[str, Any] | None = None,
     time_bases: Mapping[str, str] | None = None,
     profile: CalibrationProfileV1 | None = None,
+    replay_fixture: Mapping[str, Any] | None = None,
 ) -> TraceManifestV1:
     source = Path(source_path)
     spec = scenario if isinstance(scenario, ScenarioSpecV1) else load_scenario(scenario)
     clock = resolve_latency_clock(source, latency_clock)
     if source.is_file() and source.suffix == ".npz":
+        if replay_fixture is not None:
+            raise ContractError("replay fixtures are supported only for rosbag imports")
         arrays = _load_numeric_npz(source)
         extracted_time_bases: dict[str, str] = {}
         calibration_constants: dict[str, Any] = {}
     else:
         arrays, extracted_time_bases, calibration_constants = _load_rosbag(
-            source, spec, profile
+            source, spec, profile, replay_fixture
         )
     details = dict(metadata or {})
     details["units"] = dict(units or {name: "unspecified" for name in spec.required_channels})

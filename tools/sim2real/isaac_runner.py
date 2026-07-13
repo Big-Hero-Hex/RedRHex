@@ -317,6 +317,7 @@ def _trace_metadata(
         "asset_sha256": runtime_provenance["asset_sha256"],
         "config_sha256": runtime_provenance["config_sha256"],
         "characterization_runner_sha256": runtime_provenance["characterization_runner_sha256"],
+        "runtime_bundle_sha256": runtime_provenance["runtime_bundle_sha256"],
         "calibration_constants": {
             "profile_id": profile.profile_id if profile is not None else None,
             "sensor_timing": (
@@ -406,6 +407,12 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     selected_joint = _resolve_selected_joint(scenario, env_cfg, robot)
     root_state = robot.data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
+    if replay is not None:
+        root_state[:, 3:7] = torch.as_tensor(
+            replay.initial_state.root_orientation_wxyz,
+            dtype=root_state.dtype,
+            device=root_state.device,
+        ).unsqueeze(0)
     robot.write_root_pose_to_sim(root_state[:, :7])
     robot.write_root_velocity_to_sim(root_state[:, 7:])
     initial_joint_position = robot.data.default_joint_pos.clone()

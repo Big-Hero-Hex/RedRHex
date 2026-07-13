@@ -107,6 +107,7 @@ def test_characterization_trace_binds_verified_runtime_provenance() -> None:
         "asset_sha256",
         "config_sha256",
         "characterization_runner_sha256",
+        "runtime_bundle_sha256",
     ):
         assert f'"{field}": runtime_provenance["{field}"]' in source
     assert "def _git_sha(" not in source
@@ -237,9 +238,14 @@ def test_replay_initial_state_is_applied_before_stepping_and_audited() -> None:
         "initial_joint_velocity[:, main_joint_indices] = replay_velocity"
     )
     write_state = source.index("robot.write_joint_state_to_sim(")
+    apply_root_orientation = source.index(
+        "replay.initial_state.root_orientation_wxyz"
+    )
+    write_root_pose = source.index("robot.write_root_pose_to_sim(")
     physics_loop = source.index("for step_index in range(request.steps)")
 
     assert "main_joint_indices = _resolve_main_joint_indices(env_cfg, robot)" in source
     assert apply_state < apply_velocity < write_state < physics_loop
+    assert apply_root_orientation < write_root_pose < physics_loop
     assert '"replay_initial_state": replay_initial_state' in source
     assert '"replay_initial_state_sha256": replay_initial_state_sha256' in source

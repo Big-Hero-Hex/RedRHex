@@ -11,6 +11,10 @@ from .contracts import ContractError, ScenarioSpecV1
 
 
 PHYSICS_DT = 1.0 / 120.0
+REPLAY_STATIONARY_WINDOW_S = 0.4
+REPLAY_JOINT_STATIONARITY_LIMIT_RAD_S = 0.05
+REPLAY_IMU_STATIONARITY_LIMIT_RAD_S = 0.1
+REPLAY_FIXTURE_ORIENTATION_TOLERANCE_RAD = math.radians(5.0)
 SUPPORTED_MODES = ("fixed-base", "free-root", "contact")
 DEFAULT_AUDIT_STEPS = 240
 EXPECTED_FOOT_BODY_NAMES = (
@@ -67,13 +71,27 @@ class ReplayInitialState:
     position_rad: tuple[float, ...]
     velocity_rad_s: tuple[float, ...]
     velocity_source: str
+    velocity_window_start_s: float
+    velocity_window_end_s: float
+    velocity_stationarity_limit_rad_s: float
     fixture_mode: str
     fixture_frame: str
     root_pose_source: str
+    fixture_id: str
+    fixture_sha256: str
+    root_orientation_wxyz: tuple[float, ...]
+    imu_orientation_source_channel: str
+    measured_imu_orientation_xyzw: tuple[float, ...]
+    expected_imu_orientation_xyzw: tuple[float, ...]
+    imu_orientation_error_rad: float
+    imu_orientation_tolerance_rad: float
+    imu_angular_velocity_source_channel: str
+    max_imu_angular_speed_rad_s: float
+    imu_stationarity_limit_rad_s: float
     sample_time_s: float
     scenario_time_s: float
     sample_offset_s: float
-    schema_version: int = 1
+    schema_version: int = 2
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -83,9 +101,23 @@ class ReplayInitialState:
             "position_rad": list(self.position_rad),
             "velocity_rad_s": list(self.velocity_rad_s),
             "velocity_source": self.velocity_source,
+            "velocity_window_start_s": self.velocity_window_start_s,
+            "velocity_window_end_s": self.velocity_window_end_s,
+            "velocity_stationarity_limit_rad_s": self.velocity_stationarity_limit_rad_s,
             "fixture_mode": self.fixture_mode,
             "fixture_frame": self.fixture_frame,
             "root_pose_source": self.root_pose_source,
+            "fixture_id": self.fixture_id,
+            "fixture_sha256": self.fixture_sha256,
+            "root_orientation_wxyz": list(self.root_orientation_wxyz),
+            "imu_orientation_source_channel": self.imu_orientation_source_channel,
+            "measured_imu_orientation_xyzw": list(self.measured_imu_orientation_xyzw),
+            "expected_imu_orientation_xyzw": list(self.expected_imu_orientation_xyzw),
+            "imu_orientation_error_rad": self.imu_orientation_error_rad,
+            "imu_orientation_tolerance_rad": self.imu_orientation_tolerance_rad,
+            "imu_angular_velocity_source_channel": self.imu_angular_velocity_source_channel,
+            "max_imu_angular_speed_rad_s": self.max_imu_angular_speed_rad_s,
+            "imu_stationarity_limit_rad_s": self.imu_stationarity_limit_rad_s,
             "sample_time_s": self.sample_time_s,
             "scenario_time_s": self.scenario_time_s,
             "sample_offset_s": self.sample_offset_s,
@@ -348,9 +380,23 @@ def _replay_initial_state(
         "position_rad",
         "velocity_rad_s",
         "velocity_source",
+        "velocity_window_start_s",
+        "velocity_window_end_s",
+        "velocity_stationarity_limit_rad_s",
         "fixture_mode",
         "fixture_frame",
         "root_pose_source",
+        "fixture_id",
+        "fixture_sha256",
+        "root_orientation_wxyz",
+        "imu_orientation_source_channel",
+        "measured_imu_orientation_xyzw",
+        "expected_imu_orientation_xyzw",
+        "imu_orientation_error_rad",
+        "imu_orientation_tolerance_rad",
+        "imu_angular_velocity_source_channel",
+        "max_imu_angular_speed_rad_s",
+        "imu_stationarity_limit_rad_s",
         "sample_time_s",
         "scenario_time_s",
         "sample_offset_s",
@@ -360,8 +406,8 @@ def _replay_initial_state(
     payload = dict(declaration)
     if sha256_json(payload) != declared_hash:
         raise ContractError("replay initial state hash does not match its declaration")
-    if payload["schema_version"] != 1 or isinstance(payload["schema_version"], bool):
-        raise ContractError("replay initial state schema version must be 1")
+    if payload["schema_version"] != 2 or isinstance(payload["schema_version"], bool):
+        raise ContractError("replay initial state schema version must be 2")
     expected_joint_order = tuple(f"main_{index}" for index in range(6))
     raw_joint_order = payload["joint_order"]
     if not isinstance(raw_joint_order, list) or tuple(raw_joint_order) != expected_joint_order:
@@ -374,10 +420,16 @@ def _replay_initial_state(
         raise ContractError("replay initial state fixture mode does not match the scenario")
     if payload["fixture_frame"] != "world":
         raise ContractError("replay initial state fixture frame must be world")
-    if payload["root_pose_source"] != "production_asset_default":
+    if payload["root_pose_source"] != "reviewed_fixture":
         raise ContractError("replay initial state root pose source is unsupported")
-    if payload["velocity_source"] != "reviewed_initial_neutral":
+    if payload["velocity_source"] != "stationary_window_linear_fit":
         raise ContractError("replay initial state velocity source is unsupported")
+    if payload["imu_orientation_source_channel"] != "imu_orientation_xyzw":
+        raise ContractError("replay initial state IMU orientation source is unsupported")
+    if payload["imu_angular_velocity_source_channel"] != "imu_angular_velocity":
+        raise ContractError(
+            "replay initial state IMU angular-velocity source is unsupported"
+        )
 
     def finite_number(field: str) -> float:
         value = payload[field]
@@ -405,14 +457,81 @@ def _replay_initial_state(
             raise ContractError(f"replay initial state {field} must be finite")
         return tuple(result)
 
+    def finite_quaternion(field: str) -> tuple[float, ...]:
+        value = payload[field]
+        if not isinstance(value, list) or len(value) != 4:
+            raise ContractError(
+                f"replay initial state {field} must contain four numeric values"
+            )
+        result = np.asarray(value, dtype=np.float64)
+        if not np.isfinite(result).all():
+            raise ContractError(f"replay initial state {field} must be finite")
+        norm = float(np.linalg.norm(result))
+        if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1.0e-6):
+            raise ContractError(f"replay initial state {field} must be normalized")
+        return tuple(float(item) for item in result)
+
+    def quaternion_error_rad(first: np.ndarray, second: np.ndarray) -> float:
+        return 2.0 * math.acos(
+            float(np.clip(abs(float(np.dot(first, second))), 0.0, 1.0))
+        )
+
     position_rad = finite_vector("position_rad")
     velocity_rad_s = finite_vector("velocity_rad_s")
-    if any(not math.isclose(value, 0.0, abs_tol=1.0e-12) for value in velocity_rad_s):
-        raise ContractError("reviewed initial-neutral velocity must be zero")
+    root_orientation_wxyz = finite_quaternion("root_orientation_wxyz")
+    measured_imu_orientation_xyzw = finite_quaternion(
+        "measured_imu_orientation_xyzw"
+    )
+    expected_imu_orientation_xyzw = finite_quaternion(
+        "expected_imu_orientation_xyzw"
+    )
+    velocity_window_start_s = finite_number("velocity_window_start_s")
+    velocity_window_end_s = finite_number("velocity_window_end_s")
+    velocity_limit = finite_number("velocity_stationarity_limit_rad_s")
+    imu_orientation_error = finite_number("imu_orientation_error_rad")
+    imu_orientation_tolerance = finite_number("imu_orientation_tolerance_rad")
+    max_imu_speed = finite_number("max_imu_angular_speed_rad_s")
+    imu_speed_limit = finite_number("imu_stationarity_limit_rad_s")
     sample_time_s = finite_number("sample_time_s")
     declared_scenario_time_s = finite_number("scenario_time_s")
     sample_offset_s = finite_number("sample_offset_s")
     tolerance = 1.0e-9
+    if not math.isclose(
+        velocity_window_start_s, scenario_time_s, rel_tol=0.0, abs_tol=tolerance
+    ) or not math.isclose(
+        velocity_window_end_s,
+        scenario_time_s + REPLAY_STATIONARY_WINDOW_S,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay stationary window must be the reviewed initial window")
+    first_segment = scenario.command_segments[0]
+    if (
+        not math.isclose(float(first_segment["value"]), 0.0, abs_tol=tolerance)
+        or float(first_segment["duration_s"]) + tolerance < REPLAY_STATIONARY_WINDOW_S
+    ):
+        raise ContractError("replay scenario has no reviewed initial neutral window")
+    if not math.isclose(
+        velocity_limit,
+        REPLAY_JOINT_STATIONARITY_LIMIT_RAD_S,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay joint stationarity limit is unsupported")
+    if not math.isclose(
+        imu_speed_limit,
+        REPLAY_IMU_STATIONARITY_LIMIT_RAD_S,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay IMU stationarity limit is unsupported")
+    if not math.isclose(
+        imu_orientation_tolerance,
+        REPLAY_FIXTURE_ORIENTATION_TOLERANCE_RAD,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay fixture orientation tolerance is unsupported")
     if not math.isclose(
         declared_scenario_time_s,
         scenario_time_s,
@@ -460,6 +579,125 @@ def _replay_initial_state(
         atol=tolerance,
     ):
         raise ContractError("replay initial state position does not match the verified trace")
+
+    stationary_mask = (position_time >= velocity_window_start_s - tolerance) & (
+        position_time <= velocity_window_end_s + tolerance
+    )
+    if int(np.count_nonzero(stationary_mask)) < 3:
+        raise ContractError("replay stationary window requires at least three position samples")
+    fit_time = position_time[stationary_mask]
+    centered_time = fit_time - float(np.mean(fit_time))
+    denominator = float(np.dot(centered_time, centered_time))
+    if denominator <= 0.0:
+        raise ContractError("replay stationary position samples have no time span")
+    fit_position = position[stationary_mask]
+    fitted_velocity = np.sum(
+        centered_time[:, None] * fit_position, axis=0
+    ) / denominator
+    if float(np.max(np.abs(fitted_velocity))) > velocity_limit + 1.0e-9:
+        raise ContractError("replay initial joint state is not stationary")
+    if not np.allclose(
+        np.asarray(velocity_rad_s), fitted_velocity, rtol=0.0, atol=1.0e-8
+    ):
+        raise ContractError(
+            "replay initial velocity does not match the verified stationary window"
+        )
+
+    fixture_id = payload["fixture_id"]
+    fixture_sha256 = payload["fixture_sha256"]
+    if not isinstance(fixture_id, str) or not fixture_id.strip():
+        raise ContractError("replay fixture_id must be a non-empty string")
+    if (
+        not isinstance(fixture_sha256, str)
+        or len(fixture_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in fixture_sha256)
+    ):
+        raise ContractError("replay fixture_sha256 must be a SHA-256 digest")
+    fixture_payload = {
+        "schema_version": 1,
+        "fixture_id": fixture_id,
+        "scene_mode": payload["fixture_mode"],
+        "fixture_frame": payload["fixture_frame"],
+        "root_orientation_wxyz": list(root_orientation_wxyz),
+        "expected_imu_orientation_xyzw": list(expected_imu_orientation_xyzw),
+    }
+    if sha256_json(fixture_payload) != fixture_sha256:
+        raise ContractError("replay fixture hash does not match its reviewed contents")
+
+    imu_orientation_channel = str(payload["imu_orientation_source_channel"])
+    imu_orientation_time_name = loaded.manifest.time_bases.get(
+        imu_orientation_channel
+    )
+    if imu_orientation_time_name is None:
+        raise ContractError("replay trace has no IMU orientation time base")
+    imu_time = np.asarray(
+        loaded.arrays[imu_orientation_time_name], dtype=np.float64
+    )
+    imu_orientation = np.asarray(
+        loaded.arrays[imu_orientation_channel], dtype=np.float64
+    )
+    if imu_orientation.ndim != 2 or imu_orientation.shape[1] != 4:
+        raise ContractError("replay IMU orientation channel must have shape (samples, 4)")
+    imu_mask = (imu_time >= velocity_window_start_s - tolerance) & (
+        imu_time <= velocity_window_end_s + tolerance
+    )
+    if int(np.count_nonzero(imu_mask)) < 3:
+        raise ContractError("replay stationary window requires at least three IMU samples")
+    quaternions = np.array(imu_orientation[imu_mask], copy=True)
+    norms = np.linalg.norm(quaternions, axis=1)
+    if np.any(norms <= 0.0):
+        raise ContractError("replay IMU trace contains a zero quaternion")
+    quaternions /= norms[:, None]
+    reference = quaternions[0]
+    quaternions[np.sum(quaternions * reference, axis=1) < 0.0] *= -1.0
+    mean_quaternion = np.mean(quaternions, axis=0)
+    mean_norm = float(np.linalg.norm(mean_quaternion))
+    if mean_norm <= 0.0:
+        raise ContractError("replay IMU orientation average is ambiguous")
+    mean_quaternion /= mean_norm
+    declared_measured = np.asarray(measured_imu_orientation_xyzw)
+    if quaternion_error_rad(mean_quaternion, declared_measured) > 1.0e-7:
+        raise ContractError("replay measured IMU orientation does not match the trace")
+    expected_imu = np.asarray(expected_imu_orientation_xyzw)
+    computed_orientation_error = quaternion_error_rad(mean_quaternion, expected_imu)
+    if not math.isclose(
+        imu_orientation_error,
+        computed_orientation_error,
+        rel_tol=0.0,
+        abs_tol=1.0e-7,
+    ):
+        raise ContractError("replay IMU orientation error is inconsistent")
+    if computed_orientation_error > imu_orientation_tolerance + 1.0e-9:
+        raise ContractError("replay IMU orientation does not match the reviewed fixture")
+
+    imu_velocity_channel = str(payload["imu_angular_velocity_source_channel"])
+    imu_velocity_time_name = loaded.manifest.time_bases.get(imu_velocity_channel)
+    if imu_velocity_time_name is None:
+        raise ContractError("replay trace has no IMU angular-velocity time base")
+    imu_velocity_time = np.asarray(
+        loaded.arrays[imu_velocity_time_name], dtype=np.float64
+    )
+    imu_velocity = np.asarray(loaded.arrays[imu_velocity_channel], dtype=np.float64)
+    if imu_velocity.ndim != 2 or imu_velocity.shape[1] != 3:
+        raise ContractError(
+            "replay IMU angular-velocity channel must have shape (samples, 3)"
+        )
+    imu_velocity_mask = (
+        imu_velocity_time >= velocity_window_start_s - tolerance
+    ) & (imu_velocity_time <= velocity_window_end_s + tolerance)
+    if int(np.count_nonzero(imu_velocity_mask)) < 3:
+        raise ContractError(
+            "replay stationary window requires at least three IMU angular-velocity samples"
+        )
+    computed_max_imu_speed = float(
+        np.max(np.linalg.norm(imu_velocity[imu_velocity_mask], axis=1))
+    )
+    if not math.isclose(
+        max_imu_speed, computed_max_imu_speed, rel_tol=0.0, abs_tol=1.0e-8
+    ):
+        raise ContractError("replay maximum IMU angular speed is inconsistent")
+    if computed_max_imu_speed > imu_speed_limit + 1.0e-9:
+        raise ContractError("replay fixture is not stationary according to the IMU")
     return (
         ReplayInitialState(
             joint_order=expected_joint_order,
@@ -467,9 +705,23 @@ def _replay_initial_state(
             position_rad=position_rad,
             velocity_rad_s=velocity_rad_s,
             velocity_source=str(payload["velocity_source"]),
+            velocity_window_start_s=velocity_window_start_s,
+            velocity_window_end_s=velocity_window_end_s,
+            velocity_stationarity_limit_rad_s=velocity_limit,
             fixture_mode=str(payload["fixture_mode"]),
             fixture_frame=str(payload["fixture_frame"]),
             root_pose_source=str(payload["root_pose_source"]),
+            fixture_id=fixture_id,
+            fixture_sha256=fixture_sha256,
+            root_orientation_wxyz=root_orientation_wxyz,
+            imu_orientation_source_channel=imu_orientation_channel,
+            measured_imu_orientation_xyzw=measured_imu_orientation_xyzw,
+            expected_imu_orientation_xyzw=expected_imu_orientation_xyzw,
+            imu_orientation_error_rad=imu_orientation_error,
+            imu_orientation_tolerance_rad=imu_orientation_tolerance,
+            imu_angular_velocity_source_channel=imu_velocity_channel,
+            max_imu_angular_speed_rad_s=max_imu_speed,
+            imu_stationarity_limit_rad_s=imu_speed_limit,
             sample_time_s=sample_time_s,
             scenario_time_s=declared_scenario_time_s,
             sample_offset_s=sample_offset_s,

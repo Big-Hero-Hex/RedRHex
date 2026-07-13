@@ -66,7 +66,7 @@ def _stub_rosbag_extraction(monkeypatch) -> dict[str, object]:
     monkeypatch.setattr(
         importer,
         "_load_rosbag",
-        lambda path, scenario, profile: (arrays, {}, constants),
+        lambda path, scenario, profile, replay_fixture: (arrays, {}, constants),
     )
     return constants
 
@@ -1014,22 +1014,8 @@ def test_bound_probe_import_authenticates_commands_separately_from_position_mapp
         f"authenticated_probe_events:{sha256_json(scenario.to_dict())}"
     )
     assert constants["calibration_source"].endswith(":with_provisional_fallbacks")
-    initial_state = constants["replay_initial_state"]
-    assert initial_state == {
-        "schema_version": 1,
-        "joint_order": [f"main_{index}" for index in range(6)],
-        "position_source_channel": "main_joint_position_canonical",
-        "position_rad": [0.0] * 6,
-        "velocity_rad_s": [0.0] * 6,
-        "velocity_source": "reviewed_initial_neutral",
-        "fixture_mode": "fixed_base",
-        "fixture_frame": "world",
-        "root_pose_source": "production_asset_default",
-        "sample_time_s": pytest.approx(0.01),
-        "scenario_time_s": pytest.approx(0.0),
-        "sample_offset_s": pytest.approx(0.01),
-    }
-    assert constants["replay_initial_state_sha256"] == sha256_json(initial_state)
+    assert "replay_initial_state" not in constants
+    assert "replay_initial_state_sha256" not in constants
 
 
 def test_imported_normal_probe_exposes_all_three_bidirectional_repetitions(
