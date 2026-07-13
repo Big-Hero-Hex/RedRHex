@@ -63,6 +63,7 @@ _ENCODER_SIGN = {"l1": -1.0, "l2": -1.0, "l3": -1.0, "r1": 1.0, "r2": 1.0, "r3":
 _POSITIVE_DIRECTION = {"l1": True, "l2": True, "l3": True, "r1": False, "r2": False, "r3": False}
 _COUNTS_PER_REV = 54984.83
 _MAX_PWM = 500.0
+_MAIN_DRIVE_EXPERIMENTS = frozenset({"step", "coast", "step_coast"})
 
 
 def _rosbag_dependencies():
@@ -126,14 +127,15 @@ def _load_rosbag(
         for topic, type_name in topic_types.items()
         if topic in recognized
     }
-    if scenario.experiment_kind in {"step", "coast"}:
+    is_main_drive_experiment = scenario.experiment_kind in _MAIN_DRIVE_EXPERIMENTS
+    if is_main_drive_experiment:
         missing_topics = {"/motor/command", "/motor/state"} - set(message_types)
         if missing_topics:
             raise ContractError(
                 "rosbag missing required topics: " + ", ".join(sorted(missing_topics))
             )
     selected_leg = _JOINT_TO_LEG.get(scenario.joint)
-    if selected_leg is None and scenario.experiment_kind in {"step", "coast"}:
+    if selected_leg is None and is_main_drive_experiment:
         raise ContractError(f"unsupported main-drive joint for rosbag import: {scenario.joint}")
     hardware = profile.hardware_mapping if profile is not None else {}
 
@@ -170,6 +172,7 @@ def _load_rosbag(
         "power_current": [],
     }
     earliest: float | None = None
+    selected_leg_observed_enabled = False
     while reader.has_next():
         topic, serialized, timestamp_ns = reader.read_next()
         if topic not in message_types:
@@ -182,6 +185,20 @@ def _load_rosbag(
                 _leg(message, name, ("enable", "direction", "voltage"), topic)
                 for name in _LEG_ORDER
             ]
+            if is_main_drive_experiment:
+                enabled_legs = tuple(
+                    name
+                    for name, leg in zip(_LEG_ORDER, legs, strict=True)
+                    if bool(leg.enable)
+                )
+                unexpected = tuple(name for name in enabled_legs if name != selected_leg)
+                if unexpected:
+                    raise ContractError(
+                        "raw main-drive command enables "
+                        f"{', '.join(unexpected)} but scenario {scenario.scenario_id} "
+                        f"binds {scenario.joint} to {selected_leg}"
+                    )
+                selected_leg_observed_enabled |= selected_leg in enabled_legs
             signed_pwm = []
             for name, leg in zip(_LEG_ORDER, legs, strict=True):
                 voltage = float(leg.voltage) if bool(leg.enable) else 0.0
@@ -231,6 +248,11 @@ def _load_rosbag(
             values["power_current"].append(current)
     if earliest is None:
         raise ContractError("rosbag contains no recognized messages")
+    if is_main_drive_experiment and not selected_leg_observed_enabled:
+        raise ContractError(
+            "raw main-drive command never enabled the scenario joint "
+            f"{scenario.joint} ({selected_leg})"
+        )
     arrays: dict[str, np.ndarray] = {}
     for time_name, samples in times.items():
         if samples:
@@ -266,6 +288,7 @@ def _load_rosbag(
         "pwm_scale": pwm_scale,
         "pwm_cap": pwm_cap,
         "selected_leg": selected_leg,
+        "raw_enabled_leg_binding_verified": bool(is_main_drive_experiment),
         "positive_direction_bit": _POSITIVE_DIRECTION.get(selected_leg),
     }
     return arrays, extra_time_bases, constants

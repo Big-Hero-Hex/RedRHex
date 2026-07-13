@@ -382,6 +382,17 @@ def compute_subsystem_metrics(
             arrays[time_bases["position"]],
             arrays["position"],
         )
+    if kind == "step_coast":
+        arguments = (
+            arrays[time_bases["command"]],
+            arrays["command"],
+            arrays[time_bases["position"]],
+            arrays["position"],
+        )
+        return {
+            "step": bidirectional_step_metrics(*arguments),
+            "coast": bidirectional_coast_metrics(*arguments),
+        }
     if kind == "manual_load":
         target = "load_force"
         return torque_saturation_metrics(

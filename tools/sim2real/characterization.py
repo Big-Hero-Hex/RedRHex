@@ -20,6 +20,19 @@ EXPECTED_FOOT_BODY_NAMES = (
     "right_feet_3",
 )
 
+_WORLD_FRAME_CHANNELS = frozenset(
+    {
+        "root_position",
+        "root_quaternion",
+        "root_linear_velocity",
+        "root_angular_velocity",
+        "contact_force_w",
+        "contact_force_n",
+        "body_contact_force_w",
+        "body_contact_force_n",
+    }
+)
+
 
 @dataclass(frozen=True)
 class RunRequest:
@@ -35,6 +48,43 @@ class ScheduledCommand:
     label: str
     actuator_enabled: bool
     repeat_index: int
+
+
+def characterization_channel_metadata(
+    scenario: ScenarioSpecV1,
+    channels: set[str] | tuple[str, ...] | list[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return explicit physical units and frames for simulator trace channels."""
+
+    command_unit = "rad" if scenario.experiment_kind == "abad_static" else "rad/s"
+    known_units = {
+        "requested_command": command_unit,
+        "applied_command": command_unit,
+        "joint_position": "rad",
+        "joint_velocity": "rad/s",
+        "joint_effort_estimate": "N*m",
+        "root_position": "m",
+        "root_quaternion": "1",
+        "root_linear_velocity": "m/s",
+        "root_angular_velocity": "rad/s",
+        "contact_force_w": "N",
+        "contact_force_n": "N",
+        "command": command_unit,
+        "position": "rad",
+        "audit_value": "kg",
+        "body_contact_force_w": "N",
+        "body_contact_force_n": "N",
+    }
+    units = {name: known_units.get(name, "unspecified") for name in channels}
+    frames = {name: "joint_order" for name in channels}
+    for name in _WORLD_FRAME_CHANNELS.intersection(frames):
+        frames[name] = "world"
+    for name in ("command", "position"):
+        if name in frames:
+            frames[name] = scenario.joint
+    if "audit_value" in frames:
+        frames["audit_value"] = "scalar"
+    return units, frames
 
 
 def validate_run_request(
@@ -153,11 +203,16 @@ def scenario_schedule(
         segment_index = min(segment_index, len(segments) - 1)
         segment = segments[segment_index]
         label = str(segment.get("label", f"segment_{segment_index}"))
+        actuator_enabled = (
+            label in {"drive_positive", "drive_negative"}
+            if scenario.experiment_kind == "step_coast"
+            else "coast" not in label.lower()
+        )
         result.append(
             ScheduledCommand(
                 value=float(segment["value"]),
                 label=label,
-                actuator_enabled="coast" not in label.lower(),
+                actuator_enabled=actuator_enabled,
                 repeat_index=repeat_index,
             )
         )

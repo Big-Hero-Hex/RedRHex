@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from tools.sim2real.contracts import ContractError
+from tools.sim2real.contracts import ContractError, ScenarioSpecV1
 from tools.sim2real.scenarios import load_scenario
 
 
@@ -65,6 +65,55 @@ def test_scenario_schedule_uses_segment_labels_for_coast_disable() -> None:
     assert coast.value == 0.0
     assert coast.label == "coast"
     assert coast.actuator_enabled is False
+
+
+def test_disabled_neutral_and_coast_segments_match_fail_safe_hardware_probe() -> None:
+    from tools.sim2real.characterization import scenario_schedule, scenario_step_count
+
+    payload = load_scenario("main-coast").to_dict()
+    payload["scenario_id"] = "combined-response"
+    payload["experiment_kind"] = "step_coast"
+    payload["command_segments"] = [
+        {"duration_s": 0.5, "value": 0.0, "label": "neutral_before_positive"},
+        {"duration_s": 1.0, "value": 0.25, "label": "drive_positive"},
+        {"duration_s": 1.0, "value": 0.0, "label": "coast_positive"},
+    ]
+    payload["repeats"] = 1
+    scenario = ScenarioSpecV1.from_dict(payload)
+    schedule = scenario_schedule(
+        scenario, scenario_step_count(scenario, 1.0 / 120.0), 1.0 / 120.0
+    )
+
+    assert all(not item.actuator_enabled for item in schedule if "neutral" in item.label)
+    assert all(item.actuator_enabled for item in schedule if "drive" in item.label)
+    assert all(not item.actuator_enabled for item in schedule if "coast" in item.label)
+
+
+def test_characterization_trace_metadata_uses_physical_units_and_selected_joint_frame() -> None:
+    from tools.sim2real.characterization import characterization_channel_metadata
+
+    channels = {
+        "requested_command",
+        "applied_command",
+        "command",
+        "position",
+        "root_position",
+    }
+    units, frames = characterization_channel_metadata(load_scenario("main-step"), channels)
+
+    assert units["requested_command"] == "rad/s"
+    assert units["applied_command"] == "rad/s"
+    assert units["command"] == "rad/s"
+    assert units["position"] == "rad"
+    assert frames["command"] == "main_0"
+    assert frames["position"] == "main_0"
+    assert frames["root_position"] == "world"
+
+    abad_units, abad_frames = characterization_channel_metadata(
+        load_scenario("abad-static"), {"command", "position"}
+    )
+    assert abad_units == {"command": "rad", "position": "rad"}
+    assert abad_frames == {"command": "abad_0", "position": "abad_0"}
 
 
 def test_contact_probe_requires_resolved_bodies_and_measurable_force() -> None:

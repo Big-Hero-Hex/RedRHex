@@ -25,6 +25,7 @@ from RedRhex.tasks.direct.redrhex.redrhex_env_cfg import REDRHEX_CFG, RedrhexEnv
 
 from .characterization import (
     PHYSICS_DT,
+    characterization_channel_metadata,
     requires_contact_probe,
     resolve_scenario_steps,
     scenario_schedule,
@@ -283,42 +284,7 @@ def _trace_metadata(
     *,
     mode: str,
 ) -> dict[str, Any]:
-    units = {name: "unspecified" for name in time_bases}
-    units.update(
-        {
-            "requested_command": "rad_s_or_rad",
-            "applied_command": "rad_s_or_rad",
-            "joint_position": "rad",
-            "joint_velocity": "rad/s",
-            "joint_effort_estimate": "N*m",
-            "root_position": "m",
-            "root_quaternion": "1",
-            "root_linear_velocity": "m/s",
-            "root_angular_velocity": "rad/s",
-            "contact_force_w": "N",
-            "contact_force_n": "N",
-            "command": "rad_s_or_rad",
-            "position": "rad",
-            "audit_value": "kg",
-            "body_contact_force_w": "N",
-            "body_contact_force_n": "N",
-        }
-    )
-    frames = {name: "joint_order" for name in time_bases}
-    for name in (
-        "root_position",
-        "root_quaternion",
-        "root_linear_velocity",
-        "root_angular_velocity",
-        "contact_force_w",
-        "contact_force_n",
-        "body_contact_force_w",
-        "body_contact_force_n",
-    ):
-        if name in frames:
-            frames[name] = "world"
-    if "audit_value" in frames:
-        frames["audit_value"] = "scalar"
+    units, frames = characterization_channel_metadata(scenario, set(time_bases))
 
     asset_path = Path(env_cfg.robot_cfg.spawn.usd_path)
     cfg_path = Path(inspect.getsourcefile(RedrhexEnvCfg) or "")

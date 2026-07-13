@@ -69,6 +69,45 @@ def _stub_rosbag_extraction(monkeypatch) -> dict[str, object]:
     return constants
 
 
+def _install_fake_rosbag_reader(monkeypatch, records) -> None:
+    import tools.sim2real.import_real as importer
+
+    class Reader:
+        def __init__(self):
+            self.records = iter(records)
+            self.next_record = None
+
+        def open(self, storage, converter):
+            return None
+
+        def get_all_topics_and_types(self):
+            return [
+                SimpleNamespace(name=topic, type="fake/Msg")
+                for topic in {item[0] for item in records}
+            ]
+
+        def has_next(self):
+            try:
+                self.next_record = next(self.records)
+            except StopIteration:
+                return False
+            return True
+
+        def read_next(self):
+            return self.next_record
+
+    fake_rosbag = SimpleNamespace(
+        SequentialReader=Reader,
+        StorageOptions=lambda **kwargs: kwargs,
+        ConverterOptions=lambda **kwargs: kwargs,
+    )
+    monkeypatch.setattr(
+        importer,
+        "_rosbag_dependencies",
+        lambda: (fake_rosbag, lambda data, _type: data, lambda name: name),
+    )
+
+
 @pytest.mark.parametrize("clock", ["", " ", "\t\n"])
 def test_latency_clock_rejects_empty_or_whitespace_only_names(clock: str) -> None:
     with pytest.raises(ContractError, match="non-empty"):
@@ -427,11 +466,9 @@ def test_rosbag_dependency_is_imported_only_when_a_bag_is_read(
 def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     tmp_path: Path, monkeypatch
 ) -> None:
-    import tools.sim2real.import_real as importer
-
-    def leg(*, voltage=0.0, direction=False, position=0.0):
+    def leg(*, enable=False, voltage=0.0, direction=False, position=0.0):
         return SimpleNamespace(
-            enable=True,
+            enable=enable,
             voltage=voltage,
             direction=direction,
             position=position,
@@ -453,50 +490,30 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
         **{**{f"v_{i}": value for i in range(8)}, **{f"i_{i}": 0.1 for i in range(8)}}
     )
     records = [
-        ("/motor/command", motor(r1=leg(voltage=125.0, direction=False)), 1_000_000_000),
+        (
+            "/motor/command",
+            motor(
+                r1=leg(enable=True, voltage=125.0, direction=False),
+                header=SimpleNamespace(stamp=SimpleNamespace(sec=999, nanosec=0)),
+            ),
+            1_000_000_000,
+        ),
         ("/motor/state", motor(r1=leg(position=0.0)), 1_010_000_000),
         ("/imu/data", imu(0.0), 1_015_000_000),
         ("/power/state", power(24.0), 1_020_000_000),
-        ("/motor/command", motor(r1=leg(voltage=125.0, direction=True)), 1_100_000_000),
+        (
+            "/motor/command",
+            motor(
+                r1=leg(enable=True, voltage=125.0, direction=True),
+                header=SimpleNamespace(stamp=SimpleNamespace(sec=999, nanosec=0)),
+            ),
+            1_100_000_000,
+        ),
         ("/motor/state", motor(r1=leg(position=54984.83 / 4.0)), 1_110_000_000),
         ("/imu/data", imu(1.0), 1_115_000_000),
         ("/power/state", power(23.5), 1_120_000_000),
     ]
-
-    class Reader:
-        def __init__(self):
-            self.records = iter(records)
-            self.next_record = None
-
-        def open(self, storage, converter):
-            return None
-
-        def get_all_topics_and_types(self):
-            return [
-                SimpleNamespace(name=topic, type="fake/Msg")
-                for topic in {item[0] for item in records}
-            ]
-
-        def has_next(self):
-            try:
-                self.next_record = next(self.records)
-            except StopIteration:
-                return False
-            return True
-
-        def read_next(self):
-            return self.next_record
-
-    fake_rosbag = SimpleNamespace(
-        SequentialReader=Reader,
-        StorageOptions=lambda **kwargs: kwargs,
-        ConverterOptions=lambda **kwargs: kwargs,
-    )
-    monkeypatch.setattr(
-        importer,
-        "_rosbag_dependencies",
-        lambda: (fake_rosbag, lambda data, _type: data, lambda name: name),
-    )
+    _install_fake_rosbag_reader(monkeypatch, records)
     bag = tmp_path / "bag"
     bag.mkdir()
     manifest = import_real_trace(
@@ -511,6 +528,8 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
 
     np.testing.assert_allclose(trace.arrays["command_time_s"], [0.0, 0.1])
     np.testing.assert_allclose(trace.arrays["position_time_s"], [0.01, 0.11])
+    np.testing.assert_allclose(trace.arrays["imu_time_s"], [0.015, 0.115])
+    np.testing.assert_allclose(trace.arrays["power_time_s"], [0.02, 0.12])
     np.testing.assert_allclose(trace.arrays["command"], [0.25, -0.25])
     np.testing.assert_allclose(trace.arrays["position"], [0.0, np.pi / 2.0])
     np.testing.assert_allclose(
@@ -522,6 +541,9 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     assert trace.manifest.metadata["calibration_constants"][
         "calibration_source"
     ] == "provisional_repository_defaults"
+    assert trace.manifest.metadata["calibration_constants"][
+        "raw_enabled_leg_binding_verified"
+    ] is True
     assert trace.manifest.metadata["clock"]["source"] == "bag_receive_time"
     assert manifest.time_bases["imu_acceleration"] == "imu_time_s"
     assert manifest.time_bases["power_voltage"] == "power_time_s"
@@ -556,6 +578,49 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     assert calibrated.manifest.metadata["calibration_constants"]["pwm_scale"] == 0.01
     assert calibrated.manifest.metadata["calibration_constants"]["pwm_cap"] == 0.5
     assert "profile_sha256" in calibrated.manifest.provenance
+
+
+@pytest.mark.parametrize(
+    "enabled_legs",
+    [(), ("l1",), ("r1", "l1")],
+    ids=("selected-never-enabled", "wrong-leg", "multiple-legs"),
+)
+def test_rosbag_main_drive_import_binds_raw_enable_mask_to_scenario_joint(
+    tmp_path: Path, monkeypatch, enabled_legs: tuple[str, ...]
+) -> None:
+    def leg(name: str, *, position: float = 0.0):
+        return SimpleNamespace(
+            enable=name in enabled_legs,
+            voltage=30.0,
+            direction=False,
+            position=position,
+        )
+
+    command = SimpleNamespace(
+        **{name: leg(name) for name in ("l1", "l2", "l3", "r1", "r2", "r3")}
+    )
+    state = SimpleNamespace(
+        **{
+            name: SimpleNamespace(position=0.0)
+            for name in ("l1", "l2", "l3", "r1", "r2", "r3")
+        }
+    )
+    records = [
+        ("/motor/command", command, 1_000_000_000),
+        ("/motor/state", state, 1_010_000_000),
+    ]
+    _install_fake_rosbag_reader(monkeypatch, records)
+    bag = tmp_path / "bag"
+    bag.mkdir()
+
+    with pytest.raises(ContractError, match="raw main-drive command"):
+        import_real_trace(
+            bag,
+            tmp_path / "episode",
+            scenario="main-step",
+        )
+
+    assert not (tmp_path / "episode").exists()
 
 
 def test_dataset_accepts_new_repetitions_but_refuses_raw_or_episode_overwrite(

@@ -309,6 +309,46 @@ def test_bidirectional_drive_metrics_do_not_drop_reverse_segments() -> None:
     ]
 
 
+def test_combined_step_coast_scenario_reports_metric_families_separately(
+    tmp_path: Path,
+) -> None:
+    payload = load_scenario("main-coast").to_dict()
+    payload["scenario_id"] = "combined-response"
+    payload["experiment_kind"] = "step_coast"
+    scenario = ScenarioSpecV1.from_dict(payload)
+    time_s = np.arange(0.0, 5.01, 0.05)
+    command = np.zeros_like(time_s)
+    command[(time_s >= 0.5) & (time_s < 1.75)] = 0.25
+    command[(time_s >= 3.0) & (time_s < 4.25)] = -0.25
+    velocity = np.zeros_like(time_s)
+    velocity[(time_s >= 0.7) & (time_s < 1.75)] = 2.0
+    positive_coast = (time_s >= 1.75) & (time_s < 2.25)
+    velocity[positive_coast] = 2.0 * (2.25 - time_s[positive_coast]) / 0.5
+    velocity[(time_s >= 3.2) & (time_s < 4.25)] = -1.5
+    negative_coast = (time_s >= 4.25) & (time_s < 4.75)
+    velocity[negative_coast] = -1.5 * (4.75 - time_s[negative_coast]) / 0.5
+    position = np.cumsum(velocity) * 0.05
+    write_trace(
+        tmp_path / "combined",
+        {
+            "command_time_s": time_s,
+            "command": command,
+            "position_time_s": time_s,
+            "position": position,
+        },
+        scenario=scenario,
+        source="sim",
+    )
+
+    metrics = compute_subsystem_metrics(
+        scenario, load_trace(tmp_path / "combined", scenario=scenario)
+    )
+
+    assert set(metrics) == {"step", "coast"}
+    assert set(metrics["step"]) == {"positive", "negative"}
+    assert set(metrics["coast"]) == {"positive", "negative"}
+
+
 def test_torsional_spring_dynamic_friction_and_variation_metrics() -> None:
     spring = torsional_spring_metrics(
         angle_rad=np.array([0.0, 0.1, 0.2]),
