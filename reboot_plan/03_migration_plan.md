@@ -1,149 +1,177 @@
-# 03 — Migration Plan (the actual to-do list)
+# 03 — Migration Plan: P0–P7
 
-Strangler-fig migration: the old env keeps working at every step; new modules replace
-organs one at a time behind parity gates. Every step = one or a few commits, each
-independently revertible. **Never two extraction steps in flight at once.**
+The legacy task stays runnable throughout. Only one implementation slice may be in
+flight. A task is complete only when its gate, evidence, and commit/ADR are recorded.
 
-Effort estimates assume AI-heavy development (agent implements, harness verifies,
-human reviews + judges) with one shared GPU machine.
+## P0 — Foundation and interface freeze
 
----
+Purpose: make the evidence system trustworthy before asking the simulator a physics
+question.
 
-## Phase 0 — Freeze & Baseline (½–1 day) — DO THIS BEFORE ANY RESTRUCTURING
+| Status | Task | Gate | Evidence | Commit/ADR |
+|---|---|---|---|---|
+| [x] | Create `reboot/core-sim-first`, preserve the original plan, and attach an isolated Desktop worktree | Historical creation facts: branch/worktree registered from planning commit; original checkout returned to `fix/review-2026-07` | `git worktree list`, `STATUS.md` | `a795c06` |
+| [ ] | Record and seal frozen consumer trees and current interface inventory | Source trees plus executable task/CLI/default/artifact boundaries captured; ignored reward-test invariants recreated outside frozen paths | `evidence/interface_freeze.md` | — |
+| [ ] | Establish safe root CPU test discovery | Intended tests are tracked; default collection excludes simulator-launch diagnostics; suite passes | `evidence/foundation/RESULTS.md` | — |
+| [ ] | Add a frozen-path guard | Committed, staged, unstaged, or untracked changes under panel/remote/reward/ROS fail; caches write elsewhere | deliberate-change failure tests | — |
+| [ ] | Lock simulator provenance | Toolchain checker verifies source SHA, clean/pinned external state, Isaac Sim build, Python/packages, and runtime roots | `evidence/provenance/TOOLCHAIN.md` | — |
+| [ ] | Define canonical command and artifact schemas | Existing smoke/reference interfaces have path-independent snapshots; future P1 diagnostic arguments, refusal rules, manifest schema, and tracked-vs-local locations are specified without pretending the CLI exists | `evidence/foundation/RESULTS.md` | — |
 
-| # | Step | Verification gate |
-|---|---|---|
-| 0.1 | Merge `fix/review-2026-07` → `main`; tag `v0-pre-reboot` | CI/tests on branch pass; tag pushed |
-| 0.2 | **Golden rollout dump**: script `scripts/diagnostics/dump_golden_rollout.py` — fixed seed, 4 envs, ~500 steps on current env; save obs/actions/rewards/dones/joint-states per step to `baselines/golden_v0/*.pt` + manifest (commit hash, task, cfg snapshot) | Dump loads; re-running the script byte-reproduces it (determinism check — if nondeterministic, record tolerance now) |
-| 0.3 | **Reference training run**: ~300 iters, current best config, seed 42 (3 seeds if GPU time allows); export TB scalars to `baselines/ref_run_v0/` | Learning curve sane vs historical runs |
-| 0.4 | Copy best checkpoint(s) + eval metrics into `baselines/checkpoints/` with manifest | play.py runs them |
-| 0.5 | Hygiene commit: create `assets/`, `attic/`, `tests/`, `experiments/`, `baselines/` (gitignored); move `RedRhex.usd` + `test_7_description/` → `assets/` (fix cfg paths); patches + skrl → `attic/`; `test_joint_velocity*` → `scripts/diagnostics/`; untrack `.vscode/*.db*` | Old task still trains 5 iters after the moves (`make smoke`) |
+First implementation slice after design approval:
 
-**Exit:** tag exists, golden dump exists, reference curve exists, tree is clean.
-*Nothing below this line starts until Phase 0 is done.*
+1. remove the blanket `tests/` ignore while keeping runtime outputs ignored;
+2. preserve the ignored reward evaluator as defect evidence and recreate its two
+   black-box invariants under `tests/frozen_consumers/` without touching the frozen tree;
+3. add root pytest configuration with explicit CPU test paths and registered `fast`,
+   `golden`, and `isaac` markers;
+4. prevent `test_joint_velocity*.py` from entering default CPU collection without
+   changing their diagnostic behavior yet;
+5. verify collection and the complete CPU suite.
 
----
+P0 implementation order is strict: safe test discovery → clean/pinned toolchain
+provenance → executable task/CLI/default/artifact snapshots plus frozen guard → command
+and artifact schemas. Do not combine these with physics/config/asset changes or
+lint/pre-commit modernization.
 
-## Phase 1 — Scaffolding (2–3 days)
+**P0 exit:** CPU/UI/Node tests are complete and trustworthy, frozen paths have exact
+guards, simulator/toolchain provenance is reproducible, existing smoke/reference
+interfaces are snapshotted, and the future diagnostic command/manifest/artifact schema
+is fixed.
 
-| # | Step | Verification gate |
-|---|---|---|
-| 1.1 | `Makefile` with the canonical targets (templates/Makefile): `lint`, `test-fast`, `test-contract`, `test-golden`, `smoke`, `preflight`, `contract`, `train-ref` | Every target runs on this machine |
-| 1.2 | `pyproject.toml`: pytest markers (`fast`, `isaac`, `golden`), ruff (replaces flake8/black — one tool), pre-commit update | `make lint` clean (allow initial noqa waves in old files) |
-| 1.3 | `tests/` skeleton + port existing tests (panel tests, reward_agent tests, contract parity test) into the tiered layout | `make test-fast && make test-contract` green |
-| 1.4 | CI: `.github/workflows/ci.yml` running lint + fast + contract tiers on CPU (no GPU in CI — see 05 §4) | CI green on a trial PR |
-| 1.5 | CLAUDE.md hierarchy from templates: root + `source/RedRhex/` + `tools/training_panel/` + `ros2_ws/` | Fresh AI session can run `make smoke` from CLAUDE.md alone, zero human hints |
-| 1.6 | `docs/INDEX.md` + `docs/adr/0001-soft-reboot.md` (records this plan as accepted) | — |
+## P1 — Validate legacy simulation, gravity, and frames
 
-**Exit:** a fresh clone + fresh AI session reaches green `make test-fast` and `make smoke` unaided.
+Purpose: decide whether the current simulator is fit to become an oracle.
 
----
+| Status | Diagnostic | Gate | Evidence | Commit/ADR |
+|---|---|---|---|---|
+| [ ] | G0 implement and non-GPU dry-run the diagnostic orchestrator, then write the resolved run manifest with DR/noise/pushes disabled | CLI arguments/refusal/output schema valid; no hidden inputs/overrides | dry-run + manifest/config | — |
+| [ ] | G1 stage/world audit: up axis, units, PhysicsScene, raw/converted gravity vector | One active scene; documented SI scale/Z-up; effective `(0,0,-9.81)` within tolerance | stage/asset JSON | — |
+| [ ] | G2 two isolated canonical bodies in free fall | vertical acceleration within 0.5%; horizontal near zero; mass-independent | raw/fitted CSV+JSON | — |
+| [ ] | G3 asset semantic forward/left/up and spawn/root transforms | dimensions/axes/reset pose match sourced intent | axis report + screenshot | — |
+| [ ] | G4 live articulation mass/density provenance/COM/inertia audit | sourced totals/tensors and scale-aware inertia plausible; unknown facts remain BLOCKED | mass/inertia CSV | — |
+| [ ] | G5 robot whole-COM free fall plus isolated linear/angular damping matrix | zero-damping acceleration and sourced damping responses correct | traces/plots | — |
+| [ ] | G6a ideal-constrained contact/settle, then G6b configured-actuator rest-hold after G8 | both isolate and pass penetration/support/settle bounds; actuator weakness cannot masquerade as contact | contact/force traces + overlay | — |
+| [ ] | G7 full-vector projected-gravity and velocity/angular frame probes | analytic poses and settled rest match documented policy frame | frame CSV/JSON | — |
+| [ ] | G8 action decoding and actuator response/limits | both action families match order/scales/limits and sourced response bands | actuator traces | — |
+| [ ] | G9 task-specific rewards/terminations/command domains | both frozen tasks match numeric component/cause expectations | component table | — |
+| [ ] | G10 expected step-index contract, timing/write cadence, determinism characterization + fresh holdouts | rates/timers/indexing correct; hashed envelope frozen before three holdouts and all hold | timing/repeatability report | — |
+| [ ] | C1 frozen ROS compatibility finding | `MATCH`, `MISMATCH`, or `BLOCKED_ON_IMU_GROUND_TRUTH` recorded read-only | compatibility report | — |
 
-## Phase V — Simulation validation ladder (parallel track; full spec in 09)
+Follow the prerequisite graph in 09: stop failed descendants, but continue independent
+branches. Fix a confirmed blocker one at a time, record an ADR, then rerun the affected
+check and invalidated descendants. Missing physical facts are BLOCKED, not PASS.
 
-Parity (Phase 2) proves new code == old code; this track proves the sim == the intended
-robot. It is **read-only on sim code**, so it runs alongside the other phases without
-conflicting — findings are triaged into Phase 4.3, not fixed inline.
+**P1 exit:** every G0–G10 check is `PASS`; any `FAIL` or `BLOCKED` prevents baseline
+tagging/capture. C1 must be recorded but may be `MISMATCH` or blocked on IMU ground truth
+without forcing changes to the validated simulator or frozen ROS. No baseline tag exists
+before this exit.
 
-| # | Sub-phase | When | Gate |
-|---|---|---|---|
-| V0 | Build ladder scripts + `docs/sim_facts.md` (ground truth, sourced) + RESULTS.md skeleton | during Phase 1 | scripts run headless, emit pass/fail |
-| V0.5 | **Early screen: L0 (asset/mass/joints) + L1 (static) + L3.1/3.4 (rates/determinism)** | **before Phase 0.3's reference run** | no catastrophic finding — else escape hatch: human decides to fix pre-baseline |
-| V1 | Full L0–L5 run; every check ✅/❌/⚠️/⏸ recorded with evidence | parallel to Phase 2 | RESULTS.md complete; ❌ items triaged into Phase 4.3 backlog |
-| V2 | Fix ❌ items one at a time (ADR + re-run affected level + 3-seed retrain check) | = Phase 4.3 | ladder level green after each fix |
-| V3 | Hardware cross-checks (L6.2/L6.3, IMU capture) | Phase 5.4/5.5 | residual table current |
+## P2 — Capture the validated legacy baseline
 
-Standing: graduated invariant checks (rates, frames, limits, action-write count) join
-`make preflight`; the full ladder re-runs after ANY physics/asset change and before any
-hardware session.
+| Status | Task | Gate | Evidence | Commit/ADR |
+|---|---|---|---|---|
+| [ ] | Tag the exact validated behavioral state `v0-validated-pre-reboot` | Tag resolves to the commit used by all captures | tag + manifest | — |
+| [ ] | Capture full local seam-level rollout | Re-run matches declared deterministic envelope | full manifest under `baselines/reboot/<id>/` | — |
+| [ ] | Create reduced committed fixture | CPU replay loads and validates hashes | `tests/fixtures/reboot/<id>/` | — |
+| [ ] | Archive compatible checkpoints/evaluation | Play/eval command succeeds on the tagged state | baseline evidence | — |
+| [ ] | Run fixed-seed reference-training protocol | All seeds complete; metrics/export rules predeclared | TB/metrics manifests | — |
 
----
+Before capture, inventory the current legacy seams and version a raw-capture schema using
+facts available in the legacy env. The raw rollout includes simulator state, actions,
+observations, per-term and total rewards, termination causes/dones, gait/command state,
+resets, config, seeds/RNG state, current boundary facts, and source/asset hashes. P4/P5
+may add immutable *derived* fixtures computed from that raw capture, each hashing its P2
+source; they do not silently recapture or overwrite P2. Full tensors/checkpoints remain
+local/ignored; reduced fixtures and manifests are tracked.
 
-## Phase 2 — Strangler extraction of the env (1.5–2.5 weeks; the core of the reboot)
+**P2 exit:** the legacy oracle is immutable, reproducible, and available at both CI and
+full-local scales.
 
-Per-module recipe (repeat 6×):
+## P3 — Scaffold sibling packages and tests
 
-```
-a. Agent reads the relevant env region, writes core/<module>.py as pure functions
-   (same math, no isaaclab imports) + unit tests with hand-computable cases.
-b. Golden parity test: feed recorded inputs from baselines/golden_v0 through the new
-   module; outputs must match recorded outputs (atol from 0.2 determinism check).
-c. Env class switched to call the module; dead in-env code deleted in the same commit.
-d. make test-fast && make test-golden && make smoke  → commit ("refactor(core): extract X").
-e. /code-review on the diff before merge.
-```
+| Status | Task | Gate | Evidence | Commit/ADR |
+|---|---|---|---|---|
+| [ ] | Add installable `redrhex_contract` skeleton | Imports without Torch/Isaac/ROS/Gym/tools | dependency test | — |
+| [ ] | Add installable `redrhex_core` skeleton | Imports with Torch on CPU; no forbidden imports | dependency test | — |
+| [ ] | Make packaging discover all intended packages | Editable install/import checks pass in base and Isaac environments | install log | — |
+| [ ] | Add contract/core/adapter/sim test tiers and commands | CPU tiers do not initialize Isaac; Isaac tier is explicit | collection logs | — |
+| [ ] | Verify legacy task unchanged | Existing IDs register and tracked smoke command runs | adapter smoke | — |
 
-Extraction order (dependency-driven, easiest first):
+**P3 exit:** package boundaries are real and verified before behavior moves into them.
 
-| # | Module | Notes / traps |
-|---|---|---|
-| 2.1 | `core/kinematics.py` | quat/gravity helpers; trivially testable |
-| 2.2 | `core/buffers.py` | batched episode-sums `(num_envs, n_terms)`; fixes review #13 perf + #19 per-second logging in one move — **behavior-changing for logging only**: declare it, don't parity-gate the log values |
-| 2.3 | `core/observations.py` | layout slices imported from `contract.py`; obs-noise slices get direct unit tests (July bug class) |
-| 2.4 | `core/gait.py` | GaitState dataclass; dt passed once per control step — the July substep bug becomes unrepresentable; FSM gets a pure-CPU simulation test over synthetic command sequences |
-| 2.5 | `core/commands.py` | move resampling/push OUT of `_get_observations` (review #15). **Behavior-changing** (1-step timing shift): ADR + 3-seed short-run comparison vs reference curve instead of step parity |
-| 2.6 | `core/rewards.py` | simplified path only; per-term unit tests; resolve review #12 (diag-sign double count) HERE with an explicit human decision recorded in the ADR |
-| 2.7 | `core/domain_rand.py` | samplers pure; slice indices tested against contract layout |
-| 2.8 | **Delete legacy full-reward path** (~1,000 lines) + `redrhex_symmetry.py` | `use_simplified_rewards` flag removed; recovery = `v0-pre-reboot` tag |
-| 2.9 | Cfg modularization: grouped configclasses + `validate()`; kill alias/deprecated fields; stages as overlays | Old flat names kept as a thin compat shim for panel presets until Phase 5; validation test tier |
-| 2.10 | Consolidate 4 PPO cfgs → base + variants; extract `scripts/common/checkpoint_utils.py` (3 copies → 1) | train/play/eval all resolve the same checkpoint in a test |
+## P4 — Extract stable contract facts
 
-**Exit criteria:** env < 800 lines; `make test-fast` < 30 s covering all core modules;
-full golden parity green (or ADR'd exceptions: 2.2 logging, 2.5 timing, 2.6 decision);
-**Phase-2 gate run:** 300-iter training, 3 seeds, curve within noise band of
-`baselines/ref_run_v0`.
+Move one fact group at a time: joint/action ordering, observation layout/slices,
+dimensions, units, control/simulation rates, scales/limits, then versioning.
 
----
+For every group:
 
-## Phase 3 — Contract unification & deploy hardening (3–5 days)
+1. write a failing hand-computable contract test;
+2. implement the minimal stdlib representation and validation;
+3. compare it read-only with legacy cfg and frozen ROS facts;
+4. adapt `RedRhex` without changing public behavior;
+5. run CPU contract/golden, frozen-boundary, and Isaac smoke gates.
 
-| # | Step | Verification gate |
-|---|---|---|
-| 3.1 | `contract.py` as importable single source (env cfg + obs layout consume it) | golden + smoke still green |
-| 3.2 | `scripts/gen_contract.py` → generated `ros2_ws/.../redrhex_contract.py` with DO-NOT-EDIT header + source hash | `make contract` idempotent; "generated file up to date" test in CI |
-| 3.3 | Extend `deploy.py validate_contract`: rates, scales, limits, `CONTRACT_VERSION` (closes the 125 Hz bug class permanently — review #31/#33) | Deliberately corrupt a constant → validation fails |
-| 3.4 | ONNX equivalence test: export policy, compare onnxruntime vs torch outputs on golden obs (atol 1e-5) | test in `make preflight` |
-| 3.5 | Checkpoint metadata carries contract version + git hash; deploy refuses mismatches | unit test |
+Differences become findings. ROS remains frozen; curriculum and experiment policy stay
+outside the contract.
 
-**Exit:** hand-editing the ROS2 contract is impossible without CI screaming.
+**P4 exit:** stable facts have one core-reboot owner, all legacy/frozen comparisons are
+explicit, and no frozen consumer file changed.
 
----
+## P5 — Extract pure-Torch behavior
 
-## Phase 4 — Research features on the clean base (ongoing; now cheap)
+Recommended dependency order:
 
-Priority-ordered backlog (each item = experiment overlay + report per 06):
+1. kinematics/quaternion/frame helpers;
+2. observation layout, assembly, normalization, and noise;
+3. reward components and total decomposition;
+4. termination causes and reset-mask composition;
+5. action decoding/gating and actuator-intent calculation;
+6. gait/CPG/FSM state;
+7. command sampling/state transitions;
+8. domain-randomization sampling;
+9. buffers/history bookkeeping.
 
-| # | Item | Origin |
-|---|---|---|
-| 4.1 | Contact sensors: author contact-reporter API into the USD (`assets/`), instantiate ContactSensor, replace phase-proxy stance rewards; A/B vs proxy | review #8 — biggest sim-fidelity gap |
-| 4.2 | base_lin_vel at deploy: lin-vel obs dropout during training and/or simple estimator node; pick via eval | review #34 |
-| 4.3 | Physics fidelity pass, **driven by the Phase-V RESULTS.md triage** (09): explicit per-link masses (drop density=2500 hack), main-drive actuator damping/effort revisit, remove fake body drag, plus whatever else the ladder flags — one at a time, each with ADR + ladder re-run + 3-seed validation run | review #9/#10/#12(sim) + 09 |
-| 4.4 | Teacher–student pipeline productionized on new structure (midterm work: privileged teacher + distillation smoke-validated) | 2026_Midterm.md |
-| 4.5 | Terrain curriculum consolidation + `validate_reform_stack`-style checks into `tests/sim/` | midterm |
-| 4.6 | Correct morphological symmetry (if pursued): derive the true symmetry group of the tripod grouping first; ADR before code | review #20 |
-| 4.7 | MPC comparison harness: scripted disturbance/efficiency benchmark scenarios, both controllers, auto-report (the thesis claim generator) | strategy doc §6 |
+Per slice: failing unit test, pure implementation, reduced-fixture parity, adapter
+cutover, full local parity, Isaac smoke, review, then delete only the replaced legacy
+code. Logging normalization, command-timing shifts, reward-intent changes, and physics
+changes are not extraction work and remain deferred.
 
----
+**P5 exit:** planned math/state behavior is CPU-testable, explicit, and golden-equivalent.
 
-## Phase 5 — Panel & hardware readiness (interleave with Phase 4)
+## P6 — Thin Isaac adapter cutover
 
-| # | Step | Gate |
-|---|---|---|
-| 5.1 | Panel: per-run explicit config files replace `active_*_override.json` IPC; overlays from `cfg/experiments/` | queued runs can't race (test with 2 queued runs) |
-| 5.2 | Panel: minimal token auth + bind-localhost default | manual check + doc |
-| 5.3 | Panel perf/semantics: history poll caching, convergence window fix | existing panel tests extended |
-| 5.4 | Hardware IMU capture: record rest `projected_gravity` on the real robot → fill `imu_mount_rpy_deg` / `expected_rest_projected_gravity` in `redrhex_policy.yaml` | rest-attitude gate passes on hardware; **human-present step** |
-| 5.5 | HIL dry run: preflight + safety filter + zero-policy, then baseline policy, legs off ground first | hardware checklist (human-gated, see 04 §5) |
+- Finish converting the environment to snapshots/core calls/single simulator writes.
+- Keep cfg/task/agent/checkpoint compatibility in the adapter.
+- Verify both existing task IDs, train/play/eval, policy export, panel command dry-runs,
+  artifact discovery, and read-only ROS parity.
+- Remove dead legacy paths only with direct replacement evidence.
 
----
+**P6 exit:** `RedRHex` is an Isaac adapter rather than the owner of core math, and every
+frozen consumer still works through its existing boundary.
 
-## Standing rules during the whole migration
+## P7 — Acceptance and handoff
 
-1. Training experiments may continue on `main` between phases — but not *during* an
-   extraction step (keep the golden oracle meaningful).
-2. Any test that flakes gets fixed or quarantined the same day; a red-but-ignored suite
-   destroys the AI workflow (the agent must be able to trust green).
-3. Every behavior-changing step needs: an ADR line, a baseline update, and a validation
-   run. No silent drift — that is the disease this reboot cures.
-4. If a phase stalls > 1 week, cut scope (e.g. skip 2.7's purity, keep DR in env),
-   don't extend the freeze on panel/features indefinitely.
+- Run all CPU tiers, frozen consumer regressions, full golden replay, both task smokes,
+  P1 simulator invariants, export/deploy read-only checks, and fixed-seed reference
+  training/evaluation.
+- Compare against predeclared P2 rules; do not tune thresholds after observing results.
+- Write `evidence/acceptance/<run-id>.md`, record remaining risks, and tag the accepted
+  core reboot.
+
+**P7 exit:** reproducible acceptance evidence exists and no required work remains.
+
+## Post-reboot decisions
+
+Only after P7: decide separately whether to unfreeze panel/remote/reward/ROS work and
+whether to pursue config redesign, asset moves, contact sensors, physics/reward changes,
+hardware estimator work, a new task ID, or other research features.
+
+## Standing rules
+
+1. Update `STATUS.md` and evidence links in the same commit as a completed gate.
+2. Do not check a task without its command, artifact, and commit/ADR.
+3. Do not use a baseline created before P1.
+4. Do not mix structural extraction with an intended behavior change.
+5. Do not modify frozen paths without an explicit scope change.
+6. Keep every implementation slice independently revertible.

@@ -1,80 +1,77 @@
-# RedRHex Sim Facts Sheet — physical ground truth
+# RedRHex P1 Physical Facts Sheet
 
-<!-- Copy to docs/sim_facts.md (Phase V0). This file is the authority the simulation is
-     validated AGAINST (reboot_plan/09). Every value needs a source; "assumed" values
-     propagate a ⚠️ into every validation check that uses them. Update only with a new
-     measurement/datasheet — never to "make the sim pass". -->
+Every value needs a source: measured (date/method), datasheet (document/version), CAD
+(model/version), or assumed. An assumed or missing required value produces `BLOCKED` and
+keeps P2 blocked until sourced. Human acknowledgement records the open risk; it does not
+turn the check into PASS. Never edit a fact to make the sim pass.
 
-Legend for **source**: `measured` (we measured it, date + method) · `datasheet` (link/PDF)
-· `CAD` (model name/version) · `assumed` (guess — flag downstream).
+## Mass, center of mass, and geometry
 
-## 1. Mass & geometry
-
-| Fact | Value | Source | Notes |
+| Fact | Value | Source | Used by |
 |---|---|---|---|
-| Total mass, as deployed (with battery) | ___ kg | measured ____ | weigh on lab scale |
-| Chassis mass | ___ kg | | |
-| Leg module mass (× 6) | ___ kg | | |
-| Battery mass | ___ kg | | |
-| CoM location (chassis frame) | (_, _, _) m | CAD/measured | balance test optional |
-| Body bounding box L×W×H | ___ m | CAD | L0.6 units check |
-| Wheg radius / leg geometry | ___ m | CAD | drives L4.1 speed expectation |
-| Structural material + density | ___ (UPE? ___ kg/m³) | BOM | sim currently uses density=2500 — reconcile |
+| Total deployed mass with battery | ___ kg | measured ___ | G4/G6 |
+| Chassis mass | ___ kg | ___ | G4 |
+| One leg/module mass (×6) | ___ kg | ___ | G4 |
+| Battery mass | ___ kg | ___ | G4 |
+| Whole-robot CoM in semantic chassis frame | (___, ___, ___) m | ___ | G4/G5 |
+| Body bounding box L×W×H | ___ m | CAD ___ | G3 |
+| WHEG radius/geometry | ___ m | CAD ___ | later dynamics |
+| Structural materials/densities | ___ | BOM/CAD ___ | G4 |
 
-## 2. Actuators
+## Semantic frames and asset transform
 
-### Main drive (× 6)
-| Fact | Value | Source |
-|---|---|---|
-| Motor model | | |
-| Gear ratio | | |
-| Stall torque (post-gearbox) | ___ N·m | datasheet |
-| No-load speed (post-gearbox) | ___ rad/s | datasheet |
-| Rated voltage / current | ___ V / ___ A | datasheet |
-| Battery voltage under load | ___ V | measured |
-
-### ABAD (× 6)
-| Fact | Value | Source |
-|---|---|---|
-| Actuator model | | |
-| Max torque | ___ N·m | |
-| Max speed | ___ rad/s | |
-| Mechanical range | ± ___ ° | |
-| Hardware-enforced limit (if any) | ± ___ ° | |
-
-### (Other joints, if actuated — toe/foot: fill or mark N/A)
-
-## 3. Contact & environment
-
-| Fact | Value | Source | Notes |
+| Fact | Value | Source | Used by |
 |---|---|---|---|
-| Leg-tip material | | | |
-| Friction μ vs lab floor | ___ | measured (incline slip, date) | L4.3 |
-| Friction μ vs deployment terrain(s) | ___ | | DR range should bracket this |
-| Leg tip compliance/restitution | | assumed? | affects L4.5 |
+| Chassis semantic forward axis | ___ | CAD/photo ___ | G3/G7 |
+| Chassis semantic left axis | ___ | CAD/photo ___ | G3/G7 |
+| Chassis semantic up axis | ___ | CAD/photo ___ | G3/G7 |
+| Intended spawn pose in world | position ___; quaternion convention/value ___ | design source ___ | G3 |
+| Policy frame relative to root frame | transform ___ | source ___ | G7/G8 |
+| IMU frame relative to semantic chassis | RPY/quaternion ___ | CAD/photo ___ | G8/later hardware |
 
-## 4. Sensors
-
-| Fact | Value | Source | Notes |
-|---|---|---|---|
-| IMU model | | | |
-| IMU mounting orientation (RPY vs chassis frame) | (_, _, _)° | CAD + photo | → `imu_mount_rpy_deg` |
-| IMU axes convention | | datasheet | |
-| Rest projected gravity (sim, obs[6:9]) | (_, _, _) | L1.3 capture, commit ___ | → `expected_rest_projected_gravity` |
-| Rest projected gravity (hardware) | (_, _, _) | measured (Phase 5.4) | must match sim value |
-| Encoder resolution / joint sensing | | | |
-
-## 5. Rates & control (must equal contract.py — listed for hardware cross-check)
+## Main-drive actuator (×6)
 
 | Fact | Value | Source |
 |---|---|---|
-| Policy rate | 60 Hz | contract.py v___ |
-| Low-level bridge rate | ___ Hz | |
-| IMU publish rate | ___ Hz | |
-| Serial/UDP latency (measured round trip) | ___ ms | measured |
+| Motor/gearbox model and ratio | ___ | ___ |
+| Stall/rated torque post-gearbox | ___ N·m | datasheet ___ |
+| No-load/rated speed post-gearbox | ___ rad/s | datasheet ___ |
+| Rated voltage/current | ___ V / ___ A | datasheet ___ |
+| Battery voltage under load | ___ V | measured ___ |
+| Passive damping/coast-down behavior | ___ | measured ___ |
 
-## 6. Known sim↔real residuals (running list, updated from L6.3)
+## ABAD actuator (×6)
 
-| # | Residual | Size | Mitigation | Status |
-|---|---|---|---|---|
-| 1 | e.g. no contact sensing in sim (phase proxy) | | contact reporter (Phase 4.1) | open |
+| Fact | Value | Source |
+|---|---|---|
+| Model | ___ | ___ |
+| Torque/speed limits | ___ N·m / ___ rad/s | ___ |
+| Mechanical range | ___ rad or degrees | ___ |
+| Hardware-enforced limits | ___ | ___ |
+
+## Contact and environment
+
+| Fact | Value | Source |
+|---|---|---|
+| Leg-tip material/geometry | ___ | CAD/BOM ___ |
+| Friction vs lab floor | ___ | measured incline-slip ___ |
+| Restitution/compliance evidence | ___ | measured/datasheet/assumed ___ |
+| Lab ground normal/up convention | ___ | measured/setup ___ |
+
+## Rates and deploy facts (read-only comparison)
+
+| Fact | Value | Source |
+|---|---|---|
+| Physics step rate | ___ Hz | current resolved cfg at commit ___ |
+| Control/policy rate | ___ Hz | current resolved cfg at commit ___ |
+| Low-level/IMU rates | ___ Hz | frozen ROS config commit `5cdc824` |
+| Sim rest projected gravity | (___, ___, ___) | G7 run ___ |
+| Hardware rest projected gravity | (___, ___, ___) | later measured run ___ |
+
+P1 records sim/deploy mismatches but does not edit frozen ROS configuration.
+
+## Known residuals and unknowns
+
+| ID | Fact/residual | Evidence/status | Consequence |
+|---|---|---|---|
+| ___ | ___ | PASS / FAIL / BLOCKED | affected G-checks ___ |

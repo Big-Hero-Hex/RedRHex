@@ -1,143 +1,324 @@
-# 09 — Simulation Validation Ladder (is the sim working as intended?)
+# 09 — Mandatory Pre-Baseline Simulation and Gravity Gate
 
-The migration plan (03) proves **code fidelity**: new code == old code, step for step.
-This document proves **model fidelity**: the simulation == the intended physical robot.
-Parity tests cannot catch a wrong mass, a too-soft actuator, or a flipped frame — they
-would faithfully preserve them. This ladder checks the sim itself, level by level, from
-static asset facts up to whole-robot dynamics and cross-simulator/hardware comparison.
+P1 determines whether the legacy simulation is internally correct and sufficiently
+grounded in sourced physical facts to become the P2 oracle. It does not claim complete
+sim-to-real equivalence; later hardware residuals remain necessary. P1 must pass before
+any golden rollout, validated tag, checkpoint oracle, or reference-training run.
 
-**Known suspects going in** (from the 2026-07 review — expect red results here):
-masses via `density=2500` with comments claiming UPE ≈ 940 kg/m³ (#9); main-drive
-velocity tracking extremely soft (damping=1 vs effort 15) (#10); no contact sensors —
-all stance logic is phase-proxy (#8); `linear_damping=0.05`/`angular_damping=0.10` as
-fake drag on every body incl. the base (#12); 90°-about-X USD frame convention (#32).
+Physical/frame inputs are recorded in
+[`evidence/sim_validation/FACTS.md`](evidence/sim_validation/FACTS.md); results go to
+[`evidence/sim_validation/RESULTS.md`](evidence/sim_validation/RESULTS.md).
 
-## 0. How the ladder works
+## Current hypothesis, not diagnosis
 
-- Every check = a **script** (under `scripts/diagnostics/` or `tests/sim/validation/`)
-  + a **written pass criterion** + an **evidence snapshot**.
-- Results live in `experiments/reports/sim_validation/RESULTS.md`: one row per check,
-  status ✅ pass / ❌ fail / ⚠️ pass-with-caveat / ⏸ blocked-on-ground-truth, with a link
-  to the evidence (log, plot, printed table).
-- Checks that are cheap invariants (rates, frames, limits, slices) graduate into
-  **permanent tests** (`-m isaac` tier, run in `make preflight`). One-time
-  characterizations (step responses, incline slip) stay as diagnostics with archived
-  reports, re-run after any physics change.
-- Pass thresholds below are **starting points**: tightening is free; loosening one
-  after a first run requires a one-line justification in RESULTS.md.
-- The ladder is **read-only on the sim code**. It *finds* problems; it does not fix
-  them inline. Every ❌ becomes a triaged item in the Phase 4.3 physics backlog, fixed
-  one at a time with an ADR + retrain validation (03 standing rule 3). Exception — the
-  escape hatch: a *catastrophic* L0/L1 finding (e.g. total mass off by >2×, wrong units)
-  is worth fixing **before** Phase 0.3's reference training run, because a baseline
-  trained on absurd physics is a weak oracle. That call is the human's (07 §4).
+The configured world gravity is `(0, 0, -9.81)`. The more suspicious boundary is the
+configured `wxyz` quaternion near `(0.7071068, 0.7071068, 0, 0)`, a +90° X rotation. If
+that is the runtime root pose, analytic projected gravity is near `(0, -1, 0)`.
 
-## 1. Ground truth to collect first (without this, sim-vs-sim is circular)
+That may be intentional. It is wrong only if asset, root, policy, observation, command,
+reward, or deploy code uses incompatible semantic axes. Density-derived mass, body
+damping, actuator softness, and phase-proxy contact are also unverified suspects. No
+source change is justified until the probes localize a failed layer.
 
-Fill `docs/sim_facts.md` (template: `templates/sim_facts.md`). Every entry has a
-**source**: measured / datasheet / CAD / assumed (assumed entries are flagged in every
-check that depends on them).
+## Status and blocking policy
 
-| Fact | How to get it | Blocks |
-|---|---|---|
-| Total robot mass (± 0.05 kg) | weigh the robot (with battery, as deployed) | L0.2 |
-| Per-module masses (leg, battery, chassis) if feasible | scale, CAD BOM | L0.2, L0.3 |
-| Main-drive motor: stall torque, no-load speed, gear ratio, rated V/I | datasheet | L2.1–L2.3 |
-| ABAD actuator specs (torque, speed, range) | datasheet | L2.4 |
-| Leg/wheg geometry (radius, shape) | CAD | L4.1 |
-| Leg-tip ↔ lab-floor friction estimate | incline slip test with the real robot or leg module | L4.3 |
-| IMU mounting orientation on chassis | photo + CAD | L5, Phase 5.4 |
-| Battery voltage under load | multimeter during stall test | L2.2 |
-| Material density actually used (UPE?) | CAD/BOM | L0.2 |
+Required G-checks use only `PASS`, `FAIL`, or `BLOCKED`.
 
-## 2. The ladder
+- Every G0–G10 check must be `PASS` before P2. There is no generic waiver for wrong
+  gravity, unexplained frames, unavailable physical facts, invalid mass/inertia,
+  unvalidated actuators, contact instability, reward-axis errors, or timing drift.
+- A threshold may be corrected only with an approved ADR explaining why the original
+  criterion was invalid, followed by a fresh affected run. It does not convert evidence
+  directly to PASS.
+- C1 is a separate frozen-ROS compatibility finding. `MISMATCH` or
+  `BLOCKED_ON_IMU_GROUND_TRUTH` does not force the simulator to copy an unvalidated ROS
+  transform and does not modify `ros2_ws/**`; it remains a declared P7/post-reboot risk.
 
-### L0 — Model & asset integrity (USD/URDF inspection; minutes)
-| # | Check | Pass criterion |
-|---|---|---|
-| L0.1 | Joint inventory: names, order, axes, limits — USD == `contract.py` == URDF source (`assets/robot_description`) | exact match (script dumps all three, diffs) |
-| L0.2 | Mass audit: per-link masses *after* density application, printed + summed | total within ±5% of weighed mass; per-module within ±15% where known |
-| L0.3 | Inertia sanity: principal moments > 0, ratios < 10³, CoM inside body envelope | all links pass |
-| L0.4 | Collision geometry: dump/visualize collision shapes | leg contact surfaces exist; no oversized phantom colliders; counts match expectation |
-| L0.5 | Joint limits vs hardware spec table | sim limits ⊆ hardware limits (sim never commands past hardware) |
-| L0.6 | Scale/units: bounding-box dims vs CAD | within ±2% (catches mm-vs-m class errors) |
+## Execution rules
 
-### L1 — Static behavior (GPU; zero-action agent; minutes)
-| # | Check | Pass criterion |
-|---|---|---|
-| L1.1 | Drop-settle: spawn at init height, zero actions, 3 s | settles < 1 s; base-height std < 1 mm afterwards; |roll|,|pitch| < 2°; no NaN |
-| L1.2 | Ground penetration at rest | max penetration < 3 mm |
-| L1.3 | Rest projected gravity: record obs[6:9] at rest | matches analytic value for the init rotation ± 0.02; **snapshot feeds `expected_rest_projected_gravity` in `redrhex_policy.yaml`** (closes the loop on review #32) |
-| L1.4 | Phantom drift: base xy over 5 s at rest | < 1 cm |
-| L1.5 | Holding torques at rest | each joint |τ| < 30% of effort limit (plausible static load) |
+- Use one environment, fixed seed, and no DR, observation noise, pushes, policy, or gait
+  logic unless a check explicitly requires them.
+- Do not use `zero_agent.py` as a gravity probe: zero actions can still produce implicit
+  actuator and damper forces.
+- Every check emits raw machine-readable data, fitted summary, predeclared thresholds,
+  and status.
+- Stop failed descendants, not unrelated branches. The prerequisite graph—not numeric
+  check order—controls what can still run.
+- Test caches/bytecode go outside frozen paths.
 
-### L2 — Actuator & joint level (GPU; single-robot scripted commands)
-| # | Check | Pass criterion |
-|---|---|---|
-| L2.1 | Main-drive velocity step (e.g. 0→5 rad/s): rise time, steady-state error, applied torque trace | SSE and rise time within a band derived from the intended actuator model; **quantifies review #10 softness** — record even if "pass" |
-| L2.2 | Torque saturation: command beyond capability | τ clamps at effort limit; with DCMotor model, saturation follows the datasheet torque-speed line ± 15% |
-| L2.3 | Velocity limit enforcement | never exceeded by > 2% |
-| L2.4 | ABAD position step: rise, overshoot, SSE; range sweep | overshoot < 15%; hard stop exactly at cfg limits; limits == contract |
-| L2.5 | Gravity-load hold: leg commanded to hold horizontal | holding torque ≈ analytic m·g·r ± 25% |
-| L2.6 | Formalize `test_joint_velocity*.py` into `scripts/diagnostics/` with the above criteria | scripts run headless, emit pass/fail |
+## Prerequisite graph
 
-### L3 — Timing & integration integrity (GPU; mostly graduates to permanent tests)
-| # | Check | Pass criterion |
-|---|---|---|
-| L3.1 | Rates: sim.dt = 1/120, decimation = 2 → control 60 Hz; episode length in seconds correct | asserted against `contract.py` (permanent test) |
-| L3.2 | Action targets written exactly once per control step | counted via instrumentation (regression for the July substep bug — permanent) |
-| L3.3 | Gait phase advances 2π·f per sim-second; FSM timers/cooldowns run in real sim time | analytic check over 10 s rollout (permanent) |
-| L3.4 | Determinism envelope: same seed, 5 runs | spread recorded → pins golden tolerances (05 §3) |
-| L3.5 | Reward/state freshness: which step's kinematics rewards consume | documented now; after step 2.5, rewards use current-step state (permanent) |
+```text
+G0 -> G1 -> G2
+      +----> G3
+      +----> G4
 
-### L4 — Whole-robot dynamics (GPU; scripted open-loop, NO policy)
-| # | Check | Pass criterion |
-|---|---|---|
-| L4.1 | Scripted tripod gait (fixed CPG, no learning): walk 10 m | stable tripod; forward speed consistent with wheg-geometry × rotation-rate expectation ± 25%; heading drift < 10°/10 m |
-| L4.2 | Push recovery: standing robot, calibrated lateral impulse | survives small push, falls under large one — thresholds recorded (baseline for policy comparisons later) |
-| L4.3 | Incline slip: static robot on ramp, sweep angle | slips at atan(μ) ± 5° vs measured friction |
-| L4.4 | Energetics during scripted gait: Σ|τ·ω| | ≤ total rated motor power; cost of transport in RHex-literature range (~0.5–3) — record the number |
-| L4.5 | 10 cm drop test | lands without solver explosion; peak forces finite; settles < 1 s |
-| L4.6 | Fake-drag quantification: base free-fall / swing with body damping on vs off | effect measured and documented (input to the Phase-4.3 decision on review #12-sim) |
+G2 + G3 + G4 ------> G5
+G3 + G4 + G5 ------> G6a ideal-constrained contact
+G3 + G4 -----------> G8 actuator/rest-hold
+G6a + G8 ----------> G6b actuator-held settle
+G1 + G3 -----------> G7a analytic frames
+G6b ----------------> G7b settled-rest frame
+G7a + G7b + G8 ----> G9 rewards/dones
+G0 + G1 + G3 ------> G10a timing/freshness characterization
+G6b + G8 + G9 -----> G10b determinism holdout
+G7 + G9 ------------> C1 frozen ROS comparison
+```
 
-### L5 — Observation & frame truth (GPU; teleport-based analytic checks; graduates to permanent)
-| # | Check | Pass criterion |
-|---|---|---|
-| L5.1 | Set base to known quaternions (0°, ±90° roll/pitch/yaw) → projected-gravity obs | matches closed-form ± 0.02 for every pose |
-| L5.2 | Constant forward motion → base_lin_vel obs | +x in body frame regardless of world heading |
-| L5.3 | Spin about +z → base_ang_vel obs | sign and magnitude match |
-| L5.4 | Obs slice layout vs contract | already tier-2 (05) — cross-referenced here for completeness |
-| L5.5 | Command frame: velocity command executed in the intended (body/world) frame | scripted check documents the convention |
-| L5.6 | ROS `observation_builder` fed a synthetic IMU quat equal to the sim rest attitude → identical obs vector as sim | bitwise/1e-6 match (extends the existing golden-obs deploy readiness) |
+G3 and G4 may proceed independently. For example, missing measured mass blocks G4 and
+its descendants but does not prevent analytic frame work in G7.
 
-### L6 — Cross-validation against external references
-| # | Check | Pass criterion |
-|---|---|---|
-| L6.1 | MuJoCo cross-sim (existing `mujoco_rollout.py`): same scripted L4.1 gait | both stable; forward speed within 20% of each other; disagreement = finding, not failure |
-| L6.2 | Hardware open-loop: same scripted gait on the real robot (bench, then floor) — **human-present** (Phase 5) | speed, current draw, gait video vs sim; residuals recorded |
-| L6.3 | Sim2real residual table maintained as hardware data arrives | every known gap listed with size + mitigation status |
+## G0 — Reproducible run manifest
 
-## 3. Scheduling (how this weaves into 03)
+Record the P0 toolchain-manifest ID plus source commit/dirty policy, USD/config hashes,
+task, seed/RNG, dt/decimation, device/GPU, exact command, and every disabled override,
+randomization, noise, and push setting.
 
-| Sub-phase | What | When |
-|---|---|---|
-| **V0 — build** | Write the ladder scripts + `docs/sim_facts.md` skeleton + RESULTS.md skeleton | during Phase 1 (agent work, CPU-heavy, GPU-light) |
-| **V0.5 — early screen** | Run L0 + L1 + L3.1/3.4 only | **before Phase 0.3's reference training run** — this is where the escape hatch applies |
-| **V1 — full run** | Execute L0–L5 completely, triage all findings in RESULTS.md | parallel to Phase 2 (read-only, so it can't conflict with extractions; respect one-GPU discipline 04 §4) |
-| **V2 — fix** | ❌ items fixed one at a time: ADR + fix + re-run affected ladder level + 3-seed retrain check | = Phase 4.3, now *driven by RESULTS.md* instead of hand-picked |
-| **V3 — hardware** | L6.2/L6.3 + IMU capture | Phase 5.4/5.5 |
-| **Standing** | Graduated permanent checks run in `make preflight`; full ladder re-run after ANY physics/asset/actuator change and before any hardware session | forever |
+**Pass:** the manifest is complete, one environment is resolved, and there are no hidden
+inputs or unapproved dirty states.
 
-Ordering note: V0.5 exists because Phase 0's reference run is only a useful oracle if
-the physics under it isn't absurd. L0+L1 take under an hour and de-risk the whole
-baseline investment.
+## G1 — Composed stage, units, and world gravity
 
-## 4. Deliverables checklist
+Dump composed-stage `upAxis`, `metersPerUnit`, every PhysicsScene and the active scene.
+Archive the raw gravity direction, nonnegative magnitude, normalized direction, ground
+normal, and the SI vector after converting stage-length units with `metersPerUnit`.
 
-- [ ] `docs/sim_facts.md` filled, every entry sourced (measured/datasheet/CAD/assumed)
-- [ ] `scripts/diagnostics/` ladder scripts, each emitting machine-readable pass/fail
-- [ ] `experiments/reports/sim_validation/RESULTS.md` — full L0–L5 run recorded
-- [ ] Permanent subset wired into `tests/sim/validation/` + `make preflight`
-- [ ] Rest-attitude snapshot (L1.3) written into `redrhex_policy.yaml`
-- [ ] Phase-4.3 backlog = triaged ❌/⚠️ list, priority-ordered by expected sim2real impact
-- [ ] Ladder re-run recorded after each physics fix (evidence chain per ADR)
+**Pass:** one active scene; Z-up; documented units; normalized gravity points world -Z;
+SI vector differs from `(0,0,-9.81) m/s²` by less than `1e-5`; ground normal is +Z.
+
+Per-body gravity flags are intentionally checked in G4/G5, not used to misclassify an
+asset problem as a world-gravity problem.
+
+## G2 — Canonical-body free fall
+
+Drop two isolated primitive bodies of different masses from 10 m for 0.5 s with no
+ground/contact, damping, controller, or external force. Record SI position/velocity at
+each physics step; fit velocity and integrator-aware position independently.
+
+**Pass:** `|az + 9.81| <= 0.049 m/s²`; horizontal acceleration magnitude below
+`0.01 m/s²`; mass-to-mass difference below `0.01 m/s²`; fit disagreement below
+`0.02 m/s²`.
+
+Failure here is stage/simulator physics, not the robot asset.
+
+## G3 — Asset, root, semantic axes, and quaternion convention
+
+Before running, declare with sources:
+
+- handedness, world axes, and semantic robot forward/left/up;
+- quaternion storage (`wxyz`), direction (root-to-world), multiplication/composition
+  order, and the fixed root-to-policy transform;
+- intended spawn transform and CAD dimensions.
+
+Inspect asset/source units, transforms, visual/collision bounds, and reset quaternion.
+Transform semantic basis markers through the spawn pose.
+
+**Pass:** dimensions agree with sourced CAD/measurement within 2%; semantic basis lands
+on intended world axes within 2°; reset quaternion is within 0.05° of intended pose. The
+root-to-policy transform must be a proper rotation: `max|R^T R - I| <= 1e-6`,
+`|det(R)-1| <= 1e-6`, `max|R^-1-R^T| <= 1e-6`, and norm preservation within `1e-6`.
+If quaternion-backed, quaternion norm and independently constructed matrix agreement are
+also within `1e-6`. Missing semantic/CAD truth is `BLOCKED`, not inferred from whichever
+current code path is convenient.
+
+## G4 — Mass, density provenance, center of mass, and inertia
+
+From the live articulation, record for every link:
+
+- prim/name and gravity-enabled flag;
+- effective mass source: explicit mass, density × computed volume, inherited override,
+  or fallback;
+- effective density/volume and sensitivity to relevant density overrides;
+- world/local CoM and full inertia about the CoM;
+- eigenvalues, triangle inequalities, principal ratio, and scale-aware `I/(m*L²)` using
+  sourced link dimensions.
+
+Compare total/modules with weighed/CAD facts. Check each CoM against the sourced physical
+envelope or aggregate visual hull; do not assume a collision AABB is always the body.
+
+**Pass:** total within 5% of measured deployed mass; sourced modules within 15%; every
+body has intended gravity; mass provenance is explained; inertias are finite/SPD,
+dimensionally plausible, CAD-consistent where available, and satisfy triangle
+inequalities; CoMs lie in sourced physical envelopes. Missing measurements/CAD block G4.
+
+## G5 — Robot whole-COM free fall and damping isolation
+
+Spawn the articulation high without terrain, policy, controller targets, or self-contact.
+Compute whole-system COM position and velocity from each link's mass, COM position, and
+COM velocity—not link-origin velocity.
+
+Run linear/angular damping combinations:
+
+```text
+(0, 0), (configured linear, 0), (0, configured angular), (configured linear, configured angular)
+```
+
+Also run a vacuum spin-down probe for angular damping.
+
+**Pass:** zero-damping COM acceleration is within 1% of `(0,0,-9.81)` and horizontal
+acceleration below `0.02 m/s²`; linear-only affects translation as predicted; angular-only
+spin-down matches the declared model; no unexplained actuator/external force appears.
+Configured damping must fit a band sourced before the run from hardware/CAD/model intent;
+without that band, its physical-fidelity result is BLOCKED.
+
+## G6 — Physical contact, clearance, drop, and settle
+
+G6a first records signed spawn/rest-pose clearance, then drops/settles on flat ground
+using ideal diagnostic joint constraints—not configured actuators—and no policy/CPG.
+This isolates collision/contact behavior. G6b repeats with configured actuator rest-hold
+only after G8 passes, so actuator weakness cannot masquerade as contact failure. Define
+separation sign and log all external contact pairs, points, normals, separation,
+impulses/forces, colliders, whole-COM/root state, chassis angular speed, constraint or
+actuator forces, and kinetic energy at physics rate.
+
+**Pass for both G6a and G6b:** pre-step rest-pose penetration below 1 mm; steady maximum penetration below
+3 mm; no nominal base-ground contact; final 0.5 s average vertical support within 5% of
+`M*g` after summing all external contacts; horizontal net force below 5% of `M*g`; settle
+within 1 s and remain 0.5 s with COM speed below `0.01 m/s`, chassis angular speed below
+`0.02 rad/s`, and base-height standard deviation below 1 mm. G6b actuator forces must
+also remain inside the sourced G8 rest-hold bands. A G6a pass/G6b fail is an actuator or
+rest-controller finding, not a contact failure.
+
+The gait-phase `_contact_count` is not physical contact evidence. If later promoted as a
+proxy, require physical-contact precision and recall each at least 0.90.
+
+## G7 — Full-vector frame and projected-gravity truth
+
+Independently generate complete numeric vector oracles for neutral, semantic ±10° and
+±90° roll/pitch, and multiple world-yaw rotations about +Z using the declared
+root-to-world composition order. For every pose record:
+
+- runtime quaternion and full expected/actual projected-gravity vector;
+- expected/actual policy-frame linear velocity for injected world motions;
+- expected/actual policy-frame angular rate for semantic roll/pitch/yaw;
+- vector errors and norms, not only dot products.
+
+After G6b, separately capture the settled-rest projected-gravity mean and standard
+deviation; exact teleported `q0` is not a substitute for deployed rest.
+
+**Pass:** every full vector/sign matches the independent oracle within `0.002` for
+projected gravity and the predeclared velocity/rate tolerance; observation values match
+the independently recomputed values within `1e-5`; norm within `0.002`; world yaw leaves
+gravity invariant. Settled-rest statistics are stable and explained by the declared
+root-to-policy transform. Against an independently sourced neutral chassis attitude,
+the settled-rest mean angular error must be at most 2° and angular standard deviation at
+most 0.2° over the final 0.5 s. Missing neutral-pose truth is `BLOCKED`.
+
+## G8 — Actuator and action-intent response
+
+Without a learned policy, probe both action families:
+
+- main-drive velocity steps across the valid range: target, measured velocity, applied
+  torque, saturation, rise time, steady-state error, and torque-speed behavior;
+- ABAD/rest-hold and position steps: target/actual position, torque, overshoot, settling,
+  limit enforcement, and gravity-load hold.
+
+**Pass:** pure action decoding obeys current scales/order/limits; simulator targets and
+applied forces are finite and repeatable; saturation/limits are enforced; response bands
+match pre-run actuator datasheet/measured/model facts. Missing actuator truth blocks G8.
+
+## G9 — Task-specific rewards, terminations, and command domains
+
+For both frozen Gym IDs, build a matrix from the task's actual configured command domain.
+Do not demand negative-forward symmetry if a task excludes negative `vx`. For each valid
+forward/lateral/yaw command and analytic G7 state, record every reward component, total,
+termination cause, and done mask with precomputed numeric/sign expectations.
+
+**Pass:** each tracking term is maximal for its matching semantic motion; required sign
+symmetries and asymmetric task rules match explicit numeric expectations; tilt/fall terms
+respond only to semantic orientation; termination causes match their declared thresholds.
+
+If confirmed, record the dormant legacy `sum(projected_gravity[:2]^2)` assumption as a
+dormant defect; do not enable, delete, or fix it during P1.
+
+## G10 — Timing, freshness, write cadence, and determinism
+
+Before execution, fill an expected step-index table in `FACTS.md` for action intent,
+physics state, observation, each reward group, termination/done, and reset mutation. Use
+symbols such as pre-step `S_k`, applied intent `A_k`, and post-decimation `S_(k+1)` so
+“fresh” has an exact meaning rather than a log-message interpretation.
+
+Instrument actual execution over a fixed input/command rollout:
+
+- physics-step rate, control rate/decimation, and substep count;
+- action-intent computation count (must be once per control step);
+- adapter target-flush/write count and exact substep cadence (measured, not assumed once);
+- expected versus actual step index for every state/observation/reward/done consumer;
+- episode duration, command/gait timers, phase advancement, resets, and cooldowns in
+  simulated seconds;
+- same-seed, fresh-process repeatability for root/link/joint state, observation slices,
+  reward components/total, termination/done/reset sequences, and gait/command state.
+
+The determinism algorithm is fixed before data:
+
+1. Declare per-channel numeric floors `F_m`, normalization scales, rollout length, seed,
+   input sequence, and metrics: maximum absolute error, normalized RMS error, first
+   threshold-crossing step, and exact equality for integers/booleans/event sequences.
+2. Run five characterization repeats in fresh simulator processes. For each float metric,
+   let `D_m` be the maximum pairwise divergence and freeze `T_m = max(F_m, 2*D_m)` in a
+   hashed envelope file. Do not inspect holdout output before that file is written.
+3. Restart the runtime and run three holdout repeats. Every float metric must remain
+   within its frozen `T_m`; done/reset/event sequences and integer fields must be exact.
+4. If the envelope grows with rollout length, hides a semantic divergence, or requires
+   a physically meaningless tolerance, G10 fails even if the formula can contain it.
+
+**Pass:** rates and durations equal resolved cfg/declared behavior; intent computes once
+per control step; target flushing matches the measured/documented Isaac adapter contract;
+the actual step-index table exactly matches the approved expected table; no
+substep-multiplied timer exists; all three fresh holdouts satisfy the previously frozen
+envelope and exact event rules. The hashed G10 envelope becomes the P2 replay tolerance.
+
+## C1 — Frozen ROS/deploy compatibility finding
+
+After G7/G9, feed equivalent synthetic state through frozen deploy observation/action
+logic read-only. Report exactly one of:
+
+- `MATCH` with numeric residuals;
+- `MISMATCH` with the differing frame/fact and downstream risk;
+- `BLOCKED_ON_IMU_GROUND_TRUTH` with the missing measurement.
+
+C1 does not force the simulator to match unvalidated deploy transforms and does not edit
+ROS. The finding is carried into P4 read-only contract comparison and P7 risk review.
+
+## Diagnostic implementation shape
+
+After design approval, prefer small scripts sharing one manifest/output helper:
+
+```text
+scripts/diagnostics/audit_stage_asset.py
+scripts/diagnostics/probe_gravity.py --case canonical|robot --damping <case>
+scripts/diagnostics/probe_contact_settle.py
+scripts/diagnostics/probe_frames_rewards.py
+scripts/diagnostics/probe_actuators.py
+scripts/diagnostics/probe_timing_determinism.py
+```
+
+Graduate stable invariants into explicit Isaac tests under `tests/sim/validation/` after
+P1. P0 reclassifies the existing root velocity scripts but does not treat their current
+hard-coded paths/parameters as validated probes.
+
+## Evidence bundle
+
+Tracked summary: `reboot_plan/evidence/sim_validation/RESULTS.md`.
+
+Raw bundle under `artifacts/reboot/<run-id>/` includes manifest/resolved config,
+stage/axis/asset dump, mass/density/inertia tables, gravity/contact/frame/actuator/timing
+traces, fitted summaries with thresholds, plots, and relevant overlays. Every tracked
+result links artifact hashes.
+
+## Localization guide
+
+```text
+G1/G2 fail                -> stage/world/simulator gravity
+G2 passes; G3/G4/G5 fail -> asset transforms, body flags, mass/inertia, damping/forces
+G5 passes; G6 fails       -> collision/contact/rest control
+G3 passes; G7 fails       -> root/policy/observation frame
+G3/G4 pass; G8 fails      -> action decoder/actuator model
+G7/G8 pass; G9 fails      -> reward/termination/command assumption
+G10 fails                 -> timing, freshness, substep, or reproducibility
+C1 mismatch               -> frozen deploy compatibility risk, not a simulator rewrite
+all G0–G10 pass           -> legacy simulator may become the P2 oracle
+```
+
+The user can add the original visual symptom later to select traces/video for inspection;
+it does not bypass this dependency graph.

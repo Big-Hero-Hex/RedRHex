@@ -1,13 +1,15 @@
-# PR / merge checklist
+# Core-reboot change checklist
 
 <!-- Paste into the PR description (or run through it mentally when self-merging).
      This checklist is the stand-in for GPU CI — do not skip the preflight line. -->
 
 - [ ] One issue/step per commit; messages name the plan step or finding
-- [ ] `make test` green (CI confirms) — and no test was weakened/skipped to get there
-- [ ] `make preflight` run locally on the final commit (GPU tiers) — paste the tail
-- [ ] Touched contract/layout? → `make contract` ran; generated file committed together
-- [ ] Behavior-changing? → ADR linked + baseline updated + validation run id
+- [ ] Current `STATUS.md` gate and exact required commands identified
+- [ ] Focused test and required aggregate CPU tier green; no test weakened/skipped
+- [ ] Frozen tree guard green; no panel/remote/reward-agent/ROS source changed
+- [ ] Isaac change? Runtime provenance passed and required local adapter/sim gate ran
+- [ ] Contract/layout change? Read-only legacy/ROS parity result recorded
+- [ ] Behavior-changing? Kept out of extraction or explicitly approved with ADR and rerun
 - [ ] New failure mode discovered? → regression test added in the cheapest tier
-- [ ] CLAUDE.md / plan checkboxes updated if this makes them stale
-- [ ] /code-review findings addressed (or explicitly waived with a reason)
+- [ ] `STATUS.md` and evidence links updated only if the gate truly advanced
+- [ ] Independent review findings addressed or explicitly accepted with a reason

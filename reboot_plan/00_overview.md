@@ -1,102 +1,80 @@
-# 00 — Overview: Why, What, and Definition of Done
+# 00 — Overview: Core-First Soft Reboot
 
-## 1. Why a soft reboot now
+## Why reboot now
 
-The project has succeeded at its research goals faster than its structure could keep up:
+RedRHex has working research and operations around a core that is difficult to reason
+about in isolation. The Isaac environment currently mixes simulator I/O with observation
+and reward math, gait/command state, randomization, buffers, and compatibility behavior.
+The default repository test collector is also unsafe: it imports two root Isaac scripts
+as tests, while `.gitignore` hides intended tests.
 
-- **The core env is a 4,478-line monolith** (`redrhex_env.py`) mixing a legacy ~50-term
-  reward path (dead by default), the simplified reward path, the lateral FSM/CPG, domain
-  randomization, visualization, and buffer management. The cfg is 1,806 lines with ~250
-  scalars including deprecated fields and alias pairs that silently desync.
-- **Cross-boundary constants drift.** The sim↔ROS2 deploy contract was hand-mirrored and
-  drifted (125 Hz vs 60 Hz policy rate, ABAD scale/limits) — the single most dangerous
-  class of bug found in the 2026-07 review. A parity test now exists, but the structure
-  still invites drift.
-- **Verification is slow and manual.** Almost nothing can be tested without launching
-  Isaac Sim on the GPU. That is the #1 bottleneck for AI-heavy development: an agent
-  that must wait minutes (or a human eyeball) for every check is throttled to human speed.
-- **The 2026-07 review found 35 issues**; the high-severity ones are fixed on
-  `fix/review-2026-07`, but roughly a third were *structural* (duplication, dead code,
-  fragile IPC via JSON files, missing validation) — symptoms that will regenerate new
-  bugs unless the structure changes.
+A hard rewrite would discard valuable behavior and make comparison impossible. This
+soft reboot retains the existing task and operational interfaces, validates the legacy
+simulator, and then replaces internal seams incrementally with evidence at every gate.
 
-A hard rewrite would throw away validated physics knowledge, reward-shaping experience,
-a working deploy stack, and months of training insight. A soft reboot keeps all of that
-and replaces only the structure.
+## Scope
 
-## 2. Scope
+### In scope
 
-**In scope (changes):**
-- Repo layout, module boundaries, config architecture inside `source/RedRhex`.
-- Single-source contract generation for the ROS2 stack.
-- Test harness, CI, Makefile, CLAUDE.md hierarchy, experiment management.
-- Repo hygiene (stray root files, asset placement).
-- Deferred review items get scheduled slots (contact sensors, lin-vel estimator,
-  physics tuning, panel auth, perf).
+- A reproducible P0 foundation: safe test discovery, runtime provenance, frozen-path
+  guards, and explicit artifact policy.
+- A mandatory pre-baseline simulation/gravity diagnostic gate.
+- A sibling, dependency-light `redrhex_contract` package for stable interface facts.
+- A sibling, Torch-only `redrhex_core` package for testable behavior/math.
+- The existing `RedRhex` package retained and reduced to the Isaac Lab adapter.
+- CPU unit/contract/golden tests, Isaac adapter/simulation tests, and acceptance evidence.
 
-**Out of scope (kept as-is unless a phase explicitly touches them):**
-- The research direction and reward design philosophy (midterm report stands).
-- Training panel feature set (frozen during migration; auth + IPC cleanup scheduled later).
-- Trained checkpoints, logs, tensorboard history (kept locally, never in git).
-- Isaac Lab / Isaac Sim versions (Isaac Lab 2.3.2, Isaac Sim 5.1.0-rc.19,
-  conda `env_isaaclab_bin`) — do not upgrade mid-migration.
+### Frozen during the reboot
 
-## 3. The five principles
+- Working/training panel and its remote system: `tools/training_panel/**`.
+- Reward agent: `tools/reward_agent/**`.
+- ROS2 implementation and interfaces: `ros2_ws/**`.
+- Existing Gym IDs, train/play/evaluation entry points, checkpoint compatibility,
+  observation/action dimensions, and run/log/artifact behavior.
 
-1. **Behavior-preserving by proof, not by hope.** Every structural change is gated by a
-   parity test against a frozen golden baseline (fixed-seed rollout dump). A change
-   either provably preserves behavior, or is explicitly declared behavior-changing and
-   gets its own baseline update + short validation run.
+Frozen means read-only plus regression testing, not removed or disabled.
 
-2. **Testable without the simulator.** Observation math, reward math, gait/CPG state
-   machines, DR sampling, and command logic become pure-torch functions with no
-   `isaaclab` import. The env class shrinks to orchestration. Result: the fast test
-   tier runs on CPU in seconds — the precondition for AI agents to self-verify.
+### Deferred until after core acceptance
 
-3. **One source of truth per fact.** Control rate, joint ordering, obs layout, action
-   scaling, ABAD limits: defined once in `contract.py`, consumed by the env, exported
-   to the ROS2 stack by a generator, guarded by parity tests. Same principle for
-   checkpoint-resolution helpers (currently 3 drifting copies) and PPO configs
-   (currently 4 near-copies).
+- Panel auth/IPC/performance work, remote-system changes, reward-agent integration, and
+  ROS generation or deploy changes.
+- Physics/reward research changes, contact sensors, estimator work, config redesign,
+  asset relocation, broad repository cleanup, and new task IDs.
+- Any Isaac Lab/Sim upgrade.
 
-4. **AI does the work; harnesses do the checking; humans do the judgment.** The agent
-   plans, implements, tests, reviews, and documents. Humans decide reward-shaping
-   intent, physics plausibility, research direction, and anything touching hardware.
-   The boundary is enforced by workflow (04) and guardrails, not by trust.
+## Principles
 
-5. **Small, reversible steps.** One issue per commit (this already worked well in the
-   July fix branch). Extraction order chosen so each step is shippable and revertible.
-   No long-lived divergent branches during migration.
+1. **Validate before preserving.** A golden dump of wrong gravity or frame semantics
+   would only preserve a bug. P1 must pass before P2 captures a baseline.
+2. **One-way dependencies.** Core code cannot import Isaac, Gym, ROS, panel, remote, or
+   reward-agent code. The adapter may depend on core and contract, never the reverse.
+3. **Behavior-preserving extraction.** Structural extraction does not include intended
+   reward, timing, logging, or physics changes. Those need separate post-reboot decisions.
+4. **Explicit state and evidence.** Time, RNG state, command/gait state, reset masks,
+   config, and provenance are recorded at the seams needed for replay.
+5. **Small, reversible cuts.** One seam at a time; legacy code is deleted only when its
+   replacement has direct unit, golden, adapter, and smoke evidence.
+6. **Humans judge physical truth.** Automation measures and localizes; it does not turn
+   an unknown or blocked physical fact into a pass.
 
-## 4. Definition of done (reboot complete when…)
+## Definition of done
 
-- [ ] `redrhex_env.py` < 800 lines; all math lives in `core/` modules with unit tests.
-- [ ] `pytest -m fast` passes on CPU in < 30 s with no Isaac Sim installed.
-- [ ] Golden-parity suite proves the restructured env is step-for-step identical to the
-      pre-reboot env for a fixed seed (or every intentional difference is documented in
-      an ADR with a validation run).
-- [ ] ROS2 `redrhex_contract.py` is generated, not hand-written; `make contract` +
-      parity test in CI; `deploy.py validate_contract` checks rates and scales.
-- [ ] Config is layered (base/stage/experiment); no alias fields; stage-list lengths and
-      cross-field constraints validated at construction.
-- [ ] Legacy full-reward path deleted (recoverable via git tag `v0-pre-reboot`).
-- [ ] CI (CPU tiers) green on every PR; `make preflight` (GPU tiers) documented and
-      required before merge to main.
-- [ ] CLAUDE.md hierarchy in place; a fresh AI session can run smoke train, tests, and
-      a standard experiment without human path-hunting.
-- [ ] A reference training run on the rebooted code matches the frozen baseline run's
-      learning curve within noise (3-seed check).
-- [ ] Simulation validation ladder (09) executed L0–L5 with evidence in
-      `experiments/reports/sim_validation/RESULTS.md`; every ❌ finding either fixed
-      (ADR + ladder re-run + retrain check) or explicitly accepted with a reason; the
-      invariant subset runs permanently in `make preflight`.
+- [ ] P0–P7 are complete with linked command, artifact, and commit/ADR evidence.
+- [ ] `redrhex_contract` imports with the Python standard library only and owns stable
+      ordering, dimensions, units, rates, scales, and versioning.
+- [ ] `redrhex_core` imports and runs on CPU with Torch but without Isaac/ROS/Gym/UI.
+- [ ] `RedRhex` remains the Isaac adapter; both current Gym IDs and current CLI/checkpoint
+      behavior pass regression tests.
+- [ ] The mandatory gravity/frame/model gate passes before the baseline tag exists.
+- [ ] Small CI fixtures and full local artifacts have a consistent, documented policy.
+- [ ] Every extracted slice passes hand-computable unit tests and golden replay.
+- [ ] Frozen consumer tree guards and their existing regressions pass at acceptance.
+- [ ] Simulator smoke and invariant diagnostics pass on the pinned environment.
+- [ ] The rebooted fixed-seed reference protocol is within its predeclared comparison
+      rules, or an explicitly approved ADR explains an intentional difference.
+- [ ] An acceptance report and final reboot tag make the result reproducible.
 
-## 5. What "smoothest and fastest development" concretely means after the reboot
+## Completion boundary
 
-| Task | Before | After |
-|---|---|---|
-| Verify a reward-math change | Launch Isaac Sim, watch robot / read TB | `pytest tests/unit/test_rewards.py` in ~2 s, then one smoke train |
-| Change ABAD limit | Edit cfg + remember to edit ROS2 contract + panel | Edit `contract.py`; `make contract` regenerates everything; CI enforces |
-| Add an experiment variant | Edit the 1,806-line cfg in place, lose the old values | Drop a 20-line experiment overlay file; both versions coexist |
-| AI agent works overnight | Not safe — no way to self-check | Agent runs `make preflight`, files report, commits per issue |
-| Find why a run regressed | Diff memory + guesswork | Diff two checked-in experiment overlays + decision log |
+The core reboot ends at P7. Unfreezing the panel, remote system, reward agent, or ROS is
+a new decision after P7, even if they already work unchanged against the accepted core.

@@ -1,141 +1,176 @@
-# 02 — Target Architecture
+# 02 — Current and Target Architecture
 
-## 1. Design rules (dependency law)
+## Dependency law
 
-```
-Rule 1: core/ modules are pure torch — NO isaaclab/omni imports. CPU-runnable.
-Rule 2: the env class orchestrates; it computes nothing non-trivial itself.
-Rule 3: contract.py is the ONLY place cross-boundary constants are written by hand.
-        Everything else (env cfg, ROS2 contract, panel checks) derives or is generated.
-Rule 4: configs are layered; an experiment never edits a base file.
-Rule 5: anything an AI agent may edit has a test that fails when it's wrong.
+```text
+redrhex_contract -> Python standard library only
+redrhex_core     -> Torch + redrhex_contract
+RedRhex adapter  -> Isaac Lab + redrhex_core + redrhex_contract
+frozen consumers -> existing scripts/Gym/checkpoint interfaces only
 ```
 
-Rule 1 is the keystone: it is what makes tests fast, which is what makes AI-heavy
-development work (see 04). Isaac Lab's `DirectRLEnv` still owns sim stepping; the env
-class passes tensors *into* pure functions and writes results back.
+Reverse imports are prohibited. In particular, contract/core code must never import
+Isaac, Gym, ROS, the panel, remote system, or reward agent.
 
-## 2. Target repo layout
+## Current feature graph
 
-```
-RedRHex/
-├── CLAUDE.md                      # root agent brief (template in templates/)
-├── Makefile                       # ALL verification entry points (templates/Makefile)
-├── pyproject.toml                 # ruff config, pytest config, markers
-├── README.md                      # rewritten: 1-page quickstart, points at docs/INDEX.md
-├── assets/
-│   ├── RedRhex.usd
-│   └── robot_description/         # ← test_7_description (URDF, meshes, converted USDs)
-├── source/RedRhex/RedRhex/        # installable package (path kept — Isaac Lab template compat)
-│   ├── contract.py                # ★ single source of truth (see §4)
-│   ├── core/                      # ★ pure torch, no isaaclab imports
-│   │   ├── observations.py        # obs assembly + normalization + layout (from contract)
-│   │   ├── rewards.py             # simplified reward terms as pure functions
-│   │   ├── gait.py                # CPG phase, tripod grouping, lateral FSM
-│   │   ├── commands.py            # command sampling / resampling / curriculum gates
-│   │   ├── domain_rand.py         # DR sampling + obs noise (correct slices, tested)
-│   │   ├── kinematics.py          # frame math, projected gravity, quat helpers
-│   │   └── buffers.py             # episode sums (batched!), history buffers
-│   ├── tasks/direct/redrhex/
-│   │   ├── redrhex_env.py         # thin orchestrator (< 800 lines): sim I/O + core calls
-│   │   ├── cfg/
-│   │   │   ├── base.py            # grouped configclasses: SimCfg, RobotCfg, ObsCfg,
-│   │   │   │                      #   RewardCfg, CommandCfg, DRCfg, StageCfg (+validate())
-│   │   │   ├── stages.py          # stage 1..5 overlays
-│   │   │   └── experiments/       # 20-line experiment overlays (checked in, immutable)
-│   │   └── agents/
-│   │       └── rsl_rl_ppo_cfg.py  # ONE base cfg + small named variants
-│   └── (gym registration keeps Template-Redrhex-Direct-v0 working; adds Redrhex-v1)
-├── scripts/
-│   ├── rsl_rl/                    # train/play/eval — import shared checkpoint_utils
-│   ├── common/checkpoint_utils.py # ← the 3 drifting copies, unified
-│   ├── diagnostics/               # test_joint_velocity*.py etc.
-│   └── gen_contract.py            # contract.py → ros2_ws generated file (§4)
-├── ros2_ws/src/                   # unchanged layout; redrhex_contract.py now GENERATED
-├── tools/
-│   ├── training_panel/            # frozen during migration; Phase-5 cleanups
-│   └── reward_agent/
-├── tests/                         # ★ consolidated test root (see 05)
-│   ├── unit/                      # -m fast: pure CPU, no isaaclab (seconds)
-│   ├── contract/                  # parity: env↔contract↔ros2↔panel (seconds)
-│   ├── golden/                    # parity vs frozen baseline dump (CPU, uses saved tensors)
-│   └── sim/                       # -m isaac: needs Isaac Sim + GPU (minutes)
-├── baselines/                     # gitignored: golden dumps, reference checkpoints, manifests
-├── experiments/                   # experiment reports (md), decision log (see 06)
-├── docs/                          # existing docs + INDEX.md + adr/
-├── attic/                         # parked code (skrl scripts, patches) — git-preserved, excluded from lint
-└── .github/workflows/ci.yml       # CPU tiers on every push (see 05)
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│ Working consumers                                                   │
+│                                                                     │
+│ training panel ─┬─ local queue/history/video/deploy                  │
+│                 └─ remote worker/web/Supabase                       │
+│ reward agent ───── candidate/trial orchestration                    │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │ CLI args, global override files,
+                              │ checkpoints/log/artifact conventions
+                              v
+                    train / play / evaluation scripts
+                              │
+                              v
+                     Gym task registration (`RedRhex`)
+                              │
+                              v
+┌─────────────────────────────────────────────────────────────────────┐
+│ `redrhex_env.py` + `redrhex_env_cfg.py`                             │
+│                                                                     │
+│ simulator I/O ─ observations ─ rewards ─ gait/FSM/CPG              │
+│ commands/resets ─ randomization ─ buffers/logging ─ frame math      │
+└─────────────────────────────┬───────────────────────────────────────┘
+                              │
+                              v
+                       Isaac Lab / PhysX / USD
+
+ROS2 deploy stack ── independently copied joint/rate/scale/frame facts ── policy
 ```
 
-Notes:
-- `source/RedRhex` path is **kept** so Isaac Lab tooling, existing panel process
-  launcher, and `pip install -e` targets don't break. The reboot happens *inside* it.
-- Old task id `Template-Redrhex-Direct-v0` keeps working throughout the migration
-  (checkpoints, panel presets, muscle memory). A cleaner `Redrhex-v1` id is added at the
-  end and both point at the same env.
+Main coupling consequences:
 
-## 3. The env decomposition (what moves where)
+- importing `RedRhex` eagerly registers Isaac tasks, so CPU-only logic has no clean
+  import boundary;
+- math and state transitions reach directly into environment buffers;
+- duplicated interface facts can drift;
+- simulator diagnostics are mixed with default CPU test discovery;
+- a legacy simulator can be preserved exactly even when its physics/frame model is wrong.
 
-| Concern (today: inside redrhex_env.py) | Target module | Shape of the API |
+## Target feature graph
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│ FROZEN, still usable                                                │
+│ panel + remote system | reward agent | ROS2                         │
+└───────────────┬─────────────────────────────┬───────────────────────┘
+                │ existing CLI/Gym/artifacts  │ read-only parity
+                v                             │
+       ┌─────────────────────┐                │
+       │ RedRhex             │                │
+       │ Isaac adapter       │                │
+       │                     │                │
+       │ scene/reset/step    │                │
+       │ tensor snapshots    │                │
+       │ simulator writes    │                │
+       └──────┬────────┬─────┘                │
+              │        │                      │
+              v        └──────────────────┐   │
+┌──────────────────────┐                  v   v
+│ redrhex_core         │──────────>┌──────────────────────┐
+│ Torch only           │           │ redrhex_contract     │
+│ observations/rewards │           │ stdlib-only facts    │
+│ gait/commands/DR     │           │ order/shape/unit/rate│
+│ kinematics/buffers   │           │ scale/slice/version  │
+└──────────────────────┘           └──────────────────────┘
+```
+
+## Target repository layout
+
+```text
+source/
+├── redrhex_contract/
+│   ├── pyproject.toml
+│   └── src/redrhex_contract/
+│       ├── __init__.py
+│       ├── model.py              # immutable facts and validation
+│       └── layout.py             # named joint/obs/action ordering and slices
+├── redrhex_core/
+│   ├── pyproject.toml
+│   └── src/redrhex_core/
+│       ├── kinematics.py
+│       ├── observations.py
+│       ├── rewards.py
+│       ├── actuation.py
+│       ├── terminations.py
+│       ├── gait.py
+│       ├── commands.py
+│       ├── domain_rand.py
+│       └── buffers.py
+└── RedRhex/                       # existing extension/package path retained
+    └── RedRhex/tasks/direct/redrhex/
+        ├── redrhex_env.py         # Isaac adapter/orchestrator
+        ├── redrhex_env_cfg.py     # compatibility configuration during reboot
+        └── agents/
+tests/
+├── contract/
+├── core/
+├── adapter/
+├── sim/validation/
+└── fixtures/reboot/<baseline-id>/
+```
+
+Names inside each package are provisional until the P3 implementation plan, but package
+ownership and dependency direction are fixed by this design.
+
+## Ownership by layer
+
+| Concern | Owner | Notes |
 |---|---|---|
-| Obs vector assembly, normalization, noise | `core/observations.py` | `build_obs(state: ObsInputs, cfg, layout) -> Tensor`; `apply_obs_noise(obs, cfg, layout, gen)` |
-| Simplified reward terms | `core/rewards.py` | one pure fn per term `(state, cfg) -> Tensor`, plus `total_reward(...) -> (Tensor, dict[str, Tensor])` |
-| Gait phase / CPG / tripod / lateral FSM | `core/gait.py` | explicit `GaitState` dataclass of tensors; `step_gait(state, actions, dt, cfg) -> GaitState` — dt passed *once per control step* (July substep bug becomes structurally impossible) |
-| Command sampling, curriculum, pushes | `core/commands.py` | `resample(...)`, `should_push(...)` — called from `_pre_physics_step` / post-step hooks, **never** from `_get_observations` (kills the state-mutation-in-obs problem, review #15) |
-| DR (mass/friction/actuator/fault) | `core/domain_rand.py` | samplers return per-env tensors; env applies them to sim handles |
-| Episode sums / logging | `core/buffers.py` | ONE `(num_envs, num_terms)` tensor + name list — replaces ~140 individual tensors/kernel launches (review #13); per-second normalization uses *actual* episode length (review #19) |
-| Dead legacy full-reward path (~1,000 lines) | **deleted** | recoverable at tag `v0-pre-reboot` |
+| Joint/action/observation ordering, dimensions, units, rates, scales, slices, version | `redrhex_contract` | Stable interface facts only; no curriculum/experiment policy. |
+| Quaternion/frame math, observation assembly, reward/termination terms, action decoding/targets, gait/command state, DR sampling, buffers | `redrhex_core` | Explicit tensor/state inputs and outputs; no environment object access. |
+| Scene/articulation handles, reset/step hooks, applying DR, sensor reads, actuator writes | `RedRhex` | Isaac-specific adapter. |
+| Legacy cfg aliases and task registration compatibility | `RedRhex` | Kept until a separately approved post-reboot cleanup. |
+| Panel/remote/reward orchestration | Frozen existing tools | Exercise existing scripts only. |
+| ROS messages/topics/safety/deployment | Frozen `ros2_ws` | Read-only comparisons during P4/P7. |
 
-The env class keeps: scene/robot construction, actuator writes, resets, sim stepping,
-`_get_dones`, visualization hooks. Target < 800 lines.
+## Core API shape
 
-## 4. Contract flow (single source of truth)
+Core calls use explicit records rather than passing the env:
 
-```
-source/RedRhex/RedRhex/contract.py          ← hand-written, reviewed, versioned
-  │  CONTROL_HZ=60, joint order, obs layout slices, action scales,
-  │  ABAD limits, stage gates, CONTRACT_VERSION
-  │
-  ├──> env cfg + core/observations.py import it directly (no copies)
-  ├──> scripts/gen_contract.py  ──writes──> ros2_ws/.../redrhex_contract.py
-  │        (generated file carries "GENERATED — DO NOT EDIT" header + source hash)
-  ├──> tools/training_panel deploy.py validate_contract:
-  │        checks dims + names + RATES + SCALES + CONTRACT_VERSION vs checkpoint metadata
-  └──> tests/contract/: (a) generated file is up to date (regenerate & diff),
-           (b) AST parity vs env cfg (July test, kept), (c) ONNX export I/O shape check
+```text
+snapshot(sim state, commands, timers, RNG)
+  -> core function(snapshot, config, contract)
+  -> result(tensors, component map, next pure state, diagnostics)
 ```
 
-Additional contract-adjacent invariants to encode as tests: obs slice layout
-(sin/cos/vel/abad boundaries — the July DR-noise bug class), action decoder gating
-equivalence (env gating vs `action_decoder` behavior on a grid of inputs), checkpoint
-metadata carries `CONTRACT_VERSION` so deploy refuses mismatched policies.
+Required properties:
 
-## 5. Config layering
+- batched first dimension and stable dtype/device preservation;
+- no global mutable state or hidden RNG;
+- no simulator writes;
+- shapes validated at adapter boundaries;
+- reward components returned separately from the total;
+- termination causes returned separately from the combined done/reset masks;
+- action decoding computes one intent per control step; the adapter owns measured
+  Isaac-specific target flushing across physics substeps;
+- time expressed once in seconds/control-step `dt`, never inferred from call count;
+- command/gait/reset transitions observable in golden fixtures.
 
-```
-cfg/base.py          # physical truth + defaults. Grouped, validated:
-                     #   RedrhexEnvCfg(sim=SimCfg(), robot=RobotCfg(), obs=ObsCfg(),
-                     #                 rewards=RewardCfg(), commands=CommandCfg(),
-                     #                 dr=DRCfg(), stages=StagesCfg())
-                     #   __post_init__ → validate(): stage-list lengths, limit ordering,
-                     #   rate divisibility, no NaN scales. Fail LOUDLY at construction.
-cfg/stages.py        # stage overlays only (what changes per curriculum stage)
-cfg/experiments/*.py # ≤ ~20 lines each: named deltas from base for a run
-                     #   e.g. exp_2026_07_20_linvel_dropout.py
-```
+## Frozen compatibility boundary
 
-Rules: no alias fields (the `randomize_mass = dr_randomize_mass` desync class dies);
-deprecated fields are *deleted*, not kept; every experiment overlay is immutable once a
-run has used it (new idea → new file). The panel's reward/terrain overrides map onto
-experiment overlays in Phase 5 instead of global JSON files.
+The following remain unchanged through P7:
 
-## 6. What deliberately does NOT change
+- `Template-Redrhex-Direct-v0` and `Template-Redrhex-ForwardFast-Direct-v0`;
+- their registered runner/distillation/SKRL entry-point keys;
+- `scripts/rsl_rl/train.py`, `play.py`, and evaluation command behavior as seen by users
+  and the panel;
+- checkpoint loading/resume and policy I/O shape;
+- panel-visible run naming, logs, video/ONNX/deploy artifact discovery;
+- ROS source tree and external message/topic contract.
 
-- Isaac Lab direct-workflow architecture (no move to manager-based envs — churn without
-  payoff for this task).
-- RSL-RL as the training framework; teacher-student configs stay in `agents/`.
-- Panel ↔ train process model (subprocess + logs) — only the override IPC changes later.
-- ROS2 node graph and safety-filter design.
-- Pinned versions: Isaac Lab 2.3.2 / Isaac Sim 5.1.0-rc.19 / `env_isaaclab_bin` /
-  RTX 5080 16 GB. Upgrades are their own post-reboot project with the parity suite as
-  the safety net (a hidden payoff of this whole plan).
+P4 may prove that a frozen ROS fact differs from the validated simulator. It records a
+finding; it does not edit ROS during this reboot.
+
+## Deliberately deferred architecture
+
+Generated ROS contracts, layered experiment configuration, new Gym IDs, panel per-run
+IPC, reward-agent store unification, PPO/script deduplication, and asset relocation may
+all be useful later. They are excluded because they add a second behavior-changing axis
+while the core is being validated and extracted.

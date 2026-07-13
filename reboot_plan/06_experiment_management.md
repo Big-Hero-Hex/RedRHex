@@ -1,82 +1,62 @@
-# 06 — Experiment Management
+# 06 — Baseline and Experiment Evidence
 
-The reboot's second product (after clean code) is a clean *experiment record* — the raw
-material of the thesis/reports. Rule zero: **a run whose config, commit, and outcome
-can't be reconstructed later did not happen.**
+Most experiment-management redesign is deferred until after P7. During the core reboot,
+this document governs only the P2 legacy reference and P7 acceptance comparison.
 
-## 1. Anatomy of an experiment
+## Baseline lifecycle
 
-```
-experiments/
-├── LOG.md                        # append-only one-liner ledger (see §2)
-└── reports/
-    └── 2026-07-20_linvel-dropout_s42.md    # from templates/experiment_report.md
-
-source/RedRhex/.../cfg/experiments/
-└── exp_2026_07_20_linvel_dropout.py        # ≤20-line overlay; immutable once used
-
-logs/rsl_rl/redrhex_wheg/<ts>_<exp-name>_s<seed>/   # checkpoints+TB (local, gitignored)
+```text
+P1 simulator validated
+  -> P2 baseline ID created and immutable
+  -> extraction compares against P2
+  -> P7 acceptance comparison
+  -> optional accepted reboot baseline promoted after human review
 ```
 
-Every run records (in checkpoint metadata + report header): git commit hash, experiment
-overlay name, seed, CONTRACT_VERSION, GPU, Isaac Lab/Sim versions, start/end, and the
-one-sentence hypothesis.
+No checkpoint, rollout, or historical run becomes the reboot oracle merely because it
+already exists. It must be linked to the validated P1 source/config/provenance.
 
-## 2. The ledger — `experiments/LOG.md`
+## Baseline ID and manifest
 
-One line per run, append-only, written when the run *starts* (agent fills the verdict
-when it ends):
+Use a descriptive immutable ID, for example:
 
-```
-| date | run id | overlay | seed(s) | hypothesis | verdict |
-| 2026-07-20 | 0720a | linvel_dropout | 42,43,44 | dropout closes deploy lin-vel gap w/o curve cost | ✅ curve -2% (noise), deploy eval +18% |
+```text
+legacy-validated-2026-07-<short-sha>
+reboot-accepted-2026-08-<short-sha>
 ```
 
-This is the file the human scans weekly and the agent greps before proposing anything
-("has this been tried?").
+Each manifest records task, source/tag, asset/config hashes, runtime provenance, command,
+environment count, iterations/steps, seeds, checkpoint hashes, metrics schema, golden
+schema, comparison rules, and all artifact hashes.
 
-## 3. Naming and seeds
+## Reference protocol rules
 
-- Run name: `<date-compact><letter>_<overlay>_s<seed>` (e.g. `0720a_linvel_dropout_s42`).
-- Seed policy: **exploration = 1 seed (42); any claim = 3 seeds (42/43/44)**; thesis
-  headline numbers = 5 seeds. Never compare a 1-seed curve against a 3-seed band and
-  conclude anything.
-- The reference baseline is always `baselines/ref_run_v0` (Phase 0.3) until an ADR
-  promotes a new one (`ref_run_v1` after Phase 2, expected).
+- Define commands and thresholds before launching the first seed.
+- Use the same task, seed set, environment count, iteration budget, evaluation command,
+  and metric export at P2 and P7.
+- Keep raw TensorBoard, checkpoints, videos, and full tensors local/ignored; track the
+  manifest and compact metrics needed to review the decision.
+- Report every seed, failed run, interruption, and retry. Do not select only the best.
+- Treat learning curves as noisy evidence. Predeclare aggregation/bands rather than
+  demanding stepwise numerical equality from training.
 
-## 4. Comparison discipline
+## Golden versus training evidence
 
-1. **One variable per experiment.** The overlay diff *is* the variable; if the overlay
-   changes two things, split it.
-2. **Fixed evaluation**: `eval_command_sweep` (existing) on the final checkpoint +
-   the 3 standard metrics (tracking error, energy proxy, termination rate) — same
-   sweep for every run, versioned with the code.
-3. **Curve comparison**: agent overlays TB scalars of run vs baseline band in the
-   report (matplotlib PNG committed alongside the report — small, worth it).
-4. **Negative results get reports too** — they're the cheapest thing the AI writes and
-   the thing you'll wish you had in November.
+- Golden rollout replay answers: “Did this structural seam preserve recorded behavior?”
+- Simulator diagnostics answer: “Was the legacy model internally consistent enough to
+  serve as that oracle?”
+- Reference training answers: “Did the accepted whole system preserve learning behavior
+  within expected variation?”
 
-## 5. Roles
+None substitutes for the others.
 
-- **Agent**: creates overlay + ledger line, launches (via panel queue or `make train`),
-  monitors, pulls scalars, drafts the report with a *proposed* verdict, links follow-ups.
-- **Human**: confirms/edits the verdict (shaping and physics judgment), picks the next
-  hypothesis, promotes baselines.
-- **reward_agent tool**: its automated search runs follow the same ledger + overlay
-  discipline (its experiment_store gets a thin adapter in Phase 4) — no parallel
-  bookkeeping universe.
+## Deferred until after P7
 
-## 6. Relationship to the panel
+- new experiment-overlay architecture;
+- panel history/override migration;
+- reward-agent experiment-store integration;
+- automatic ablation orchestration;
+- MPC campaign and research KPI redesign.
 
-The panel remains the launcher/queue/monitor UI. Migration target (Phase 5.1): a panel
-run = (overlay name, seed, commit) — the same triple as a CLI run, writing the same
-ledger. Until then, panel runs must still get a ledger line (agent reconciles from
-panel history if needed).
-
-## 7. The MPC-comparison campaign (thesis endgame)
-
-Runs like any other experiment family, but with its own fixed benchmark suite
-(Phase 4.7): disturbance-recovery scenarios, efficiency (CoT), terrain generalization —
-identical scenario seeds for RL and MPC. The suite is code (`tests/benchmarks/` or
-`scripts/benchmarks/`), versioned, so the November numbers are regenerable from a tag.
-Design decisions for scenarios go through the strategy doc §6 + an ADR.
+Those may reuse the accepted contract/core packages, but they are not acceptance
+criteria for the core reboot.

@@ -1,55 +1,55 @@
-# RedRHex Soft Reboot — Master Plan (2026-07)
+# RedRHex Core-First Soft Reboot
 
-This folder is the complete plan for the soft reboot of RedRHex: restructuring the
-project for robustness while keeping everything that works (trained knowledge, deploy
-stack, panel, docs), and switching to an AI-heavy development workflow where iteration
-speed is bounded by *verification speed*, not typing speed.
+This folder is the operating record for rebuilding the RedRHex contract,
+simulation, and training core while preserving the working research system around it.
 
-**Soft reboot means:** same repo, same git history, same research goal (RL locomotion on
-the RHex-style hexapod that beats MPC, sim-to-real via ROS2). What changes is the
-*structure* — module boundaries, single sources of truth, test harnesses, and a
-development loop designed so an AI agent can do most of the work safely.
+The reboot branch is `reboot/core-sim-first`, rooted at the behavioral source snapshot
+`fix/review-2026-07@5cdc824`. Its first commit, `a795c06`, preserves the original reboot
+draft. The active worktree is `/home/lab_user1/Desktop/RedRHex-core-sim-first`.
 
-## Reading order
+## Hard boundary
 
-| Doc | What it answers |
+During the core reboot, do not modify:
+
+- `tools/training_panel/**`, including the local panel, remote worker/web, and Supabase;
+- `tools/reward_agent/**`;
+- `ros2_ws/**`, including topics, messages, nodes, configuration, and deploy contract.
+
+These systems remain usable and are exercised by read-only regression tests. They are
+pulled back into the active development path only after the core passes acceptance.
+
+## Authoritative reading order
+
+| Document | Purpose |
 |---|---|
-| [00_overview.md](00_overview.md) | Why reboot, the 5 principles, definition of done |
-| [01_current_state_audit.md](01_current_state_audit.md) | What exists today: keep / refactor / drop verdict per component |
-| [02_target_architecture.md](02_target_architecture.md) | The end-state repo structure, module boundaries, contract flow, config layering |
-| [03_migration_plan.md](03_migration_plan.md) | Step-by-step phases with verification gates (the actual to-do list) |
-| [04_ai_workflow.md](04_ai_workflow.md) | How to develop with AI: CLAUDE.md design, loop, guardrails, prompt recipes |
-| [05_testing_and_ci.md](05_testing_and_ci.md) | Test tiers, GPU-aware CI, the preflight gate |
-| [06_experiment_management.md](06_experiment_management.md) | Runs, seeds, baselines, ablation protocol, MPC comparison |
-| [07_roadmap.md](07_roadmap.md) | Milestones, calendar estimate, risk register |
-| [08_conventions.md](08_conventions.md) | Commits, branches, naming, language, ADRs |
-| [09_sim_validation.md](09_sim_validation.md) | Step-by-step ladder proving the sim itself works as intended (L0 assets → L6 hardware) |
-| [templates/](templates/) | Ready-to-copy CLAUDE.md, Makefile, ADR, experiment report, PR checklist, sim facts sheet |
+| [STATUS.md](STATUS.md) | Current gate, evidence, and what is blocked |
+| [core-first design](../docs/superpowers/specs/2026-07-13-core-sim-first-soft-reboot-design.md) | Approved architecture, boundaries, data flow, and failure policy |
+| [00_overview.md](00_overview.md) | Scope, principles, and definition of done |
+| [01_current_state_audit.md](01_current_state_audit.md) | Source snapshot and keep/freeze/extract/defer inventory |
+| [02_target_architecture.md](02_target_architecture.md) | Current and target structure graphs and dependency law |
+| [03_migration_plan.md](03_migration_plan.md) | P0–P7 gates and task order |
+| [05_testing_and_ci.md](05_testing_and_ci.md) | Test tiers, artifacts, and verification gates |
+| [09_sim_validation.md](09_sim_validation.md) | Mandatory pre-baseline gravity/frame diagnostic ladder |
+| [evidence/](evidence/) | Interface, simulation, baseline, and acceptance evidence |
 
-## The 30-second version
+`04_ai_workflow.md`, `06_experiment_management.md`, `07_roadmap.md`, and
+`08_conventions.md` provide workflow/roadmap policy. If any old wording conflicts with
+the design, `STATUS.md`, or P0–P7 order, the core-first design is authoritative.
 
-1. **Freeze a baseline** (golden rollout dump + reference training run) so every later
-   change can be proven behavior-preserving or knowingly behavior-changing.
-2. **Extract the 4,478-line env monolith into pure-torch modules** (observations,
-   rewards, gait FSM, DR, commands) using strangler-fig migration — each extraction
-   gated by parity tests against the frozen baseline. Pure-torch modules run on CPU
-   without Isaac Sim → tests run in seconds → AI can iterate 100× faster.
-3. **One source of truth** for every constant crossing the sim→deploy boundary
-   (`contract.py` generates the ROS2 contract; parity tests prevent drift).
-4. **Layered config** (base → stage → experiment) replaces the ~250-scalar flat cfg.
-5. **AI workflow**: CLAUDE.md hierarchy + Makefile verification targets + code-review
-   loop + experiment log, so the agent can plan, edit, verify, and report autonomously,
-   while reward-shaping judgment, physics plausibility, and hardware safety stay
-   human-gated.
-6. **Simulation validation ladder** (09): parity proves new code == old code; the ladder
-   proves the sim == the real robot — step-by-step checks from asset masses and joint
-   limits up through actuator responses, timing, frames, whole-robot dynamics, and
-   cross-sim/hardware comparison, each with a written pass criterion and recorded
-   evidence.
+## The short version
 
-## Status
+1. Freeze external interfaces and make test discovery/provenance trustworthy.
+2. Validate the legacy simulator: world gravity, units, frames, masses/inertias,
+   airborne motion, contacts, projected gravity, timing, and reward axes.
+3. Only after that gate passes, tag and capture the golden/reference oracle.
+4. Scaffold sibling `redrhex_contract` and `redrhex_core` packages.
+5. Extract stable facts and pure-Torch behavior slice by slice behind `RedRhex`, which
+   remains the Isaac Lab adapter and retains both existing Gym IDs.
+6. Run acceptance, then separately decide when to unfreeze panel/remote/reward/ROS work.
 
-- Written 2026-07-13, on branch `fix/review-2026-07` (all 2026-07 review fixes committed).
-- Grounded in: `docs/project_review_2026-07-09.md` (35 findings + fix status),
-  `docs/2026_Midterm.md` (research direction), `docs/COMMANDS.md` (machine setup),
-  and direct inspection of the current tree.
+## Current status
+
+The branch is at P0. Maintained consumer suites pass, but repository-wide test discovery
+and simulator provenance are not yet trustworthy. The baseline is therefore
+**not frozen**, and no claim has been made that the current gravity behavior is correct
+or incorrect. See [STATUS.md](STATUS.md) for exact evidence.

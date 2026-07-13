@@ -1,148 +1,96 @@
-# 04 — AI-Heavy Development Workflow
+# 04 — Agent-Assisted Development Workflow
 
-Goal: the AI agent (Claude Code on this machine) does most implementation, testing,
-review, and documentation; the human does research judgment and hardware safety. The
-enabling insight: **AI throughput = how fast the agent can verify its own work.** Every
-element below either speeds up verification or encodes judgment the agent must not make
-alone.
+This workflow applies only to reboot-owned documentation, tests, diagnostics,
+`redrhex_contract`, `redrhex_core`, and the `RedRHex` adapter. Panel, remote, reward-agent,
+and ROS paths are frozen regardless of what an automated tool proposes.
 
-## 1. The context layer (what the agent knows at session start)
+## Three loops
 
-### CLAUDE.md hierarchy (templates in `templates/`)
+### Loop A — Fast CPU edit loop
+
+For contract/core work:
+
+1. state one invariant and write the cheapest failing test;
+2. make the smallest implementation change;
+3. run the focused test, then the complete CPU tier;
+4. inspect the diff for forbidden imports, hidden state, and scope creep;
+5. commit one reversible slice with its evidence link.
+
+### Loop B — Simulator diagnostic loop
+
+For P1 and later adapter checks:
+
+1. verify the runtime/provenance manifest;
+2. run one diagnostic prerequisite only;
+3. archive raw measurements and a fitted summary;
+4. stop on failure and classify the layer before proposing a fix;
+5. after an approved fix, rerun the failed check and invalidated downstream checks.
+
+`validate-sim-gravity` always precedes `capture-golden` and `train-ref`.
+
+### Loop C — Extraction loop
+
+For each P4/P5/P6 seam:
+
+1. identify exact legacy inputs, outputs, mutation, and ordering;
+2. add unit and reduced-fixture tests;
+3. implement a pure function/state object;
+4. cut over only that adapter seam;
+5. run CPU, frozen-boundary, full-local parity, and Isaac smoke gates;
+6. review, document, and delete only the replaced legacy code.
+
+## Guardrails
+
+- A frozen-tree guard must fail on changes under `tools/training_panel/**`,
+  `tools/reward_agent/**`, or `ros2_ws/**`.
+- Core packages must fail dependency tests if they import Isaac, Gym, ROS, or tools.
+- Never weaken a threshold, skip a failed test, or update a golden fixture simply to
+  make a change pass. Threshold/baseline changes require an ADR and explicit approval.
+- Never run hardware commands from the core reboot workflow.
+- No destructive Git cleanup; preserve unrelated user work and use the dedicated
+  Desktop worktree.
+- Simulator evidence is invalid when runtime provenance is missing or unexpectedly dirty.
+
+## Session start checklist
+
+1. Read `reboot_plan/STATUS.md` and the current gate evidence.
+2. Confirm branch/worktree and a scoped clean status.
+3. Confirm no frozen-path diff against `fix/review-2026-07@5cdc824`.
+4. Run the cheapest gate relevant to the proposed edit.
+5. State assumptions, success criteria, and rollback before implementation.
+
+## Session finish checklist
+
+1. Run focused and required aggregate verification fresh.
+2. Run `git diff --check` and inspect every changed path.
+3. Confirm frozen tree IDs plus staged, unstaged, and untracked-path checks are clean;
+   disable/redirect test bytecode and caches.
+4. Link command output/artifacts in the appropriate evidence document.
+5. Update `STATUS.md` only if a gate actually advanced.
+6. Commit one purpose; do not mix diagnostics, generated evidence, and physics fixes.
+
+## Human decisions
+
+Explicit human approval is required for:
+
+- correcting a diagnostic threshold after evidence shows the criterion itself was
+  invalid (ADR + fresh rerun required); blocked/failed facts still block P2;
+- changing gravity, frames, masses, inertia, collisions, damping, actuators, rewards,
+  command timing, observation meaning, or reset semantics;
+- replacing a baseline or approving an intentional golden difference;
+- changing a frozen consumer or any hardware-facing behavior;
+- accepting P7 when learning/evaluation results fall outside predeclared rules.
+
+## Instruction hierarchy
+
+Repository guidance should remain agent-neutral:
+
+```text
+root instructions             # universal safety, commands, frozen paths
+source/redrhex_contract/       # stdlib-only dependency and contract rules
+source/redrhex_core/           # Torch-only purity and explicit-state rules
+source/RedRhex/                # Isaac adapter and compatibility rules
+tests/sim/                     # GPU/runtime evidence rules
 ```
-/CLAUDE.md                       # root: machine facts, make targets, hard rules,
-                                 #   pointers to area files (keep < ~150 lines)
-/source/RedRhex/CLAUDE.md        # env architecture, obs layout, extraction status,
-                                 #   "which module owns what", parity-test workflow
-/tools/training_panel/CLAUDE.md  # panel run/test commands, frozen-during-migration note
-/ros2_ws/CLAUDE.md               # generated-contract warning, build/test commands,
-                                 #   hardware = human-gated
-```
-Rules for these files: facts and commands, not prose; update in the same commit that
-makes them stale; never duplicate what code/tests already express.
 
-### Machine facts the root CLAUDE.md must pin (from docs/COMMANDS.md)
-- Repo `/home/lab_user1/Py/RedRHex`; Isaac Lab `/home/lab_user1/isaac_lab_ws/IsaacLab`
-  (2.3.2); Isaac Sim 5.1.0-rc.19; conda env `env_isaaclab_bin` (NOT `base`/`env_isaaclab`);
-  GPU RTX 5080 16 GB (one GPU — training and smoke tests contend, see §4).
-- Task ids; `make` targets as the only sanctioned entry points; `export TERM=xterm`.
-
-### Persistent memory
-Claude Code's project memory already tracks review state. Keep using it for:
-durable user preferences, cross-session project facts not derivable from the repo, and
-pointers into `docs/` — never for things the repo itself records.
-
-## 2. The verification layer (what lets the agent self-check)
-
-The Makefile is the agent's API to the project. Canonical ladder, cheapest first:
-
-| Target | Time | Needs | Agent uses it for |
-|---|---|---|---|
-| `make lint` | s | CPU | every edit |
-| `make test-fast` | < 30 s | CPU | every core/ or cfg change |
-| `make test-contract` | s | CPU | anything touching contract/layout/deploy |
-| `make test-golden` | < 1 min | CPU (saved tensors) | every extraction step |
-| `make smoke` | ~3–5 min | GPU + Isaac | env construction / integration changes |
-| `make preflight` | ~10–15 min | GPU | before merge to main; before ending an unattended session |
-| `make train-ref` | hours | GPU | behavior-changing merges (human decides when) |
-
-Design consequences already baked into 02/03: pure-torch core modules exist *so that*
-the first four tiers need no simulator. This is the single highest-leverage decision in
-the whole reboot for AI velocity.
-
-## 3. The standard loops
-
-### Loop A — structural change (migration steps, refactors)
-```
-1. PLAN MODE: agent explores, writes step plan w/ parity strategy → human approves
-2. Implement (one extraction step; one issue per commit)
-3. make lint test-fast test-golden; make smoke if env touched
-4. /code-review on the diff; agent fixes findings
-5. Commit + short note in the phase checklist (03) — the review-file-as-state pattern
-   from July, which survives context loss and session restarts
-```
-
-### Loop B — experiment (reward/physics/curriculum change)
-```
-1. Hypothesis in one sentence → experiments/LOG.md (see 06)
-2. New overlay in cfg/experiments/ (never edit base)
-3. make smoke → launch via panel or make train EXP=<name> SEED=…
-4. While training runs, agent does Loop-A work (GPU-idle multiplexing, §4)
-5. Agent pulls TB scalars, writes experiments/reports/<run>.md from template:
-   curves vs baseline, verdict, next action
-6. Human reads report, makes the shaping/physics judgment call
-```
-
-### Loop C — unattended session (overnight / long-running)
-```
-1. Human leaves a scoped task list (e.g. "extraction steps 2.3 + 2.4")
-2. Agent works Loop A per item; stops at any parity failure it cannot explain
-   (NEVER "fixes" a parity test by loosening tolerance — hard rule)
-3. Ends with: make preflight + a session report (what/why/verified/open questions)
-4. Human reviews the report + diffs next morning; nothing merged unreviewed
-```
-
-## 4. One-GPU discipline
-
-Training runs and Isaac smoke tests fight over the RTX 5080 (16 GB).
-- The panel's queue is the arbiter for training runs; the agent checks for a live run
-  (panel API / `nvidia-smi`) before `make smoke`/`preflight` and otherwise runs
-  CPU tiers only, queueing GPU verification.
-- Reference runs (3-seed) go overnight; agent schedules them last in a session.
-- `make smoke` uses few envs (e.g. 128) + few iters (5) to fit beside nothing — it
-  must never run beside a big training job; fail fast with a clear message instead.
-
-## 5. Guardrails (what the agent must NOT do alone)
-
-Encode these as hooks/settings where possible, as CLAUDE.md hard rules otherwise:
-
-1. **Generated files**: never edit `ros2_ws/.../redrhex_contract.py` by hand — edit
-   `contract.py` + `make contract`. (Hook: block Edit/Write on the generated path.)
-2. **Parity tolerances**: never widen `atol`/`rtol` or skip a golden test to make it
-   pass. A parity failure is a finding, not an obstacle.
-3. **Hardware**: anything that publishes to real actuators (`enable_policy`, bridge
-   launch on hardware) is human-present only.
-4. **Baselines**: `baselines/` is append-only; replacing a golden dump requires an ADR.
-5. **Reward intent**: the agent may implement and *report* on reward changes; it doesn't
-   decide shaping direction. (It may propose, with evidence — that's the reward_agent
-   tool's whole job.)
-6. **Deletions**: dead-code deletion only inside a planned migration step or with the
-   review file naming the item.
-7. **Long trainings**: > 30 GPU-minutes requires either the human's ask or a queued
-   overnight slot the human pre-approved.
-
-## 6. Division of labor (be explicit; it's a research project)
-
-| AI owns | Human owns |
-|---|---|
-| Extractions, refactors, dedup | Extraction *order* changes, scope cuts |
-| Test writing (unit/parity/contract) | Accepting a behavior change (ADR sign-off) |
-| Experiment execution + report drafts | Hypothesis choice, verdict on shaping/physics |
-| Literature-to-code proposals | Research direction, what goes in the thesis |
-| Panel/tooling code | Exposing the panel beyond localhost |
-| Analysis scripts, plots, docs | Hardware sessions, safety checklists |
-
-## 7. Claude Code specifics worth setting up (Phase 1.5)
-
-- **Project skills** (`.claude/skills/`): `train` (launch via panel/CLI with overlay),
-  `analyze-run` (TB scalars → report draft), `parity` (run + interpret golden suite).
-  Skills make Loop B a one-liner for future sessions.
-- **Permissions** (`.claude/settings.json`): pre-allow `make *`, `pytest *`,
-  `nvidia-smi`, panel API curls — the agent shouldn't stall on prompts for sanctioned
-  verification. Run `/fewer-permission-prompts` after a week of real usage.
-- **Hooks**: block-edit hook for generated files (§5.1); optional pre-Stop hook that
-  reminds "run make lint test-fast before finishing".
-- **Subagents**: use Explore for broad code searches during extractions; a second
-  opinion review (`/code-review high`) before each phase-gate merge.
-- **Plan mode** for every multi-file step: cheap insurance against half-refactors.
-
-## 8. Failure modes to watch (AI-specific, RL-specific)
-
-| Failure mode | Mitigation |
-|---|---|
-| Agent "fixes" a failing parity test instead of the code | Guardrail §5.2 + human reviews every tolerance diff |
-| Plausible-but-wrong physics/reward math (silent RL killer: code runs, learning quietly degrades) | Unit tests with hand-computed values; 3-seed gate runs on behavior changes; never merge math on green-lint alone |
-| Context rot in long sessions → forgotten constraints | Review-file-as-state pattern; CLAUDE.md hard rules restated per area; scoped session tasks |
-| Reward hacking of the *workflow* (agent optimizes for green checks, e.g. trivial tests) | Human spot-reads tests in review; /code-review explicitly checks test quality |
-| Stale CLAUDE.md misleading future sessions | Update-in-same-commit rule (§1); Phase-1.5 exit test rerun occasionally |
-| GPU contention breaks a training run mid-experiment | §4 queue discipline; smoke refuses to start beside a training run |
+Progress lives in `STATUS.md`, not in prose claims or unchecked narrative milestones.
