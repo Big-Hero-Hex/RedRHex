@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -52,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--headless", action=argparse.BooleanOptionalAction, default=True
     )
     sweep.add_argument("--provenance-json", default="{}")
+    sweep.add_argument(
+        "--real-trace",
+        type=Path,
+        default=None,
+        help="Verified real reference episode required for sweep execution.",
+    )
     sweep.add_argument(
         "--generate-only",
         action="store_true",
@@ -125,21 +130,6 @@ def _emit(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False))
 
 
-def _repo_git_sha() -> str | None:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parents[2],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError:
-        return None
-    value = result.stdout.strip()
-    return value if result.returncode == 0 and value else None
-
-
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "list":
         from .scenarios import list_scenarios
@@ -155,7 +145,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         from .promotion import evaluate_promotion, load_validation_evidence
 
         result = evaluate_promotion(
-            load_profile(args.profile), load_validation_evidence(args.evidence)
+            load_profile(args.profile),
+            load_validation_evidence(args.evidence),
+            artifact_root=args.evidence.parent,
         )
         if args.output is not None:
             if args.output.exists():
@@ -207,7 +199,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             generate_one_factor_candidates,
         )
         from . import sweep_runner
-        from .traces import sha256_file
+        from .runtime_provenance import production_runtime_provenance
 
         profile = load_profile(args.profile)
         scenario = load_scenario(args.scenario)
@@ -228,6 +220,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(
                 f"--scene-mode is required for scenario scene_mode={scenario.scene_mode!r}"
             )
+        if not args.generate_only and args.real_trace is None:
+            raise ValueError("--real-trace is required unless --generate-only is used")
 
         command_prefix = None
         if not args.generate_only:
@@ -247,10 +241,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
 
         provenance = _json_object(args.provenance_json, "--provenance-json")
-        git_sha = _repo_git_sha()
-        if git_sha is not None:
-            provenance["git_sha"] = git_sha
-        provenance["sweep_runner_sha256"] = sha256_file(Path(sweep_runner.__file__))
         return sweep_runner.execute_sweep(
             output=args.output,
             scenario=scenario,
@@ -261,8 +251,10 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             seed=args.seed,
             device=args.device,
             provenance=provenance,
+            provenance_provider=production_runtime_provenance,
             command_prefix=command_prefix,
             generate_only=args.generate_only,
+            real_trace=args.real_trace,
         )
     if args.command == "run-sim":
         # Importing this bootstrap is the first point at which Isaac Lab is

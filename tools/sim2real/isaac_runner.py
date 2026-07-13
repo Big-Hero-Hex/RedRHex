@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import argparse
 import copy
-import inspect
 import json
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,8 +42,9 @@ from .physics_profile import (
     apply_profile_to_config,
     load_optional_profile,
 )
+from .runtime_provenance import production_runtime_provenance
 from .scenarios import load_scenario
-from .traces import sha256_file, write_trace
+from .traces import write_trace
 
 
 @configclass
@@ -96,19 +95,6 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
-
-
-def _git_sha() -> str | None:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None
 
 
 def _to_list(value: Any) -> Any:
@@ -300,9 +286,7 @@ def _trace_metadata(
     replay_initial_state_sha256: str | None,
 ) -> dict[str, Any]:
     units, frames = characterization_channel_metadata(scenario, set(time_bases))
-
-    asset_path = Path(env_cfg.robot_cfg.spawn.usd_path)
-    cfg_path = Path(inspect.getsourcefile(RedrhexEnvCfg) or "")
+    runtime_provenance = production_runtime_provenance()
     return {
         "units": {name: units[name] for name in time_bases},
         "frames": frames,
@@ -313,9 +297,10 @@ def _trace_metadata(
             "time_unit": "s",
         },
         "scenario_schema_version": scenario.schema_version,
-        "git_sha": _git_sha(),
-        "asset_sha256": sha256_file(asset_path),
-        "config_sha256": sha256_file(cfg_path),
+        "git_sha": runtime_provenance["git_sha"],
+        "asset_sha256": runtime_provenance["asset_sha256"],
+        "config_sha256": runtime_provenance["config_sha256"],
+        "characterization_runner_sha256": runtime_provenance["characterization_runner_sha256"],
         "calibration_constants": {
             "profile_id": profile.profile_id if profile is not None else None,
             "sensor_timing": (

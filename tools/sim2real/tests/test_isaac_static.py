@@ -98,6 +98,20 @@ def test_characterization_runner_is_finite_one_env_and_direct_targeted() -> None
     assert "sim.clear_instance()" in source
 
 
+def test_characterization_trace_binds_verified_runtime_provenance() -> None:
+    source = _source("tools/sim2real/isaac_runner.py")
+
+    assert "runtime_provenance = production_runtime_provenance()" in source
+    for field in (
+        "git_sha",
+        "asset_sha256",
+        "config_sha256",
+        "characterization_runner_sha256",
+    ):
+        assert f'"{field}": runtime_provenance["{field}"]' in source
+    assert "def _git_sha(" not in source
+
+
 def test_production_implicit_actuators_use_effective_sim_limit_fields() -> None:
     tree = ast.parse(_source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py"))
     implicit_calls = [

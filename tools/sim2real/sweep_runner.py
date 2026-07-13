@@ -10,15 +10,25 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .compare import compare_traces
 from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1, load_profile
+from .runtime_provenance import production_runtime_provenance
 from .scenarios import load_scenario
 from .sweep import candidate_cache_key
-from .traces import load_trace, sha256_json
+from .traces import LoadedTrace, load_trace, sha256_json
 
 
 _SWEEP_MODES = {"one-factor", "coarse-grid"}
 _SCENE_MODES = {"fixed-base", "free-root", "contact"}
 _CACHEABLE_STATUSES = {"completed", "cached"}
+_RUNTIME_PROVENANCE_FIELDS = {
+    "git_sha",
+    "asset_sha256",
+    "config_sha256",
+    "characterization_runner_sha256",
+    "sweep_runner_sha256",
+}
+_DERIVED_PROVENANCE_FIELDS = _RUNTIME_PROVENANCE_FIELDS | {"real_trace_sha256"}
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -113,6 +123,48 @@ def _execution_provenance(
     except (TypeError, ValueError) as exc:
         raise ContractError(f"provenance must contain finite JSON values: {exc}") from exc
     return result
+
+
+def _bind_runtime_provenance(
+    provenance: Mapping[str, Any],
+    provider: Callable[[], Mapping[str, Any]],
+) -> dict[str, Any]:
+    if not isinstance(provenance, Mapping):
+        raise ContractError("provenance must be a JSON object")
+    conflicts = sorted(set(provenance).intersection(_DERIVED_PROVENANCE_FIELDS))
+    if conflicts:
+        raise ContractError(
+            "derived provenance fields cannot be overridden: " + ", ".join(conflicts)
+        )
+    if not callable(provider):
+        raise ContractError("provenance_provider must be callable")
+    try:
+        derived = provider()
+    except ContractError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise ContractError(f"runtime provenance provider failed: {exc}") from exc
+    if not isinstance(derived, Mapping):
+        raise ContractError("runtime provenance provider must return a JSON object")
+    missing = sorted(_RUNTIME_PROVENANCE_FIELDS - set(derived))
+    if missing:
+        raise ContractError("runtime provenance missing fields: " + ", ".join(missing))
+    git_sha = derived["git_sha"]
+    if (
+        not isinstance(git_sha, str)
+        or len(git_sha) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in git_sha)
+    ):
+        raise ContractError("runtime provenance git_sha must be a Git digest")
+    for field in sorted(_RUNTIME_PROVENANCE_FIELDS - {"git_sha"}):
+        value = derived[field]
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ContractError(f"runtime provenance {field} must be a SHA-256 digest")
+    return {**dict(provenance), **dict(derived)}
 
 
 def _candidate_status(
@@ -221,8 +273,13 @@ def _verify_artifact(
         raise ContractError(f"trace artifact is missing or invalid: {exc}") from exc
     if loaded.manifest.source != "sim":
         raise ContractError("cached trace source must be sim")
-    for field in ("git_sha", "asset_sha256", "config_sha256"):
-        if field in provenance and loaded.manifest.metadata.get(field) != provenance[field]:
+    for field in (
+        "git_sha",
+        "asset_sha256",
+        "config_sha256",
+        "characterization_runner_sha256",
+    ):
+        if loaded.manifest.metadata.get(field) != provenance[field]:
             raise ContractError(
                 f"artifact provenance {field} mismatch: expected {provenance[field]!r}, "
                 f"got {loaded.manifest.metadata.get(field)!r}"
@@ -243,6 +300,63 @@ def _verify_artifact(
     }
 
 
+def _comparison_details(
+    output: Path,
+    *,
+    real_trace: LoadedTrace,
+    scenario: ScenarioSpecV1,
+    sim_trace_sha256: str,
+    require_existing: bool,
+) -> dict[str, Any]:
+    comparison = compare_traces(real_trace, output, scenario=scenario)
+    payload = {
+        **comparison,
+        "real_trace_sha256": real_trace.manifest.provenance["trace_sha256"],
+        "sim_trace_sha256": sim_trace_sha256,
+    }
+    comparison_path = output / "comparison.json"
+    if comparison_path.exists():
+        if _json_object(comparison_path, "comparison.json") != payload:
+            raise ContractError("cached comparison mismatch")
+    elif require_existing:
+        raise ContractError("cached comparison.json is missing")
+    else:
+        _atomic_json(comparison_path, payload)
+    return {
+        "comparison_sha256": sha256_json(payload),
+        "metrics": payload["subsystems"],
+    }
+
+
+def _verify_candidate(
+    output: Path,
+    *,
+    scenario: ScenarioSpecV1,
+    profile: CalibrationProfileV1,
+    scene_mode: str,
+    provenance: Mapping[str, Any],
+    real_trace: LoadedTrace,
+    require_comparison: bool,
+) -> dict[str, Any]:
+    verified = _verify_artifact(
+        output,
+        scenario=scenario,
+        profile=profile,
+        scene_mode=scene_mode,
+        provenance=provenance,
+    )
+    return {
+        **verified,
+        **_comparison_details(
+            output,
+            real_trace=real_trace,
+            scenario=scenario,
+            sim_trace_sha256=verified["trace_sha256"],
+            require_existing=require_comparison,
+        ),
+    }
+
+
 def _status_entry(status: Mapping[str, Any]) -> dict[str, Any]:
     result = {
         "index": status["index"],
@@ -258,6 +372,9 @@ def _status_entry(status: Mapping[str, Any]) -> dict[str, Any]:
         result["trace_sha256"] = status["trace_sha256"]
     if "error" in status:
         result["error"] = status["error"]
+    for field in ("comparison", "comparison_sha256", "metrics"):
+        if field in status:
+            result[field] = status[field]
     return result
 
 
@@ -368,8 +485,10 @@ def execute_sweep(
     seed: int,
     device: str,
     provenance: Mapping[str, Any],
+    provenance_provider: Callable[[], Mapping[str, Any]] = production_runtime_provenance,
     command_prefix: Sequence[str] | None = None,
     generate_only: bool = False,
+    real_trace: str | Path | None = None,
     run_process: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     """Generate, execute, verify, and resume a bounded characterization sweep."""
@@ -385,16 +504,29 @@ def execute_sweep(
         raise ContractError("device must be a non-empty string")
     if not isinstance(scenario, ScenarioSpecV1):
         raise ContractError("scenario must be a ScenarioSpecV1")
+    reference: LoadedTrace | None = None
+    if real_trace is None:
+        if not generate_only:
+            raise ContractError("real_trace is required when sweep execution is enabled")
+    else:
+        reference = load_trace(real_trace, scenario=scenario)
+        if reference.manifest.source != "real":
+            raise ContractError("real_trace must have source='real'")
     clean_candidates = list(candidates)
     if not all(isinstance(candidate, CalibrationProfileV1) for candidate in clean_candidates):
         raise ContractError("candidates must contain CalibrationProfileV1 values")
     prefix = None if generate_only else _command_prefix(command_prefix)
     effective_provenance = _execution_provenance(
-        provenance,
+        _bind_runtime_provenance(provenance, provenance_provider),
         scene_mode=scene_mode,
         headless=headless,
         seed=seed,
         device=device,
+    )
+    effective_provenance["real_trace_sha256"] = (
+        reference.manifest.provenance["trace_sha256"]
+        if reference is not None
+        else None
     )
     provenance_sha256 = sha256_json(effective_provenance)
 
@@ -489,12 +621,16 @@ def execute_sweep(
         if status["status"] in _CACHEABLE_STATUSES:
             try:
                 relative = _safe_relative(existing_run, "candidate status run_output")
-                verified = _verify_artifact(
+                if reference is None:
+                    raise ContractError("cached execution requires a real trace")
+                verified = _verify_candidate(
                     root.joinpath(*PurePosixPath(relative).parts),
                     scenario=scenario,
                     profile=candidate,
                     scene_mode=scene_mode,
                     provenance=effective_provenance,
+                    real_trace=reference,
+                    require_comparison=True,
                 )
             except (OSError, ValueError) as exc:
                 failure = _candidate_status(
@@ -513,6 +649,7 @@ def execute_sweep(
                 status="cached",
                 attempt=status["attempt"],
                 run_output=existing_run,
+                comparison=f"{relative}/comparison.json",
                 **verified,
             )
             result = state.record(offset, cached)
@@ -528,14 +665,26 @@ def execute_sweep(
             prior_output = root.joinpath(*PurePosixPath(existing_run).parts)
             if (prior_output / "results.json").is_file():
                 try:
-                    verified = _verify_artifact(
+                    if reference is None:
+                        raise ContractError("interrupted execution requires a real trace")
+                    verified = _verify_candidate(
                         prior_output,
                         scenario=scenario,
                         profile=candidate,
                         scene_mode=scene_mode,
                         provenance=effective_provenance,
+                        real_trace=reference,
+                        require_comparison=False,
                     )
                 except (OSError, ValueError) as exc:
+                    failure = _candidate_status(
+                        entry,
+                        status="failed",
+                        attempt=prior_attempt,
+                        run_output=existing_run,
+                        error=str(exc),
+                    )
+                    state.record(offset, failure)
                     raise ContractError(
                         f"candidate {entry['index']} interrupted artifact verification failed: {exc}"
                     ) from exc
@@ -544,6 +693,7 @@ def execute_sweep(
                     status="cached",
                     attempt=prior_attempt,
                     run_output=existing_run,
+                    comparison=f"{existing_run}/comparison.json",
                     **verified,
                 )
                 result = state.record(offset, cached)
@@ -629,12 +779,16 @@ def execute_sweep(
             raise ContractError(message)
 
         try:
-            verified = _verify_artifact(
+            if reference is None:
+                raise ContractError("completed execution requires a real trace")
+            verified = _verify_candidate(
                 run_output,
                 scenario=scenario,
                 profile=candidate,
                 scene_mode=scene_mode,
                 provenance=effective_provenance,
+                real_trace=reference,
+                require_comparison=False,
             )
         except (OSError, ValueError) as exc:
             failure = _candidate_status(
@@ -656,6 +810,7 @@ def execute_sweep(
             attempt=attempt,
             run_output=relative_output,
             returncode=returncode,
+            comparison=f"{relative_output}/comparison.json",
             **verified,
         )
         result = state.record(offset, completed_status)

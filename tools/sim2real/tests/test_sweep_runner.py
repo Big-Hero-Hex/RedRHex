@@ -16,7 +16,7 @@ from tools.sim2real.contracts import (
 )
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.sweep import generate_one_factor_candidates
-from tools.sim2real.traces import write_trace
+from tools.sim2real.traces import sha256_json, write_trace
 
 
 def _profile() -> CalibrationProfileV1:
@@ -45,6 +45,70 @@ def _argument(command: list[str], flag: str) -> str:
     return command[command.index(flag) + 1]
 
 
+def _response_arrays(*, scale: float = 1.0) -> dict[str, np.ndarray]:
+    time_s = np.arange(0.0, 10.5 + 0.05, 0.05)
+    phase = np.mod(time_s, 3.5)
+    command = np.select(
+        [
+            (phase >= 0.5) & (phase < 1.5),
+            (phase >= 2.0) & (phase < 3.0),
+        ],
+        [0.25, -0.25],
+        default=0.0,
+    )
+    position = np.cumsum(command * scale) * 0.05
+    return {
+        "command_time_s": time_s,
+        "position_time_s": time_s,
+        "command": command,
+        "position": position,
+    }
+
+
+def _trace_metadata(scenario: ScenarioSpecV1, **overrides: Any) -> dict[str, Any]:
+    metadata = {
+        "units": {"command": "rad/s", "position": "rad"},
+        "frames": {"command": scenario.joint, "position": scenario.joint},
+        "calibration_constants": {
+            "calibration_source": "profile:baseline",
+            "position_mapping_source": "profile:baseline",
+            "requested_command_source": "profile:baseline",
+        },
+        "git_sha": "1" * 40,
+        "asset_sha256": "a" * 64,
+        "config_sha256": "b" * 64,
+        "characterization_runner_sha256": "c" * 64,
+    }
+    metadata.update(overrides)
+    return metadata
+
+
+def _runtime_provenance(**overrides: Any) -> dict[str, str]:
+    provenance = {
+        "git_sha": "1" * 40,
+        "asset_sha256": "a" * 64,
+        "config_sha256": "b" * 64,
+        "characterization_runner_sha256": "c" * 64,
+        "sweep_runner_sha256": "d" * 64,
+    }
+    provenance.update(overrides)
+    return provenance
+
+
+def _write_real_reference(output: Path, scenario: ScenarioSpecV1) -> None:
+    write_trace(
+        output,
+        _response_arrays(scale=1.0),
+        scenario=scenario,
+        source="real",
+        profile=_profile(),
+        metadata={
+            **_trace_metadata(scenario),
+            "raw_data_sha256": "f" * 64,
+        },
+    )
+
+
 def _write_sim_artifact(
     command: list[str], *, profile_override=None, metadata_override=None
 ) -> None:
@@ -53,17 +117,11 @@ def _write_sim_artifact(
     output = Path(_argument(command, "--output"))
     manifest = write_trace(
         output,
-        {
-            "command_time_s": np.array([0.0, 1.0]),
-            "position_time_s": np.array([0.0, 1.0]),
-            "command": np.array([0.0, 0.25]),
-            "position": np.array([0.0, 0.1]),
-        },
+        _response_arrays(scale=0.8),
         scenario=scenario,
         source="sim",
         profile=profile,
-        metadata=metadata_override
-        or {"git_sha": "abc123", "asset_sha256": "a" * 64},
+        metadata=metadata_override or _trace_metadata(scenario),
     )
     (output / "runtime_audit.json").write_text("{}\n", encoding="utf-8")
     (output / "results.json").write_text(
@@ -92,21 +150,34 @@ def _execute(
     scenario: ScenarioSpecV1 | None = None,
     run_process,
     generate_only: bool = False,
+    real_trace: str | Path | None | object = ...,
+    provenance: dict[str, Any] | None = None,
+    provenance_provider=lambda: _runtime_provenance(),
 ) -> dict[str, Any]:
     from tools.sim2real.sweep_runner import execute_sweep
 
+    selected_scenario = scenario or load_scenario("main-step")
+    if real_trace is ...:
+        if generate_only:
+            real_trace = None
+        else:
+            real_trace = output.parent / f"{output.name}-real"
+            if not real_trace.exists():
+                _write_real_reference(real_trace, selected_scenario)
     return execute_sweep(
         output=output,
-        scenario=scenario or load_scenario("main-step"),
+        scenario=selected_scenario,
         candidates=candidates or _candidates(),
         sweep_mode="one-factor",
         scene_mode="fixed-base",
         headless=True,
         seed=17,
         device="cpu",
-        provenance={"git_sha": "abc123", "asset_sha256": "a" * 64},
+        provenance=provenance or {},
+        provenance_provider=provenance_provider,
         command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
         generate_only=generate_only,
+        real_trace=real_trace,
         run_process=run_process,
     )
 
@@ -157,9 +228,59 @@ def test_execute_sweep_runs_fresh_process_per_candidate_and_verifies_outputs(
         "sweep_sha256"
     ] == result["sweep_sha256"]
     provenance = json.loads((tmp_path / "sweep" / "provenance.json").read_text())
-    assert provenance["git_sha"] == "abc123"
+    assert provenance["git_sha"] == "1" * 40
     assert provenance["seed"] == 17
     assert json.loads((tmp_path / "sweep" / "results.json").read_text()) == result
+    for candidate in result["candidates"]:
+        assert set(candidate["metrics"]) == {"main_drive"}
+        assert set(candidate["metrics"]["main_drive"]) == {"real", "sim", "delta"}
+        assert "score" not in json.dumps(candidate["metrics"]).lower()
+        comparison = tmp_path / "sweep" / candidate["comparison"]
+        payload = json.loads(comparison.read_text(encoding="utf-8"))
+        assert payload["real_trace_sha256"] == provenance["real_trace_sha256"]
+        assert payload["sim_trace_sha256"] == candidate["trace_sha256"]
+        assert candidate["comparison_sha256"] == sha256_json(payload)
+
+
+def test_execution_requires_real_reference_before_writing_output(tmp_path: Path) -> None:
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("missing real evidence must fail before launching Isaac")
+
+    output = tmp_path / "sweep"
+    with pytest.raises(ContractError, match="real_trace is required"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            run_process=must_not_run,
+            real_trace=None,
+        )
+
+    assert not output.exists()
+
+
+def test_cached_comparison_is_recomputed_against_bound_real_trace(
+    tmp_path: Path,
+) -> None:
+    def first_run(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    output = tmp_path / "sweep"
+    first = _execute(output, candidates=_candidates(1), run_process=first_run)
+    comparison_path = output / first["candidates"][0]["comparison"]
+    comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+    comparison["subsystems"]["main_drive"]["delta"] = {"tampered": 999.0}
+    comparison_path.write_text(json.dumps(comparison), encoding="utf-8")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("a corrupt comparison must fail before launching Isaac")
+
+    with pytest.raises(ContractError, match="cached comparison mismatch"):
+        _execute(output, candidates=_candidates(1), run_process=must_not_run)
+
+    status = json.loads((output / "statuses" / "0001.json").read_text())
+    assert status["status"] == "failed"
 
 
 def test_resume_reuses_only_verified_completed_cache(tmp_path: Path) -> None:
@@ -219,6 +340,55 @@ def test_resume_runs_remaining_candidate_in_a_new_attempt(tmp_path: Path) -> Non
     ]
 
 
+def test_invalid_interrupted_artifact_records_failure_then_resumes_new_attempt(
+    tmp_path: Path,
+) -> None:
+    def first_run(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    output = tmp_path / "sweep"
+    first = _execute(output, candidates=_candidates(1), run_process=first_run)
+    status_path = output / "statuses" / "0001.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["status"] = "running"
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+    first_output = output / first["candidates"][0]["run_output"]
+    (first_output / "trace.npz").write_bytes(b"interrupted")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("invalid interrupted output must be recorded before retry")
+
+    with pytest.raises(ContractError, match="interrupted artifact verification failed"):
+        _execute(output, candidates=_candidates(1), run_process=must_not_run)
+
+    failed = json.loads(status_path.read_text(encoding="utf-8"))
+    assert failed["status"] == "failed"
+    assert failed["attempt"] == 1
+    assert "trace hash mismatch" in failed["error"]
+
+    resumed_commands: list[list[str]] = []
+
+    def resumed_run(command, **_kwargs):
+        command = list(command)
+        resumed_commands.append(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    resumed = _execute(
+        output,
+        candidates=_candidates(1),
+        run_process=resumed_run,
+    )
+
+    assert len(resumed_commands) == 1
+    assert _argument(resumed_commands[0], "--output").endswith("attempt-0002")
+    assert first_output.is_dir()
+    assert resumed["candidates"][0]["status"] == "completed"
+    assert resumed["candidates"][0]["attempt"] == 2
+
+
 def test_zero_exit_without_result_fails_closed_and_persists_status(tmp_path: Path) -> None:
     def no_result(command, **_kwargs):
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -276,7 +446,10 @@ def test_artifact_provenance_mismatch_fails_closed(tmp_path: Path) -> None:
         command = list(command)
         _write_sim_artifact(
             command,
-            metadata_override={"git_sha": "different", "asset_sha256": "a" * 64},
+            metadata_override=_trace_metadata(
+                load_scenario(_argument(command, "--scenario")),
+                git_sha="different",
+            ),
         )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -285,6 +458,111 @@ def test_artifact_provenance_mismatch_fails_closed(tmp_path: Path) -> None:
             tmp_path / "sweep",
             candidates=_candidates(1),
             run_process=wrong_provenance,
+        )
+
+
+def test_runtime_provenance_provider_hashes_production_inputs(tmp_path: Path) -> None:
+    from tools.sim2real.runtime_provenance import production_runtime_provenance
+    from tools.sim2real.traces import sha256_file
+
+    paths = {
+        "asset_sha256": tmp_path / "RedRhex.usd",
+        "config_sha256": (
+            tmp_path
+            / "source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py"
+        ),
+        "characterization_runner_sha256": tmp_path / "tools/sim2real/isaac_runner.py",
+        "sweep_runner_sha256": tmp_path / "tools/sim2real/sweep_runner.py",
+    }
+    for index, path in enumerate(paths.values(), start=1):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(f"input-{index}".encode())
+
+    def run_git(command, **kwargs):
+        assert command == ["git", "rev-parse", "HEAD"]
+        assert kwargs["cwd"] == tmp_path
+        return subprocess.CompletedProcess(command, 0, stdout="e" * 40 + "\n", stderr="")
+
+    result = production_runtime_provenance(tmp_path, run_git=run_git)
+
+    assert result["git_sha"] == "e" * 40
+    for field, path in paths.items():
+        assert result[field] == sha256_file(path)
+
+
+def test_runtime_provenance_is_required_and_cannot_be_user_overridden(
+    tmp_path: Path,
+) -> None:
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("invalid provenance must fail before launching Isaac")
+
+    missing_output = tmp_path / "missing"
+    with pytest.raises(ContractError, match="runtime provenance missing.*config_sha256"):
+        _execute(
+            missing_output,
+            candidates=_candidates(1),
+            run_process=must_not_run,
+            provenance_provider=lambda: {
+                key: value
+                for key, value in _runtime_provenance().items()
+                if key != "config_sha256"
+            },
+        )
+    assert not missing_output.exists()
+
+    override_output = tmp_path / "override"
+    with pytest.raises(ContractError, match="derived provenance fields cannot be overridden"):
+        _execute(
+            override_output,
+            candidates=_candidates(1),
+            run_process=must_not_run,
+            provenance={"asset_sha256": "f" * 64},
+        )
+    assert not override_output.exists()
+
+
+def test_runtime_asset_hash_changes_cache_identity(tmp_path: Path) -> None:
+    def first_run(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    output = tmp_path / "sweep"
+    _execute(output, candidates=_candidates(1), run_process=first_run)
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("cache identity must reject before launching Isaac")
+
+    with pytest.raises(ContractError, match="existing sweep index does not match"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            run_process=must_not_run,
+            provenance_provider=lambda: _runtime_provenance(
+                asset_sha256="f" * 64
+            ),
+        )
+
+
+def test_artifact_must_report_all_derived_runtime_provenance(tmp_path: Path) -> None:
+    def incomplete_artifact(command, **_kwargs):
+        command = list(command)
+        scenario = load_scenario(_argument(command, "--scenario"))
+        _write_sim_artifact(
+            command,
+            metadata_override=_trace_metadata(
+                scenario,
+                config_sha256=None,
+                characterization_runner_sha256=None,
+            ),
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(ContractError, match="config_sha256 mismatch"):
+        _execute(
+            tmp_path / "sweep",
+            candidates=_candidates(1),
+            run_process=incomplete_artifact,
         )
 
 
@@ -339,6 +617,7 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
 ) -> None:
     from tools.sim2real import sweep_runner
     from tools.sim2real.cli import _run, build_parser
+    from tools.sim2real.runtime_provenance import production_runtime_provenance
 
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps(_profile().to_dict()), encoding="utf-8")
@@ -373,8 +652,10 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
             "--device",
             "cpu",
             "--headless",
+            "--real-trace",
+            str(tmp_path / "real-reference"),
             "--provenance-json",
-            '{"asset_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+            '{"operator":"bench"}',
         ]
     )
 
@@ -390,7 +671,9 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
     assert captured["seed"] == 23
     assert captured["device"] == "cpu"
     assert captured["headless"] is True
-    assert captured["provenance"]["asset_sha256"] == "a" * 64
+    assert captured["real_trace"] == tmp_path / "real-reference"
+    assert captured["provenance"]["operator"] == "bench"
+    assert captured["provenance_provider"] is production_runtime_provenance
 
 
 def test_sweep_cli_generate_only_needs_no_isaac_install(
@@ -429,3 +712,35 @@ def test_sweep_cli_generate_only_needs_no_isaac_install(
     assert captured["generate_only"] is True
     assert captured["command_prefix"] is None
     assert captured["scene_mode"] == "fixed-base"
+    assert captured["real_trace"] is None
+
+
+def test_sweep_cli_execution_requires_explicit_real_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tools.sim2real.cli import _run, build_parser
+
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(_profile().to_dict()), encoding="utf-8")
+    isaac_root = tmp_path / "IsaacLab"
+    isaac_root.mkdir()
+    (isaac_root / "isaaclab.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "sweep",
+            str(profile_path),
+            "--scenario",
+            "main-step",
+            "--mode",
+            "one-factor",
+            "--space-json",
+            '{"simulation_physics.main_drive.damping":[0.3]}',
+            "--output",
+            str(tmp_path / "output"),
+            "--isaaclab-root",
+            str(isaac_root),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--real-trace is required"):
+        _run(args)
