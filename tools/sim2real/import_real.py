@@ -26,6 +26,22 @@ def validate_latency_clock(value: str) -> str:
     return value
 
 
+def resolve_latency_clock(source_path: str | Path, value: str | None) -> str:
+    source = Path(source_path)
+    if source.is_file() and source.suffix == ".npz":
+        if value is None:
+            raise ContractError("numeric NPZ import requires an explicit latency clock")
+        return validate_latency_clock(value)
+    if value is None:
+        return _BAG_LATENCY_CLOCK
+    if value != _BAG_LATENCY_CLOCK:
+        raise ContractError(
+            'rosbag latency clock must be exactly "bag_receive_time"; '
+            "bag extraction uses the SequentialReader receive timestamp"
+        )
+    return _BAG_LATENCY_CLOCK
+
+
 def _load_numeric_npz(path: Path) -> dict[str, np.ndarray]:
     try:
         with np.load(path, allow_pickle=False) as archive:
@@ -263,25 +279,19 @@ def import_real_trace(
     source_kind: str = "real",
     units: Mapping[str, str] | None = None,
     frames: Mapping[str, str] | None = None,
-    latency_clock: str = "bag_receive_time",
+    latency_clock: str | None = None,
     metadata: Mapping[str, Any] | None = None,
     time_bases: Mapping[str, str] | None = None,
     profile: CalibrationProfileV1 | None = None,
 ) -> TraceManifestV1:
     source = Path(source_path)
     spec = scenario if isinstance(scenario, ScenarioSpecV1) else load_scenario(scenario)
+    clock = resolve_latency_clock(source, latency_clock)
     if source.is_file() and source.suffix == ".npz":
-        clock = validate_latency_clock(latency_clock)
         arrays = _load_numeric_npz(source)
         extracted_time_bases: dict[str, str] = {}
         calibration_constants: dict[str, Any] = {}
     else:
-        if latency_clock != _BAG_LATENCY_CLOCK:
-            raise ContractError(
-                'rosbag latency clock must be exactly "bag_receive_time"; '
-                "bag extraction uses the SequentialReader receive timestamp"
-            )
-        clock = _BAG_LATENCY_CLOCK
         arrays, extracted_time_bases, calibration_constants = _load_rosbag(
             source, spec, profile
         )

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1
-from .import_real import import_real_trace
+from .import_real import import_real_trace, resolve_latency_clock
 from .scenarios import load_scenario
 from .traces import _atomic_json, sha256_file, sha256_path
 
@@ -40,7 +40,7 @@ def import_real_dataset(
     scenario: ScenarioSpecV1 | str | Path,
     units: Mapping[str, str] | None = None,
     frames: Mapping[str, str] | None = None,
-    latency_clock: str = "bag_receive_time",
+    latency_clock: str | None = None,
     time_bases: Mapping[str, str] | None = None,
     profile: CalibrationProfileV1 | None = None,
 ) -> DatasetImport:
@@ -49,6 +49,7 @@ def import_real_dataset(
     source = Path(source_path).resolve()
     if not source.exists():
         raise ContractError(f"source path does not exist: {source}")
+    clock = resolve_latency_clock(source, latency_clock)
     spec = scenario if isinstance(scenario, ScenarioSpecV1) else load_scenario(scenario)
     parent = Path(output_root) / "datasets" / "sim2real"
     final = parent / dataset_name
@@ -97,7 +98,7 @@ def import_real_dataset(
             scenario=spec,
             units=units,
             frames=frames,
-            latency_clock=latency_clock,
+            latency_clock=clock,
             time_bases=time_bases,
             profile=profile,
         )

@@ -90,6 +90,8 @@ def _write_drive_trace(
     directory: Path,
     *,
     position_scale: float,
+    source: str,
+    source_path: Path | None = None,
     position_unit: str = "rad",
     scenario: ScenarioSpecV1 | None = None,
 ):
@@ -112,6 +114,9 @@ def _write_drive_trace(
         "config_sha256": None,
         "calibration_constants": {},
     }
+    if source == "real":
+        assert source_path is not None
+        source_path.write_bytes(b"real trace fixture")
     write_trace(
         directory,
         {
@@ -121,15 +126,23 @@ def _write_drive_trace(
             "position": position,
         },
         scenario=scenario,
-        source="sim",
+        source=source,
+        source_path=source_path,
         metadata=metadata,
     )
     return load_trace(directory, scenario=scenario)
 
 
 def test_comparison_keeps_subsystems_separate_without_a_global_score(tmp_path: Path) -> None:
-    real = _write_drive_trace(tmp_path / "real", position_scale=1.0)
-    sim = _write_drive_trace(tmp_path / "sim", position_scale=0.8)
+    real = _write_drive_trace(
+        tmp_path / "real",
+        position_scale=1.0,
+        source="real",
+        source_path=tmp_path / "real-source.npz",
+    )
+    sim = _write_drive_trace(
+        tmp_path / "sim", position_scale=0.8, source="sim"
+    )
 
     result = compare_traces(real, sim, scenario=load_scenario("main-step"))
 
@@ -154,10 +167,17 @@ def test_comparison_rejects_selected_scenario_id_mismatch(
 ) -> None:
     recorded_scenario = load_scenario("main-coast")
     real_loaded = _write_drive_trace(
-        tmp_path / "real", position_scale=1.0, scenario=recorded_scenario
+        tmp_path / "real",
+        position_scale=1.0,
+        source="real",
+        source_path=tmp_path / "real-source.npz",
+        scenario=recorded_scenario,
     )
     sim_loaded = _write_drive_trace(
-        tmp_path / "sim", position_scale=0.8, scenario=recorded_scenario
+        tmp_path / "sim",
+        position_scale=0.8,
+        source="sim",
+        scenario=recorded_scenario,
     )
     real = real_loaded.directory if input_kind == "path" else real_loaded
     sim = sim_loaded.directory if input_kind == "path" else sim_loaded
@@ -175,10 +195,17 @@ def test_comparison_rejects_selected_scenario_hash_mismatch(
     modified_payload["description"] = "Locally modified scenario contract."
     recorded_scenario = ScenarioSpecV1.from_dict(modified_payload)
     real_loaded = _write_drive_trace(
-        tmp_path / "real", position_scale=1.0, scenario=recorded_scenario
+        tmp_path / "real",
+        position_scale=1.0,
+        source="real",
+        source_path=tmp_path / "real-source.npz",
+        scenario=recorded_scenario,
     )
     sim_loaded = _write_drive_trace(
-        tmp_path / "sim", position_scale=0.8, scenario=recorded_scenario
+        tmp_path / "sim",
+        position_scale=0.8,
+        source="sim",
+        scenario=recorded_scenario,
     )
     real = real_loaded.directory if input_kind == "path" else real_loaded
     sim = sim_loaded.directory if input_kind == "path" else sim_loaded
@@ -188,9 +215,17 @@ def test_comparison_rejects_selected_scenario_hash_mismatch(
 
 
 def test_comparison_rejects_unit_or_frame_mismatch(tmp_path: Path) -> None:
-    real = _write_drive_trace(tmp_path / "real", position_scale=1.0)
+    real = _write_drive_trace(
+        tmp_path / "real",
+        position_scale=1.0,
+        source="real",
+        source_path=tmp_path / "real-source.npz",
+    )
     sim = _write_drive_trace(
-        tmp_path / "sim", position_scale=1.0, position_unit="degree"
+        tmp_path / "sim",
+        position_scale=1.0,
+        source="sim",
+        position_unit="degree",
     )
 
     with pytest.raises(ContractError, match="unit mismatch"):
@@ -198,6 +233,56 @@ def test_comparison_rejects_unit_or_frame_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ContractError, match="expected unit"):
         load_trace(tmp_path / "sim", expected_units={"position": "rad"})
+
+
+@pytest.mark.parametrize("input_kind", ["path", "loaded"])
+def test_comparison_rejects_swapped_real_and_sim_sources(
+    tmp_path: Path, input_kind: str
+) -> None:
+    real_loaded = _write_drive_trace(
+        tmp_path / "real-position", position_scale=1.0, source="sim"
+    )
+    sim_loaded = _write_drive_trace(
+        tmp_path / "sim-position",
+        position_scale=0.8,
+        source="real",
+        source_path=tmp_path / "sim-position-source.npz",
+    )
+    real = real_loaded.directory if input_kind == "path" else real_loaded
+    sim = sim_loaded.directory if input_kind == "path" else sim_loaded
+
+    with pytest.raises(ContractError, match='real trace must have source "real"'):
+        compare_traces(real, sim, scenario=load_scenario("main-step"))
+
+
+@pytest.mark.parametrize("input_kind", ["path", "loaded"])
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("sim", 'real trace must have source "real"'),
+        ("real", 'sim trace must have source "sim"'),
+    ],
+)
+def test_comparison_rejects_same_source_inputs(
+    tmp_path: Path, input_kind: str, source: str, message: str
+) -> None:
+    left = _write_drive_trace(
+        tmp_path / "left",
+        position_scale=1.0,
+        source=source,
+        source_path=tmp_path / "left-source.npz" if source == "real" else None,
+    )
+    right = _write_drive_trace(
+        tmp_path / "right",
+        position_scale=0.8,
+        source=source,
+        source_path=tmp_path / "right-source.npz" if source == "real" else None,
+    )
+    real = left.directory if input_kind == "path" else left
+    sim = right.directory if input_kind == "path" else right
+
+    with pytest.raises(ContractError, match=message):
+        compare_traces(real, sim, scenario=load_scenario("main-step"))
 
 
 def test_bidirectional_drive_metrics_do_not_drop_reverse_segments() -> None:

@@ -103,6 +103,7 @@ def test_parser_exposes_the_five_pure_python_commands() -> None:
         ]
     )
     assert parsed.profile == Path("profile.json")
+    assert parsed.latency_clock is None
 
 
 def test_list_validate_and_sweep_commands_emit_json(tmp_path: Path, capsys) -> None:
@@ -260,6 +261,111 @@ def test_numeric_npz_records_its_declared_clock(tmp_path: Path) -> None:
     )
 
     assert manifest.metadata["clock"]["source"] == "synchronized_encoder_clock"
+
+
+def test_numeric_npz_trace_api_requires_an_explicit_clock_before_writing(
+    tmp_path: Path,
+) -> None:
+    source = _npz(tmp_path / "raw.npz")
+    episode = tmp_path / "episode"
+
+    with pytest.raises(ContractError, match="NPZ.*explicit.*clock"):
+        import_real_trace(source, episode, scenario="main-step")
+
+    assert not episode.exists()
+
+
+def test_numeric_npz_dataset_api_requires_an_explicit_clock_before_creation(
+    tmp_path: Path,
+) -> None:
+    source = _npz(tmp_path / "raw.npz")
+
+    with pytest.raises(ContractError, match="NPZ.*explicit.*clock"):
+        import_real_dataset(
+            source,
+            tmp_path,
+            dataset_id="missing-clock",
+            episode_id="episode",
+            scenario="main-step",
+        )
+
+    assert not (tmp_path / "datasets").exists()
+
+
+def test_numeric_npz_cli_requires_an_explicit_clock_before_creation(
+    tmp_path: Path, capsys
+) -> None:
+    source = _npz(tmp_path / "raw.npz")
+
+    code = main(
+        [
+            "import-real",
+            str(source),
+            "--scenario",
+            "main-step",
+            "--output",
+            str(tmp_path),
+            "--dataset-id",
+            "missing-clock",
+            "--episode-id",
+            "episode",
+        ]
+    )
+
+    assert code == 2
+    assert "NPZ" in capsys.readouterr().err
+    assert not (tmp_path / "datasets").exists()
+
+
+def test_rosbag_api_defaults_to_bag_receive_time(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bag = tmp_path / "bag"
+    bag.mkdir()
+    _stub_rosbag_extraction(monkeypatch)
+
+    manifest = import_real_trace(
+        bag,
+        tmp_path / "episode",
+        scenario="main-step",
+    )
+
+    assert manifest.metadata["clock"]["source"] == "bag_receive_time"
+
+
+def test_rosbag_cli_defaults_to_bag_receive_time(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    bag = tmp_path / "bag"
+    bag.mkdir()
+    _stub_rosbag_extraction(monkeypatch)
+
+    assert main(
+        [
+            "import-real",
+            str(bag),
+            "--scenario",
+            "main-step",
+            "--output",
+            str(tmp_path),
+            "--dataset-id",
+            "bag-default-clock",
+            "--episode-id",
+            "episode",
+        ]
+    ) == 0
+    capsys.readouterr()
+    from tools.sim2real.traces import load_trace
+
+    trace = load_trace(
+        tmp_path
+        / "datasets"
+        / "sim2real"
+        / "bag-default-clock"
+        / "episodes"
+        / "episode"
+    )
+    assert trace.manifest.metadata["clock"]["source"] == "bag_receive_time"
 
 
 def test_rosbag_rejects_caller_metadata_that_conflicts_with_used_constants(
@@ -485,6 +591,8 @@ def test_dataset_accepts_new_repetitions_but_refuses_raw_or_episode_overwrite(
             "repeatability",
             "--episode-id",
             "repeat-3",
+            "--latency-clock",
+            "bag_receive_time",
         ]
     ) == 0
     reported = json.loads(capsys.readouterr().out)

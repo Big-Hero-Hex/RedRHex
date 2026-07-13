@@ -26,6 +26,10 @@ def _loaded(
 
 
 def _compatible(real: LoadedTrace, sim: LoadedTrace, scenario: ScenarioSpecV1) -> None:
+    if real.manifest.source != "real":
+        raise ContractError('real trace must have source "real"')
+    if sim.manifest.source != "sim":
+        raise ContractError('sim trace must have source "sim"')
     if real.manifest.scenario_id != sim.manifest.scenario_id:
         raise ContractError("scenario id mismatch")
     for field, label in (("units", "unit"), ("frames", "frame")):

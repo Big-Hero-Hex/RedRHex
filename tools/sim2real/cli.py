@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     importer.add_argument("--output", required=True, type=Path)
     importer.add_argument("--units-json", default="{}")
     importer.add_argument("--frames-json", default="{}")
-    importer.add_argument("--latency-clock", default="bag_receive_time")
+    importer.add_argument("--latency-clock", default=None)
     importer.add_argument("--time-bases-json", default="{}")
     importer.add_argument("--dataset-id", required=True)
     importer.add_argument("--episode-id", required=True)
