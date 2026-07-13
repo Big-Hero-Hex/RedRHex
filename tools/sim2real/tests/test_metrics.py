@@ -8,6 +8,7 @@ import pytest
 from tools.sim2real.compare import compare_traces
 from tools.sim2real.contracts import ContractError, ScenarioSpecV1
 from tools.sim2real.metrics import (
+    abad_static_mapping_metrics,
     bidirectional_coast_metrics,
     bidirectional_step_metrics,
     coast_response_metrics,
@@ -86,6 +87,18 @@ def test_static_measurement_metrics() -> None:
     ] == pytest.approx(0.5)
 
 
+def test_abad_static_metrics_identify_target_scale_and_offset() -> None:
+    command = np.array([-0.2, -0.1, 0.0, 0.1, 0.2])
+    measured = 1.25 * command - 0.03
+
+    result = abad_static_mapping_metrics(command, measured)
+
+    assert result["target_scale"] == pytest.approx(1.25)
+    assert result["target_offset_rad"] == pytest.approx(-0.03)
+    assert result["fit_rmse_rad"] == pytest.approx(0.0, abs=1.0e-12)
+    assert result["sample_count"] == 5
+
+
 def _write_drive_trace(
     directory: Path,
     *,
@@ -94,6 +107,7 @@ def _write_drive_trace(
     source_path: Path | None = None,
     position_unit: str = "rad",
     scenario: ScenarioSpecV1 | None = None,
+    calibration_source: str | None = None,
 ):
     scenario = scenario or load_scenario("main-step")
     time_s = np.arange(0.0, 3.01, 0.05)
@@ -112,7 +126,9 @@ def _write_drive_trace(
         "git_sha": None,
         "asset_sha256": None,
         "config_sha256": None,
-        "calibration_constants": {},
+        "calibration_constants": (
+            {} if calibration_source is None else {"calibration_source": calibration_source}
+        ),
     }
     if source == "real":
         assert source_path is not None
@@ -233,6 +249,31 @@ def test_comparison_rejects_unit_or_frame_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ContractError, match="expected unit"):
         load_trace(tmp_path / "sim", expected_units={"position": "rad"})
+
+
+@pytest.mark.parametrize(
+    "calibration_source",
+    [
+        "provisional_repository_defaults",
+        "profile:partial:with_provisional_fallbacks",
+    ],
+)
+def test_comparison_rejects_provisional_real_hardware_mapping(
+    tmp_path: Path, calibration_source: str
+) -> None:
+    real = _write_drive_trace(
+        tmp_path / "real",
+        position_scale=1.0,
+        source="real",
+        source_path=tmp_path / "real-source.npz",
+        calibration_source=calibration_source,
+    )
+    sim = _write_drive_trace(
+        tmp_path / "sim", position_scale=1.0, source="sim"
+    )
+
+    with pytest.raises(ContractError, match="provisional.*hardware mapping"):
+        compare_traces(real, sim, scenario=load_scenario("main-step"))
 
 
 @pytest.mark.parametrize("input_kind", ["path", "loaded"])
@@ -371,6 +412,48 @@ def test_torsional_spring_dynamic_friction_and_variation_metrics() -> None:
         "steady_speed_rad_s_std": pytest.approx(np.std([1.0, 2.0, 3.0])),
         "steady_speed_rad_s_count": 3,
     }
+
+
+def test_scenario_metrics_include_abad_mapping_and_dynamic_friction(
+    tmp_path: Path,
+) -> None:
+    abad = load_scenario("abad-static")
+    command = np.array([-0.15, 0.0, 0.15])
+    write_trace(
+        tmp_path / "abad",
+        {
+            "command_time_s": np.array([0.0, 1.0, 2.0]),
+            "command": command,
+            "position_time_s": np.array([0.0, 1.0, 2.0]),
+            "position": 0.8 * command + 0.02,
+        },
+        scenario=abad,
+        source="sim",
+    )
+    friction = load_scenario("friction")
+    write_trace(
+        tmp_path / "friction",
+        {
+            "pull_force_time_s": np.array([0.0, 1.0, 2.0]),
+            "pull_force": np.array([20.0, 21.0, 19.0]),
+            "dynamic_pull_force_time_s": np.array([0.0, 1.0, 2.0]),
+            "dynamic_pull_force": np.array([15.0, 16.0, 14.0]),
+            "normal_load_time_s": np.array([0.0, 1.0, 2.0]),
+            "normal_load": np.array([100.0, 100.0, 100.0]),
+        },
+        scenario=friction,
+        source="sim",
+    )
+
+    abad_result = compute_subsystem_metrics(abad, load_trace(tmp_path / "abad"))
+    friction_result = compute_subsystem_metrics(
+        friction, load_trace(tmp_path / "friction")
+    )
+
+    assert abad_result["target_scale"] == pytest.approx(0.8)
+    assert abad_result["target_offset_rad"] == pytest.approx(0.02)
+    assert friction_result["static_friction_coefficient"] == pytest.approx(0.2)
+    assert friction_result["dynamic_friction_coefficient"] == pytest.approx(0.15)
 
 
 @pytest.mark.parametrize(

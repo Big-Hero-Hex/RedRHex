@@ -2,15 +2,16 @@
   "schema_version": 1,
   "scenario_id": "friction",
   "name": "Ground friction measurement",
-  "description": "Estimate static friction from pull-force threshold and normal load; incline-angle trials may be imported separately.",
+  "description": "Estimate static friction from pull-force threshold and dynamic friction from a slow constant-speed pull under measured normal load.",
   "subsystem": "friction",
   "experiment_kind": "friction",
   "joint": "foot_0",
   "command_segments": [{"duration_s": 1.0, "value": 0.1, "label": "slide"}],
   "repeats": 3,
-  "required_channels": ["pull_force", "normal_load"],
+  "required_channels": ["pull_force", "dynamic_pull_force", "normal_load"],
   "time_bases": {
     "pull_force": "pull_force_time_s",
+    "dynamic_pull_force": "dynamic_pull_force_time_s",
     "normal_load": "normal_load_time_s"
   },
   "split": "holdout",

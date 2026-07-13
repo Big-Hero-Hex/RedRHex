@@ -294,6 +294,7 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
     }
     assert set(load_scenario("friction").required_channels) == {
         "pull_force",
+        "dynamic_pull_force",
         "normal_load",
     }
     assert set(load_scenario("spring").required_channels) == {

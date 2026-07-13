@@ -254,6 +254,25 @@ def torsional_spring_metrics(
     }
 
 
+def abad_static_mapping_metrics(command: Any, position: Any) -> dict[str, float | int]:
+    """Fit the observable static ABAD target mapping, without claiming dynamics."""
+
+    targets = _series(command, "command")
+    measured = _series(position, "position")
+    if targets.size != measured.size or targets.size < 3:
+        raise ContractError("ABAD command and position must have at least three matching samples")
+    if float(np.ptp(targets)) <= 0.0:
+        raise ContractError("ABAD command must vary to identify target scale and offset")
+    scale, offset = np.polyfit(targets, measured, 1)
+    residual = measured - (scale * targets + offset)
+    return {
+        "target_scale": float(scale),
+        "target_offset_rad": float(offset),
+        "fit_rmse_rad": float(np.sqrt(np.mean(np.square(residual)))),
+        "sample_count": int(targets.size),
+    }
+
+
 def variation_metrics(values: Any, *, metric_name: str) -> dict[str, float | int]:
     samples = _series(values, metric_name)
     if not metric_name or not isinstance(metric_name, str):
@@ -405,11 +424,7 @@ def compute_subsystem_metrics(
         return mass_com_metrics(arrays["scale_mass"], arrays["support_force"], arrays["support_position"])
     if kind == "abad_static":
         command = _interpolate(trace, "command", "position")
-        error = arrays["position"] - command
-        return {
-            "position_error_mean_rad": float(np.mean(error)),
-            "position_error_std_rad": float(np.std(error)),
-        }
+        return abad_static_mapping_metrics(command, arrays["position"])
     if kind == "spring":
         return torsional_spring_metrics(
             angle_rad=arrays["angle"],
@@ -418,7 +433,11 @@ def compute_subsystem_metrics(
         )
     if kind == "friction":
         return friction_metrics(
-            pull_force=arrays["pull_force"], normal_load=_interpolate(trace, "normal_load", "pull_force")
+            pull_force=arrays["pull_force"],
+            normal_load=_interpolate(trace, "normal_load", "pull_force"),
+            dynamic_pull_force=_interpolate(
+                trace, "dynamic_pull_force", "pull_force"
+            ),
         )
     if kind == "audit":
         return {"sample_count": int(arrays[scenario.required_channels[0]].shape[0])}
