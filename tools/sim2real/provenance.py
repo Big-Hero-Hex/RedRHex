@@ -89,6 +89,8 @@ def _validate_main_drive_mapping(
 def validate_real_trace_provenance(
     real: LoadedTrace,
     scenario: ScenarioSpecV1,
+    *,
+    require_all_main_positions: bool = False,
 ) -> None:
     """Fail closed unless a real trace has the provenance its subsystem requires."""
 
@@ -102,3 +104,15 @@ def validate_real_trace_provenance(
         raise ContractError("scenario hash mismatch")
     if scenario.subsystem == "main_drive":
         _validate_main_drive_mapping(real, scenario)
+        if require_all_main_positions:
+            constants = real.manifest.metadata.get("calibration_constants", {})
+            position_profile = _measured_profile_source(
+                constants.get("position_mapping_source")
+            )
+            all_main_profile = _measured_profile_source(
+                constants.get("all_main_position_mapping_source")
+            )
+            if all_main_profile is None or all_main_profile != position_profile:
+                raise ContractError(
+                    "replay requires measured encoder mapping provenance for all six main joints"
+                )

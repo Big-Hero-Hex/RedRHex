@@ -501,7 +501,9 @@ def load_replay_schedule(
         expected_frames={"command": scenario.joint, "position": scenario.joint},
         require_managed_dataset=True,
     )
-    validate_real_trace_provenance(loaded, scenario)
+    validate_real_trace_provenance(
+        loaded, scenario, require_all_main_positions=True
+    )
 
     time_name = loaded.manifest.time_bases.get("command")
     if time_name is None:
