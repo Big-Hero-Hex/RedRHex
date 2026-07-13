@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scenario_id": "audit",
+  "name": "Runtime property audit",
+  "description": "Record resolved joint, body, actuator, and material properties without motion.",
+  "subsystem": "audit",
+  "experiment_kind": "audit",
+  "joint": "all",
+  "command_segments": [{"duration_s": 0.1, "value": 0.0, "label": "inspect"}],
+  "repeats": 1,
+  "required_channels": ["audit_value"],
+  "time_bases": {"audit_value": "audit_time_s"},
+  "split": "calibration",
+  "scene_mode": "audit",
+  "safety_class": "no_motion"
+}

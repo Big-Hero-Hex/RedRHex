@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "scenario_id": "mass-com",
+  "name": "Mass and center-of-mass measurement",
+  "description": "Estimate total mass and center of mass from repeated scale/support forces and measured support geometry.",
+  "subsystem": "mass_com",
+  "experiment_kind": "mass_com",
+  "joint": "root",
+  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "manual_measurement"}],
+  "repeats": 3,
+  "required_channels": ["scale_mass", "support_force", "support_position"],
+  "time_bases": {
+    "scale_mass": "scale_time_s",
+    "support_force": "support_force_time_s",
+    "support_position": "support_position_time_s"
+  },
+  "split": "holdout",
+  "scene_mode": "manual",
+  "safety_class": "manual_load"
+}

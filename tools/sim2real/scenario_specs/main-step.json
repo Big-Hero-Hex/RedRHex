@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scenario_id": "main-step",
+  "name": "Main drive low-energy step",
+  "description": "Measure onset, rise, steady speed, and overshoot on one selected main drive.",
+  "subsystem": "main_drive",
+  "experiment_kind": "step",
+  "joint": "main_0",
+  "command_segments": [
+    {"duration_s": 0.5, "value": 0.0, "label": "settle"},
+    {"duration_s": 1.0, "value": 0.25, "label": "positive"},
+    {"duration_s": 0.5, "value": 0.0, "label": "neutral"},
+    {"duration_s": 1.0, "value": -0.25, "label": "negative"},
+    {"duration_s": 0.5, "value": 0.0, "label": "finish"}
+  ],
+  "repeats": 3,
+  "required_channels": ["command", "position"],
+  "time_bases": {"command": "command_time_s", "position": "position_time_s"},
+  "split": "calibration",
+  "scene_mode": "fixed_base",
+  "safety_class": "low_energy"
+}

@@ -73,6 +73,8 @@ _build
 
 # Tests
 tests/
+!tools/sim2real/tests/
+!tools/sim2real/tests/*.py
 !/tools/training_panel/tests/
 !/tools/training_panel/tests/*.py
 

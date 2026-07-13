@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "scenario_id": "main-coast",
+  "name": "Main drive coast-down",
+  "description": "Measure passive coast time after a bounded main-drive command.",
+  "subsystem": "main_drive",
+  "experiment_kind": "coast",
+  "joint": "main_0",
+  "command_segments": [
+    {"duration_s": 0.5, "value": 0.0, "label": "settle"},
+    {"duration_s": 0.75, "value": 0.25, "label": "drive"},
+    {"duration_s": 1.5, "value": 0.0, "label": "coast"},
+    {"duration_s": 0.75, "value": -0.25, "label": "reverse_drive"},
+    {"duration_s": 1.5, "value": 0.0, "label": "reverse_coast"}
+  ],
+  "repeats": 3,
+  "required_channels": ["command", "position"],
+  "time_bases": {"command": "command_time_s", "position": "position_time_s"},
+  "split": "holdout",
+  "scene_mode": "fixed_base",
+  "safety_class": "low_energy"
+}

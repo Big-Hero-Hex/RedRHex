@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "scenario_id": "spring",
+  "name": "Damper spring measurement",
+  "description": "Estimate torsional spring stiffness from load force, lever arm, and joint angle.",
+  "subsystem": "spring",
+  "experiment_kind": "spring",
+  "joint": "damper_0",
+  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "manual_measurement"}],
+  "repeats": 3,
+  "required_channels": ["load_force", "lever_arm", "angle"],
+  "time_bases": {
+    "load_force": "load_force_time_s",
+    "lever_arm": "lever_arm_time_s",
+    "angle": "angle_time_s"
+  },
+  "split": "calibration",
+  "scene_mode": "manual",
+  "safety_class": "manual_load"
+}
