@@ -42,6 +42,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     validator = subparsers.add_parser("validate-profile", help="Validate a versioned profile.")
     validator.add_argument("profile", type=Path)
+
+    simulation = subparsers.add_parser(
+        "run-sim", help="Run a finite Isaac Lab characterization scenario."
+    )
+    simulation.add_argument("--scenario", required=True)
+    simulation.add_argument(
+        "--mode", choices=("fixed-base", "free-root", "contact"), required=True
+    )
+    simulation.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help=(
+            "Physics frames. Command scenarios require their exact declared duration; "
+            "audit defaults to 240 and may use another finite length."
+        ),
+    )
+    simulation.add_argument("--output", type=Path, required=True)
+    simulation.add_argument("--physics-profile", type=Path, default=None)
+    simulation.add_argument("--require-contact", action="store_true", default=False)
+    simulation.add_argument("--contact-threshold-n", type=float, default=0.05)
+    simulation.add_argument("--seed", type=int, default=0)
+    simulation.add_argument("--headless", action="store_true", default=False)
+    simulation.add_argument("--device", default="cuda:0")
     return parser
 
 
@@ -163,13 +187,21 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         }
         _write_json(args.output / "index.json", index_payload)
         return index_payload
+    if args.command == "run-sim":
+        # Importing this bootstrap is the first point at which Isaac Lab is
+        # required. All CPU-only commands and parser construction stay light.
+        from .isaac_main import run
+
+        return run(args)
     raise ValueError(f"unknown command: {args.command}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        _emit(_run(args))
+        result = _run(args)
+        if args.command != "run-sim":
+            _emit(result)
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -210,8 +210,8 @@ REDRHEX_CFG = ArticulationCfg(
                 "Revolute_15", "Revolute_7", "Revolute_12",
                 "Revolute_18", "Revolute_23", "Revolute_24",
             ],
-            effort_limit=15.0,       # 最大力矩限制（牛頓米）- 馬達能出的最大力
-            velocity_limit=15.0,     # 最大轉速限制（弧度/秒）
+            effort_limit_sim=15.0,   # PhysX 最大力矩限制（牛頓米）
+            velocity_limit_sim=15.0, # PhysX 最大轉速限制（弧度/秒）
             stiffness=0.0,           # 剛性 = 0，表示純速度控制（不追蹤位置）
             damping=1.0,             # ★ 阻尼值：決定馬達推力強度！數值越大越有力
         ),
@@ -226,8 +226,8 @@ REDRHEX_CFG = ArticulationCfg(
                 "Revolute_14", "Revolute_6", "Revolute_11",
                 "Revolute_17", "Revolute_22", "Revolute_21",
             ],
-            effort_limit=8.0,        # 力矩限制（較小，因為只需微調）
-            velocity_limit=5.0,      # 速度限制（不需要快速擺動）
+            effort_limit_sim=8.0,    # PhysX 力矩限制（較小，因為只需微調）
+            velocity_limit_sim=5.0,  # PhysX 速度限制（不需要快速擺動）
             stiffness=40.0,          # 較高剛性：讓關節能精準到達目標位置
             damping=4.0,             # 中等阻尼：防止過度震盪
         ),
@@ -247,8 +247,8 @@ REDRHEX_CFG = ArticulationCfg(
                 "Revolute_5", "Revolute_8", "Revolute_13",
                 "Revolute_25", "Revolute_26", "Revolute_27",
             ],
-            effort_limit=50.0,       # 高力矩：能抵抗外力維持位置
-            velocity_limit=1.0,      # 極低速度限制：防止快速移動
+            effort_limit_sim=50.0,   # PhysX 高力矩：能抵抗外力維持位置
+            velocity_limit_sim=1.0,  # PhysX 極低速度限制：防止快速移動
             stiffness=200.0,         # 超高剛性：像彈簧一樣強力拉回原位
             damping=20.0,            # 高阻尼：吸收任何震動
         ),

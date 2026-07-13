@@ -25,6 +25,12 @@ parser.add_argument("--video_interval", type=int, default=2000, help="Interval b
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
+    "--physics-profile",
+    type=str,
+    default=None,
+    help="Explicit CalibrationProfileV1 JSON override; defaults never load a candidate profile.",
+)
+parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -282,8 +288,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "(pass --panel_overrides to apply it)."
                 )
 
+    physics_profile = None
+    if args_cli.physics_profile is not None:
+        repo_root = Path(__file__).resolve().parents[2]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from tools.sim2real.physics_profile import apply_profile_to_config, load_optional_profile
+
+        physics_profile = load_optional_profile(args_cli.physics_profile)
+        apply_profile_to_config(env_cfg, physics_profile)
+        print(f"[INFO] Explicit physics profile applied to config: {physics_profile.profile_id}")
+
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    if args_cli.physics_profile is not None:
+        from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+        apply_profile_to_runtime_env(env, physics_profile)
+        print(f"[INFO] Explicit physics profile applied at runtime: {physics_profile.profile_id}")
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
