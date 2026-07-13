@@ -324,7 +324,13 @@ def _write_replay_trace(
     ambiguous_position: bool = False,
 ) -> Path:
     from tools.sim2real.characterization import scenario_schedule, scenario_step_count
-    from tools.sim2real.traces import write_trace
+    from tools.sim2real.contracts import CalibrationProfileV1
+    from tools.sim2real.traces import (
+        sha256_file,
+        sha256_json,
+        sha256_path,
+        write_trace,
+    )
 
     scenario = load_scenario(scenario_id)
     steps = scenario_step_count(scenario, 1.0 / 120.0)
@@ -336,49 +342,163 @@ def _write_replay_trace(
         [nominal[min(int(time_s * 120.0), steps - 1)].value for time_s in command_time],
         dtype=np.float64,
     )
-    raw = tmp_path / f"{scenario_id}-raw.bin"
+    dataset = tmp_path / "datasets" / "sim2real" / f"{scenario_id}-dataset"
+    raw = dataset / "raw" / f"{scenario_id}-raw.bin"
+    output = dataset / "episodes" / "episode-1"
+    raw.parent.mkdir(parents=True)
+    output.parent.mkdir(parents=True)
     raw.write_bytes(b"immutable raw replay source")
-    output = tmp_path / f"{scenario_id}-episode"
-    constants = dict(calibration_constants or {})
-    initial_state = {
+    joints = [f"main_{index}" for index in range(6)]
+    profile = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "replay-fixture-profile",
+            "hardware_mapping": {
+                "encoder_counts_per_rev": {joint: 54984.83 for joint in joints},
+                "encoder_zero_count": {joint: 0.0 for joint in joints},
+                "encoder_sign": {joint: 1 for joint in joints},
+                "joint_direction": {scenario.joint: 1},
+                "pwm_scale": {scenario.joint: 1.0 / 120.0},
+                "pwm_cap": {scenario.joint: 500.0 / 120.0},
+            },
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+    constants = {
+        "position_mapping_source": f"profile:{profile.profile_id}",
+        "all_main_position_mapping_source": f"profile:{profile.profile_id}",
+        "requested_command_source": f"profile:{profile.profile_id}",
+        **dict(calibration_constants or {}),
+    }
+    position_time = np.asarray(
+        [0.0, 0.1, 0.2, 0.3, 0.4, final_time], dtype=np.float64
+    )
+    initial_positions = np.asarray(
+        [initial_position_rad, 0.2, 0.3, -0.1, -0.2, -0.3], dtype=np.float64
+    )
+    canonical_position = np.tile(initial_positions, (position_time.size, 1))
+    fixture = {
         "schema_version": 1,
-        "joint": scenario.joint,
-        "source_channel": "position",
-        "position_rad": initial_position_rad,
+        "fixture_id": "suspended-level-v1",
+        "scene_mode": "fixed_base",
+        "fixture_frame": "world",
+        "root_orientation_wxyz": [
+            0.7071067811865476,
+            0.7071067811865475,
+            0.0,
+            0.0,
+        ],
+        "expected_imu_orientation_xyzw": [
+            0.7071067811865475,
+            0.0,
+            0.0,
+            0.7071067811865476,
+        ],
+    }
+    initial_state = {
+        "schema_version": 2,
+        "joint_order": joints,
+        "position_source_channel": "main_joint_position_canonical",
+        "position_rad": initial_positions.tolist(),
+        "velocity_rad_s": [0.0] * 6,
+        "velocity_source": "stationary_window_linear_fit",
+        "velocity_window_start_s": 0.0,
+        "velocity_window_end_s": 0.4,
+        "velocity_stationarity_limit_rad_s": 0.05,
+        "fixture_mode": "fixed_base",
+        "fixture_frame": "world",
+        "root_pose_source": "reviewed_fixture",
+        "fixture_id": fixture["fixture_id"],
+        "fixture_sha256": sha256_json(fixture),
+        "root_orientation_wxyz": fixture["root_orientation_wxyz"],
+        "imu_orientation_source_channel": "imu_orientation_xyzw",
+        "measured_imu_orientation_xyzw": fixture[
+            "expected_imu_orientation_xyzw"
+        ],
+        "expected_imu_orientation_xyzw": fixture[
+            "expected_imu_orientation_xyzw"
+        ],
+        "imu_orientation_error_rad": 0.0,
+        "imu_orientation_tolerance_rad": math.radians(5.0),
+        "imu_angular_velocity_source_channel": "imu_angular_velocity",
+        "max_imu_angular_speed_rad_s": 0.0,
+        "imu_stationarity_limit_rad_s": 0.1,
         "sample_time_s": 0.0,
         "scenario_time_s": 0.0,
         "sample_offset_s": 0.0,
     }
     if declare_initial_state:
-        from tools.sim2real.traces import sha256_json
-
         constants["replay_initial_state"] = initial_state
         constants["replay_initial_state_sha256"] = sha256_json(initial_state)
-    position = (
-        np.full((2, 2), initial_position_rad, dtype=np.float64)
-        if ambiguous_position
-        else np.full(2, initial_position_rad, dtype=np.float64)
+    if ambiguous_position:
+        canonical_position = canonical_position[:, :2]
+    imu_orientation = np.tile(
+        np.asarray(fixture["expected_imu_orientation_xyzw"], dtype=np.float64),
+        (position_time.size, 1),
     )
     metadata = {
-        "units": {"command": unit, "position": "rad"},
+        "units": {
+            "command": unit,
+            "position": "rad",
+            "main_joint_position_canonical": "rad",
+            "imu_orientation_xyzw": "quaternion_xyzw",
+            "imu_angular_velocity": "rad/s",
+        },
         "frames": {
             "command": frame or scenario.joint,
             "position": scenario.joint,
+            "main_joint_position_canonical": "canonical_main_joint_order",
+            "imu_orientation_xyzw": "imu_mount",
+            "imu_angular_velocity": "imu_mount",
         },
         "calibration_constants": constants,
     }
-    write_trace(
+    manifest = write_trace(
         output,
         {
             "command_time_s": command_time,
             "command": command,
-            "position_time_s": np.asarray([0.0, final_time], dtype=np.float64),
-            "position": position,
+            "position_time_s": position_time,
+            "position": canonical_position[:, 0],
+            "main_joint_position_canonical": canonical_position,
+            "imu_time_s": position_time,
+            "imu_orientation_xyzw": imu_orientation,
+            "imu_angular_velocity": np.zeros((position_time.size, 3)),
         },
         scenario=scenario,
         source=source,
         source_path=raw,
         metadata=metadata,
+        profile=profile,
+        time_bases={
+            "main_joint_position_canonical": "position_time_s",
+            "imu_orientation_xyzw": "imu_time_s",
+            "imu_angular_velocity": "imu_time_s",
+        },
+    )
+    dataset_manifest = {
+        "schema_version": 1,
+        "dataset_id": f"{scenario_id}-dataset",
+        "raw": [
+            {
+                "path": f"raw/{raw.name}",
+                "sha256": sha256_path(raw),
+            }
+        ],
+        "episodes": [
+            {
+                "episode_id": "episode-1",
+                "scenario_id": scenario.scenario_id,
+                "path": "episodes/episode-1",
+                "trace_sha256": manifest.provenance["trace_sha256"],
+                "metadata_sha256": sha256_file(output / "metadata.json"),
+                "raw_path": f"raw/{raw.name}",
+            }
+        ],
+    }
+    (dataset / "manifest.json").write_text(
+        json.dumps(dataset_manifest), encoding="utf-8"
     )
     return output
 
@@ -400,8 +520,10 @@ def test_real_trace_replay_verifies_provenance_and_resamples_exact_scenario(
     assert replay.schedule[59].value == pytest.approx(0.0)
     assert replay.schedule[60].value == pytest.approx(0.25)
     assert len(replay.trace_sha256) == 64
-    assert replay.initial_state.position_rad == pytest.approx(0.125)
-    assert replay.initial_state.joint == "main_0"
+    assert replay.initial_state.position_rad[0] == pytest.approx(0.125)
+    assert replay.initial_state.joint_order == tuple(
+        f"main_{index}" for index in range(6)
+    )
     assert len(replay.initial_state_sha256) == 64
 
 
@@ -409,7 +531,7 @@ def test_real_trace_replay_verifies_provenance_and_resamples_exact_scenario(
     ("override", "expected"),
     [
         ({"declare_initial_state": False}, "initial state declaration"),
-        ({"ambiguous_position": True}, "one-dimensional"),
+        ({"ambiguous_position": True}, "shape"),
     ],
     ids=("missing-declaration", "ambiguous-position-channel"),
 )
@@ -439,8 +561,14 @@ def test_real_trace_replay_rejects_initial_state_hash_mismatch(tmp_path: Path) -
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     payload["metadata"]["calibration_constants"]["replay_initial_state"][
         "position_rad"
-    ] = 0.5
+    ][0] = 0.5
     metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    from tools.sim2real.traces import sha256_file
+
+    dataset_manifest_path = trace.parents[1] / "manifest.json"
+    dataset_manifest = json.loads(dataset_manifest_path.read_text(encoding="utf-8"))
+    dataset_manifest["episodes"][0]["metadata_sha256"] = sha256_file(metadata_path)
+    dataset_manifest_path.write_text(json.dumps(dataset_manifest), encoding="utf-8")
 
     with pytest.raises(ContractError, match="initial state hash"):
         load_replay_schedule(
