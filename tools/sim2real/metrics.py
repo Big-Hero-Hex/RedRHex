@@ -485,13 +485,22 @@ def mass_com_metrics(
         raise ContractError("support_force must be finite and non-negative")
     if positions.shape[0] != representative_force.size or not np.isfinite(positions).all():
         raise ContractError("support_position shape must match the support count")
-    total_force = float(np.sum(representative_force))
-    if total_force <= 0.0:
-        raise ContractError("support force sum must be positive")
-    com = np.sum(
-        positions * representative_force.reshape((-1,) + (1,) * (positions.ndim - 1)),
-        axis=0,
-    ) / total_force
+    def weighted_com(force_vector: np.ndarray) -> np.ndarray:
+        total_force = float(np.sum(force_vector))
+        if total_force <= 0.0:
+            raise ContractError("support force sum must be positive")
+        return np.asarray(
+            np.sum(
+                positions
+                * force_vector.reshape(
+                    (-1,) + (1,) * (positions.ndim - 1)
+                ),
+                axis=0,
+            )
+            / total_force
+        )
+
+    com = weighted_com(representative_force)
     clean_com: Any = float(com) if np.ndim(com) == 0 else np.asarray(com).tolist()
     result = {"mass_kg": float(np.median(masses)), "com_m": clean_com}
     if repeat_index is not None or expected_repeats is not None:
@@ -505,17 +514,33 @@ def mass_com_metrics(
         per_repeat_mass = np.asarray(
             [float(np.median(masses[repeats == repeat_id])) for repeat_id in repeat_ids]
         )
+        per_repeat_com = np.asarray(
+            [
+                weighted_com(np.median(forces[repeats == repeat_id], axis=0))
+                for repeat_id in repeat_ids
+            ]
+        )
         result.update(
             {
                 "repeat_count": int(repeat_ids.size),
                 "mass_kg_std": float(np.std(per_repeat_mass)),
+                "com_m_std": (
+                    float(np.std(per_repeat_com))
+                    if per_repeat_com.ndim == 1
+                    else np.std(per_repeat_com, axis=0).tolist()
+                ),
                 "repeats": [
                     {
                         "repeat_index": int(repeat_id),
                         "mass_kg": float(mass),
+                        "com_m": (
+                            float(repeat_com)
+                            if np.ndim(repeat_com) == 0
+                            else np.asarray(repeat_com).tolist()
+                        ),
                     }
-                    for repeat_id, mass in zip(
-                        repeat_ids, per_repeat_mass, strict=True
+                    for repeat_id, mass, repeat_com in zip(
+                        repeat_ids, per_repeat_mass, per_repeat_com, strict=True
                     )
                 ],
             }

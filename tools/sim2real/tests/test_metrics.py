@@ -85,6 +85,30 @@ def test_static_measurement_metrics() -> None:
     assert mass_com["mass_kg"] == pytest.approx(10.0)
     assert mass_com["com_m"] == pytest.approx(0.4)
     assert mass_com["repeat_count"] == 3
+    assert mass_com["com_m_std"] == pytest.approx(0.0)
+    assert [item["com_m"] for item in mass_com["repeats"]] == pytest.approx(
+        [0.4, 0.4, 0.4]
+    )
+
+
+def test_mass_com_reports_planar_repeat_variation() -> None:
+    result = mass_com_metrics(
+        scale_mass=np.array([10.0, 10.1, 9.9]),
+        support_force=np.array(
+            [
+                [60.0, 40.0],
+                [55.0, 45.0],
+                [65.0, 35.0],
+            ]
+        ),
+        support_position=np.array([[0.0, 0.0], [1.0, 0.5]]),
+        repeat_index=np.arange(3),
+        expected_repeats=3,
+    )
+
+    np.testing.assert_allclose(result["com_m"], [0.4, 0.2])
+    np.testing.assert_allclose(result["com_m_std"], np.std([[0.4, 0.2], [0.45, 0.225], [0.35, 0.175]], axis=0))
+    assert result["repeats"][1]["com_m"] == pytest.approx([0.45, 0.225])
 
 
 def test_abad_static_metrics_fit_only_settled_samples_and_report_repeat_variation() -> None:
