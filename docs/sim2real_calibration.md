@@ -62,7 +62,9 @@ Preview the bounded probe before starting ROS output:
 ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --dry-run
 ```
 
-The probe has a fixed 60 Hz, three-repeat, low-energy sequence. Its only selectable physical output is main-drive index `0..5`; amplitude, rate, durations, waveform, and safety checks are not CLI parameters. Actual output requires both `--enable` and `--confirm-risk`. Every tick requires the probe to be the sole `/redrhex/motor_commands` publisher, and a scheduler delay that reaches one 60 Hz period aborts instead of replaying stale commands in a burst.
+The probe has a fixed 60 Hz, three-repeat, low-energy sequence. Its only selectable physical output is main-drive index `0..5`; amplitude, rate, durations, waveform, and safety checks are not CLI parameters. Actual output requires `--enable`, `--confirm-risk`, and `--confirm-abad-disable`. The low-level bridge also owns a 0.25 s exclusive probe lease: a concurrent normal enabled command latches a conflict and forces disable, while an expired live probe lease forces disable. Every tick still requires the probe to be the sole `/redrhex/motor_commands` publisher, and a scheduler delay that reaches one 60 Hz period aborts instead of replaying stale commands in a burst.
+
+BioRoLa has no per-servo ABAD enable bit. Keep `rinbo.probe_abad_disable_verified=false` until ABAD power is physically isolated or `disabled_servo_control_mode=0` has been physically verified non-moving. Enabled probes are blocked while it is false. Only after that verification may the bridge be restarted with `probe_abad_disable_verified: true`; the CLI confirmation flag does not substitute for the interlock.
 
 Only after every prerequisite above has been physically verified, start the reviewed sequence with:
 
@@ -70,7 +72,8 @@ Only after every prerequisite above has been physically verified, start the revi
 ros2 run redrhex_rl_controller sim2real_probe \
   --main-index 0 \
   --enable \
-  --confirm-risk
+  --confirm-risk \
+  --confirm-abad-disable
 ```
 
 Each leg has a bound reviewed scenario, `suspended-main-0-step-coast` through `suspended-main-5-step-coast`. The preview and JSON event stream report that exact scenario ID, version, and SHA-256 hash. Scenarios 0–4 are calibration conditions; main 5 is the default unused-leg holdout. Do not move the holdout into a sweep after looking at its result.

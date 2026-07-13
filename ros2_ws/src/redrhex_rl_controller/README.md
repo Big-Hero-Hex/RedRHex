@@ -858,6 +858,7 @@ redrhex_lowlevel_bridge:
       allow_enable: false
       publish_when_disabled: false
       disabled_servo_control_mode: 0
+      probe_abad_disable_verified: false
       publish_shutdown_disable: true
       shutdown_disable_repeats: 5
       shutdown_disable_period_s: 0.02
@@ -887,6 +888,8 @@ redrhex_lowlevel_bridge:
 `preview_topic` 是安全預覽 topic。當 `publish_preview: true` 時，adapter 會把轉換後的 `rinbo_msgs/MotorCmdStamped` 發到 `/redrhex/rinbo_motor_command_preview`，讓你在 `allow_enable=false` 時也能檢查 `l1/l2/.../sr3` 的 PWM、direction、servo encoder。BioRoLaROS2 bridge 不會訂閱這個 topic，所以它不會讓馬達動。
 
 `publish_when_disabled: false` 也先保持 false。BioRoLaROS2 的 ABAD servo command 沒有 per-servo enable 欄位；如果 disabled command 也 publish，servo 仍可能吃到 `position_encoder`。所以 dry-run 階段只看 `/redrhex/motor_commands`，不要讓 adapter publish `/motor/command`。實際輸出還需要明確收到 `/estop=false`；`enable=false` 永遠覆蓋 `main_drive_enable[6]` 與 `abad_output_enable`，而 `enable=true` 時只有 mask 選中的 main drives 與 aggregate ABAD output 可以動。如果 adapter 從任何有效 enabled mask 切換為全 disabled，會依 `shutdown_disable_repeats` 連續送出多包 all-disabled command，不依賴單一封包。等你確認伺服電源斷開、或確認 `servo_control_mode=0` 真的不會動，再暫時打開它做 message-level 測試。
+
+`probe_abad_disable_verified: false` 是額外的 bridge 端硬擋。BioRoLa 沒有 per-servo enable，所以固定 main-drive probe 在這個值為 false 時一律拒絕 enabled output。只有在 ABAD 電源已物理隔離，或已實測 `disabled_servo_control_mode=0` 完全不會動後，才把它改成 `probe_abad_disable_verified: true` 並安全重啟 bridge；CLI 的確認旗標不能取代這項硬體驗證。
 
 `publish_shutdown_disable: true` 代表你 Ctrl-C 關掉 RedRhex bridge 時，adapter 會補送幾包 disabled command 到 `/motor/command`。這是軟體保險，不能取代 sbRIO watchdog 或實體急停；但它可以降低「節點關掉後低階端保留上一包 PWM」的風險。
 
@@ -1335,6 +1338,7 @@ preview 會列出綁定該腿的 immutable scenario ID、schema version 和 SHA-
 馬達電源/driver 已設保守限流
 機器人穩固架空，線材不會捲入
 sbRIO watchdog 已驗證會在 command 中斷時關閉馬達
+ABAD 伺服電源已隔離，或 disabled servo mode 已實測完全不動
 ```
 
 先停止 RL controller、`motor_command_tool`、`rinbo_tripod` 等其他 command publisher，確認只有 `redrhex_lowlevel_bridge` 訂閱 `/redrhex/motor_commands`。probe 在每一個 60 Hz tick 都要求：ROS graph 中它自己是 `/redrhex/motor_commands` 唯一 publisher、command subscriber 可見、callback 接收時間在 0.25 秒內且值為 true 的 `/redrhex/lowlevel_heartbeat`、callback 接收時間在 0.25 秒內的 `/joint_states`，以及明確收到 `/estop=false`。無法查詢 graph、出現第二個 command publisher，或任何 safety input 消失、變 false、過期，都會 abort 並重送 disabled packets。
@@ -1358,7 +1362,7 @@ ros2 bag record -o redrhex_probe_main0_raw \
 bag 開始後，才在另一個 terminal 明確給兩個 actuation 授權：
 
 ```bash
-ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --enable --confirm-risk
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --enable --confirm-risk --confirm-abad-disable
 ```
 
 事件 topic 是 machine-readable JSON `std_msgs/String`，包含 scenario、repetition、segment、abort、complete marker 與 immutable physical PWM ceiling。保留原始 rosbag directory 不修改；後續可以離線反覆 import/compare，不需要再讓真機重跑。probe 與 low-level adapter 都停用 rclpy 自動 signal shutdown；Ctrl-C/SIGTERM 會先在 ROS context 仍有效時 unwind、重送 disabled packets，再關閉 context。若 context 已被其他程式路徑提前 invalidated，軟體仍會嘗試所有 terminal packets、輸出 CRITICAL fallback，最後只能依賴已驗證的 sbRIO watchdog 與實體急停。若 E-stop、heartbeat、joint state、subscriber 或程序有任何異常，先切實體急停並修正原因，不要直接重試。
@@ -1751,6 +1755,7 @@ redrhex_lowlevel_bridge:
       allow_enable: false
       publish_when_disabled: false
       disabled_servo_control_mode: 0
+      probe_abad_disable_verified: false
       publish_shutdown_disable: true
       shutdown_disable_repeats: 5
       shutdown_disable_period_s: 0.02

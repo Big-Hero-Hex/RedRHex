@@ -13,7 +13,11 @@ from std_msgs.msg import Bool
 
 from redrhex_msgs.msg import RedRhexMotorCommand, RedRhexMotorState
 
-from .command_safety import FailClosedOutputGate, dispatch_command_fail_closed
+from .command_safety import (
+    FailClosedOutputGate,
+    ProbeSessionGate,
+    dispatch_command_fail_closed,
+)
 from .mock_bridge import MockLowLevelBridge
 from .rinbo_ros_backend import RinboRosBackend
 from .serial_bridge import SerialLowLevelBridge
@@ -62,6 +66,7 @@ class LowLevelBridgeNode(Node):
         self.declare_parameter("rinbo.allow_enable", False)
         self.declare_parameter("rinbo.publish_when_disabled", False)
         self.declare_parameter("rinbo.disabled_servo_control_mode", 0)
+        self.declare_parameter("rinbo.probe_abad_disable_verified", False)
         self.declare_parameter("rinbo.publish_shutdown_disable", True)
         self.declare_parameter("rinbo.shutdown_disable_repeats", 5)
         self.declare_parameter("rinbo.shutdown_disable_period_s", 0.02)
@@ -84,7 +89,12 @@ class LowLevelBridgeNode(Node):
         self.declare_parameter("rinbo.abad_encoder_max", 65535)
         self.declare_parameter("rinbo.abad_sign_rinbo_order", [1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
         self.declare_parameter("rinbo.servo_control_mode", 2)
+        self.declare_parameter("sim2real_probe.session_timeout_s", 0.25)
         self.declare_parameter("feedback_rate_hz", 50.0)
+
+        self.probe_session_gate = ProbeSessionGate(
+            float(self.get_parameter("sim2real_probe.session_timeout_s").value)
+        )
 
         backend = str(self.get_parameter("backend").value)
         if backend == "mock":
@@ -118,6 +128,7 @@ class LowLevelBridgeNode(Node):
                 bool(self.get_parameter("rinbo.allow_enable").value),
                 bool(self.get_parameter("rinbo.publish_when_disabled").value),
                 int(self.get_parameter("rinbo.disabled_servo_control_mode").value),
+                bool(self.get_parameter("rinbo.probe_abad_disable_verified").value),
                 bool(self.get_parameter("rinbo.publish_shutdown_disable").value),
                 int(self.get_parameter("rinbo.shutdown_disable_repeats").value),
                 float(self.get_parameter("rinbo.shutdown_disable_period_s").value),
@@ -161,8 +172,15 @@ class LowLevelBridgeNode(Node):
 
     def _on_motor_command(self, msg: RedRhexMotorCommand) -> None:
         try:
+            self.probe_session_gate.authorize(
+                msg, output_active=self.output_gate.output_active
+            )
             dispatch_command_fail_closed(self.output_gate, self.bridge, msg)
         except Exception as exc:
+            if bool(msg.enable) and bool(getattr(msg, "sim2real_probe", False)):
+                self.probe_session_gate.latch_failure(
+                    f"probe command path failed: {exc}"
+                )
             self.get_logger().error(f"Failed to send motor command: {exc}")
             if self.output_gate.output_active or self.output_gate.disable_pending:
                 self._emergency_disable("motor command rejected or failed")
@@ -181,6 +199,13 @@ class LowLevelBridgeNode(Node):
             self.get_logger().error(f"Emergency motor disable failed ({reason}): {exc}")
 
     def _tick(self) -> None:
+        if self.probe_session_gate.poll(
+            output_active=self.output_gate.output_active
+        ):
+            self.output_gate.require_disable()
+            self._emergency_disable(
+                "sim2real probe lease expired while output was active"
+            )
         alive = self.bridge.is_alive()
         state_fresh = self.bridge.output_state_is_fresh()
         self.output_gate.on_state_freshness(state_fresh)
@@ -192,7 +217,12 @@ class LowLevelBridgeNode(Node):
             )
             self._emergency_disable(reason)
         hb = Bool()
-        hb.data = bool(alive and state_fresh and self.output_gate.ready_for_output)
+        hb.data = bool(
+            alive
+            and state_fresh
+            and self.output_gate.ready_for_output
+            and not self.probe_session_gate.conflict_latched
+        )
         self.heartbeat_pub.publish(hb)
 
         state = self.bridge.read_motor_state()
@@ -202,9 +232,24 @@ class LowLevelBridgeNode(Node):
         status = DiagnosticStatus()
         status.name = "redrhex_lowlevel_bridge"
         status.hardware_id = self.backend
-        status.level = DiagnosticStatus.OK if alive else DiagnosticStatus.ERROR
-        status.message = "alive" if alive else "not alive"
-        status.values = [KeyValue(key="backend", value=self.backend)]
+        bridge_ready = alive and not self.probe_session_gate.conflict_latched
+        status.level = DiagnosticStatus.OK if bridge_ready else DiagnosticStatus.ERROR
+        status.message = "alive" if bridge_ready else "not ready"
+        status.values = [
+            KeyValue(key="backend", value=self.backend),
+            KeyValue(
+                key="sim2real_probe_session_active",
+                value=str(self.probe_session_gate.active),
+            ),
+            KeyValue(
+                key="sim2real_probe_conflict_latched",
+                value=str(self.probe_session_gate.conflict_latched),
+            ),
+            KeyValue(
+                key="sim2real_probe_conflict_reason",
+                value=self.probe_session_gate.conflict_reason or "none",
+            ),
+        ]
         if hasattr(self.bridge, "diagnostic_values"):
             status.values.extend(
                 KeyValue(key=key, value=value) for key, value in self.bridge.diagnostic_values().items()

@@ -705,7 +705,19 @@ def test_actual_run_requires_enable_and_risk_confirmation_before_ros(monkeypatch
         probe.main(["--main-index", "0", "--enable"])
     assert calls == []
 
-    assert probe.main(["--main-index", "0", "--enable", "--confirm-risk"]) == 0
+    with pytest.raises(SystemExit, match="--confirm-abad-disable"):
+        probe.main(["--main-index", "0", "--enable", "--confirm-risk"])
+    assert calls == []
+
+    assert probe.main(
+        [
+            "--main-index",
+            "0",
+            "--enable",
+            "--confirm-risk",
+            "--confirm-abad-disable",
+        ]
+    ) == 0
     assert len(calls) == 1
 
 
@@ -734,7 +746,13 @@ def test_ros_adapter_uses_callback_receive_time_topics_and_immediate_abort_hooks
         and isinstance(arg.value, str)
         and arg.value.startswith("--")
     }
-    assert option_strings == {"--main-index", "--dry-run", "--enable", "--confirm-risk"}
+    assert option_strings == {
+        "--main-index",
+        "--dry-run",
+        "--enable",
+        "--confirm-risk",
+        "--confirm-abad-disable",
+    }
     assert '"/redrhex/motor_commands"' in source
     assert '"/redrhex/lowlevel_heartbeat"' in source
     assert '"/joint_states"' in source
@@ -767,7 +785,11 @@ def test_setup_registers_probe_and_operator_docs_are_fail_safe() -> None:
 
     assert "sim2real_probe = redrhex_rl_controller.sim2real_probe:main" in setup
     assert "sim2real_probe --main-index 0 --dry-run" in readme
-    assert "sim2real_probe --main-index 0 --enable --confirm-risk" in readme
+    assert (
+        "sim2real_probe --main-index 0 --enable --confirm-risk "
+        "--confirm-abad-disable" in readme
+    )
+    assert "probe_abad_disable_verified: true" in readme
     assert "/motor/command" in readme and "/motor/state" in readme
     assert "60 Hz" in readme
     assert "990" in readme and "16.5" in readme

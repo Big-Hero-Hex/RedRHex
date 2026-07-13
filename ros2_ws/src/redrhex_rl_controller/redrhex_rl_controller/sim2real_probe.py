@@ -46,6 +46,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Confirm physical E-stop, current limiting, suspension, and sbRIO watchdog.",
     )
+    parser.add_argument(
+        "--confirm-abad-disable",
+        action="store_true",
+        help=(
+            "Confirm ABAD power is isolated or BioRoLa disabled-servo behavior was "
+            "physically verified non-moving and the bridge interlock is enabled."
+        ),
+    )
     return parser
 
 
@@ -262,5 +270,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "Refusing --enable without --confirm-risk. Suspend the robot and verify "
             "all physical safeguards."
+        )
+    if not args.confirm_abad_disable:
+        raise SystemExit(
+            "Refusing --enable without --confirm-abad-disable. Isolate ABAD servo "
+            "power or physically verify the disabled servo mode, then enable the "
+            "low-level bridge ABAD-disable interlock."
         )
     return _run_ros(args)

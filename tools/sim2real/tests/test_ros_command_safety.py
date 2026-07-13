@@ -128,6 +128,109 @@ def test_disabled_command_overrides_even_malformed_masks():
     assert selection.any_enabled is False
 
 
+def test_bridge_owned_probe_lease_blocks_concurrent_normal_output() -> None:
+    safety = _command_safety()
+    now = [0.0]
+    gate = safety.ProbeSessionGate(timeout_s=0.25, clock=lambda: now[0])
+    gate.authorize(_command(enable=False, sim2real_probe=True), output_active=False)
+
+    assert gate.active is True
+    with pytest.raises(safety.CommandRejectedError, match="probe session"):
+        gate.authorize(
+            _command(enable=True, main_drive_enable=[True] * 6),
+            output_active=False,
+        )
+    assert gate.conflict_latched is True
+
+
+def test_probe_lease_validates_single_drive_and_never_abad() -> None:
+    safety = _command_safety()
+    gate = safety.ProbeSessionGate(timeout_s=0.25)
+
+    with pytest.raises(safety.CommandRejectedError, match="exactly one main drive"):
+        gate.authorize(
+            _command(
+                enable=True,
+                main_drive_enable=[True, True, False, False, False, False],
+                sim2real_probe=True,
+            ),
+            output_active=False,
+        )
+    assert gate.conflict_latched is True
+
+    gate = safety.ProbeSessionGate(timeout_s=0.25)
+    with pytest.raises(safety.CommandRejectedError, match="ABAD"):
+        gate.authorize(
+            _command(
+                enable=True,
+                main_drive_enable=[True, False, False, False, False, False],
+                abad_output_enable=True,
+                sim2real_probe=True,
+            ),
+            output_active=False,
+        )
+
+
+def test_probe_lease_cleanly_expires_only_after_output_is_disabled() -> None:
+    safety = _command_safety()
+    now = [0.0]
+    gate = safety.ProbeSessionGate(timeout_s=0.25, clock=lambda: now[0])
+    gate.authorize(_command(enable=False, sim2real_probe=True), output_active=False)
+    now[0] = 0.3
+
+    assert gate.poll(output_active=False) is False
+    assert gate.active is False
+    gate.authorize(
+        _command(enable=True, main_drive_enable=[True] * 6), output_active=False
+    )
+
+
+def test_probe_lease_expiry_with_active_output_requests_disable_and_latches() -> None:
+    safety = _command_safety()
+    now = [0.0]
+    gate = safety.ProbeSessionGate(timeout_s=0.25, clock=lambda: now[0])
+    gate.authorize(
+        _command(
+            enable=True,
+            main_drive_enable=[True, False, False, False, False, False],
+            sim2real_probe=True,
+        ),
+        output_active=False,
+    )
+    now[0] = 0.3
+
+    assert gate.poll(output_active=True) is True
+    assert gate.active is False
+    assert gate.conflict_latched is True
+
+
+def test_probe_backend_failure_latches_session_until_bridge_restart() -> None:
+    safety = _command_safety()
+    gate = safety.ProbeSessionGate(timeout_s=0.25)
+    gate.latch_failure("hardware interlock rejected the probe")
+
+    assert gate.conflict_latched is True
+    with pytest.raises(safety.CommandRejectedError, match="hardware interlock"):
+        gate.authorize(
+            _command(
+                enable=True,
+                main_drive_enable=[True, False, False, False, False, False],
+                sim2real_probe=True,
+            ),
+            output_active=False,
+        )
+
+
+def test_lowlevel_node_enforces_and_polls_bridge_owned_probe_lease() -> None:
+    source = (LOWLEVEL_PACKAGE / "lowlevel_bridge_node.py").read_text(
+        encoding="utf-8"
+    )
+    assert "self.probe_session_gate.authorize(" in source
+    assert "self.probe_session_gate.poll(" in source
+    assert "self.probe_session_gate.latch_failure(" in source
+    assert "sim2real_probe.session_timeout_s" in source
+
+
 @pytest.mark.parametrize(
     "mask",
     ([True] * 5, [True] * 7, [True, False, True, False, True, 1]),
@@ -450,6 +553,7 @@ def _rinbo_init_kwargs() -> dict:
         "allow_enable": False,
         "publish_when_disabled": False,
         "disabled_servo_control_mode": 0,
+        "probe_abad_disable_verified": False,
         "publish_shutdown_disable": True,
         "shutdown_disable_repeats": 5,
         "shutdown_disable_period_s": 0.02,
@@ -517,6 +621,7 @@ def test_biorola_constructor_accepts_finite_reviewed_conversion_parameters(monke
     assert backend.main_max_pwm == 500.0
     assert backend.main_encoder_sign_rinbo_order == [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
     assert backend.publisher_conflict_latched is False
+    assert backend.probe_abad_disable_verified is False
 
 
 def test_biorola_connect_rejects_remapped_preview_alias_before_creating_publishers(
@@ -560,11 +665,13 @@ def _configured_rinbo(module):
     backend = module.RinboRosBackend.__new__(module.RinboRosBackend)
     backend.MotorCmdStamped = _MotorCmd
     backend.node = SimpleNamespace(
-        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: "stamp"))
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: "stamp")),
+        get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
     )
     backend.sequence = 0
     backend.servo_control_mode = 2
     backend.disabled_servo_control_mode = 0
+    backend.probe_abad_disable_verified = False
     backend.main_velocity_sign_policy_order = [1.0] * 6
     backend.main_pwm_per_rad_s = 100.0
     backend.main_max_pwm = 500.0
@@ -577,6 +684,9 @@ def _configured_rinbo(module):
     backend.last_pwm_rinbo_order = [0.0] * 6
     backend.last_abad_encoder_targets_rinbo_order = [10, 20, 30, 40, 50, 60]
     backend.last_command_was_enabled = False
+    backend.last_actual_publish_state = "never"
+    backend.last_block_reason = ""
+    backend._last_warned_block_reason = ""
     backend.publisher_conflict_latched = False
     backend.publisher_conflict_reason = ""
     return backend
@@ -610,6 +720,21 @@ def test_biorola_probe_pwm_cap_is_immutable_after_configurable_mapping(monkeypat
     msg = backend._make_motor_cmd_msg(cmd, enabled=True, preview=False)
 
     assert msg.r1.voltage == pytest.approx(module.SIM2REAL_PROBE_PWM_CAP)
+
+
+def test_biorola_enabled_probe_requires_verified_abad_disable_interlock(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    backend.connected = True
+    cmd = _command(
+        enable=True,
+        main_drive_enable=[True, False, False, False, False, False],
+        sim2real_probe=True,
+    )
+
+    with pytest.raises(module.CommandRejectedError, match="ABAD disable.*verified"):
+        backend.send_motor_command(cmd)
+    assert backend.last_actual_publish_state == "blocked_probe_abad_disable_unverified"
     assert module.SIM2REAL_PROBE_PWM_CAP == 30.0
 
 
@@ -670,6 +795,8 @@ def test_biorola_emergency_disable_repeats_all_disabled_packets(monkeypatch):
         for msg in published
         for field in backend.RINBO_LEG_ORDER
     )
+    assert [msg.header.seq for msg in published] == [1, 2, 3]
+    assert backend.sequence == 3
     assert backend.last_command_was_enabled is False
 
 
@@ -858,6 +985,7 @@ def _rinbo_with_publisher_guard(module, publisher_query):
     backend.publish_preview = False
     backend.command_topic = "/motor/command"
     backend.allow_enable = True
+    backend.probe_abad_disable_verified = True
     backend.block_if_duplicate_command_publishers = True
     backend.last_state_time = module.time.monotonic()
     backend.state_timeout_s = 1.0

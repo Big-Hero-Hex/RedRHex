@@ -73,6 +73,7 @@ class RinboRosBackend(LowLevelBridgeBase):
         allow_enable: bool,
         publish_when_disabled: bool,
         disabled_servo_control_mode: int,
+        probe_abad_disable_verified: bool,
         publish_shutdown_disable: bool,
         shutdown_disable_repeats: int,
         shutdown_disable_period_s: float,
@@ -106,6 +107,7 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.allow_enable = bool(allow_enable)
         self.publish_when_disabled = bool(publish_when_disabled)
         self.disabled_servo_control_mode = int(disabled_servo_control_mode)
+        self.probe_abad_disable_verified = bool(probe_abad_disable_verified)
         self.publish_shutdown_disable = bool(publish_shutdown_disable)
         self.shutdown_disable_repeats = int(shutdown_disable_repeats)
         self.shutdown_disable_period_s = float(shutdown_disable_period_s)
@@ -241,6 +243,18 @@ class RinboRosBackend(LowLevelBridgeBase):
         selection = resolve_output_selection(cmd)
         if enabled:
             validate_enabled_command_payload(cmd)
+        if (
+            enabled
+            and bool(getattr(cmd, "sim2real_probe", False))
+            and not self.probe_abad_disable_verified
+        ):
+            self._block_enabled_command(
+                "blocked_probe_abad_disable_unverified",
+                "BioRoLa ABAD disable has not been physically verified; keep servo "
+                "power isolated or set rinbo.probe_abad_disable_verified only after "
+                "confirming the disabled servo mode cannot move",
+            )
+            return
 
         preview_msg = self._make_motor_cmd_msg(cmd, enabled=enabled, preview=True)
         if self.publish_preview:
@@ -386,6 +400,9 @@ class RinboRosBackend(LowLevelBridgeBase):
             "rinbo_require_state": str(self.require_state),
             "rinbo_allow_enable": str(self.allow_enable),
             "rinbo_publish_when_disabled": str(self.publish_when_disabled),
+            "rinbo_probe_abad_disable_verified": str(
+                self.probe_abad_disable_verified
+            ),
             "rinbo_block_if_duplicate_command_publishers": str(self.block_if_duplicate_command_publishers),
             "rinbo_command_subscribers": str(self.cmd_pub.get_subscription_count() if hasattr(self, "cmd_pub") else 0),
             "rinbo_command_publishers": f"{publisher_count}: {publisher_names}",
@@ -454,15 +471,17 @@ class RinboRosBackend(LowLevelBridgeBase):
     def _publish_shutdown_disable(self) -> None:
         if not hasattr(self, "cmd_pub") or not hasattr(self, "MotorCmdStamped"):
             return
-        msg = self.MotorCmdStamped()
-        msg.header.frame_id = "redrhex_shutdown_disable"
-        msg.servo_control_mode = self.disabled_servo_control_mode
-        self._disable_all_legs(msg)
-        self._set_abad_neutral_targets(msg)
         attempts = max(2, self.shutdown_disable_repeats)
         failures: list[BaseException] = []
         published = 0
         for _ in range(attempts):
+            msg = self.MotorCmdStamped()
+            self.sequence = (self.sequence + 1) & 0xFFFFFFFF
+            msg.header.seq = self.sequence
+            msg.header.frame_id = "redrhex_shutdown_disable"
+            msg.servo_control_mode = self.disabled_servo_control_mode
+            self._disable_all_legs(msg)
+            self._set_abad_neutral_targets(msg)
             try:
                 msg.header.stamp = self.node.get_clock().now().to_msg()
             except BaseException:

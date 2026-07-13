@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -181,6 +182,112 @@ class FailClosedOutputGate:
     def mark_disabled(self) -> None:
         self.output_active = False
         self.disable_pending = False
+
+
+class ProbeSessionGate:
+    """Bridge-owned lease that makes low-energy probe output exclusive."""
+
+    def __init__(self, timeout_s: float, *, clock=time.monotonic) -> None:
+        self.timeout_s = float(timeout_s)
+        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0.0:
+            raise ValueError("probe session timeout_s must be positive and finite")
+        if not callable(clock):
+            raise TypeError("probe session clock must be callable")
+        self._clock = clock
+        self.active = False
+        self.last_probe_command_time: float | None = None
+        self.conflict_latched = False
+        self.conflict_reason = ""
+
+    def _now(self) -> float:
+        now = float(self._clock())
+        if not math.isfinite(now):
+            raise CommandRejectedError("probe session clock is not finite")
+        return now
+
+    def _latch_conflict(self, reason: str) -> None:
+        if not self.conflict_latched:
+            self.conflict_reason = str(reason)
+        self.conflict_latched = True
+        self.active = False
+        self.last_probe_command_time = None
+
+    def latch_failure(self, reason: str) -> None:
+        """Keep all enabled output blocked after a probe-path backend failure."""
+
+        self._latch_conflict(str(reason))
+
+    def poll(self, *, output_active: bool, now: float | None = None) -> bool:
+        """Expire a silent probe lease and request disable if output may be live."""
+
+        if not self.active or self.last_probe_command_time is None:
+            return False
+        current = self._now() if now is None else float(now)
+        if not math.isfinite(current):
+            self._latch_conflict("probe session clock became invalid")
+            return bool(output_active)
+        if current - self.last_probe_command_time < self.timeout_s:
+            return False
+        self.active = False
+        self.last_probe_command_time = None
+        if output_active:
+            self._latch_conflict(
+                "probe session heartbeat expired while hardware output was active"
+            )
+            return True
+        return False
+
+    def authorize(self, command, *, output_active: bool) -> None:
+        """Authorize a command without relying on producer-side graph checks."""
+
+        now = self._now()
+        timed_out_active = self.poll(output_active=output_active, now=now)
+        enabled = bool(command.enable)
+        is_probe = bool(getattr(command, "sim2real_probe", False))
+
+        # Global disable is always accepted. A valid probe heartbeat also
+        # acquires/renews the lease during its initial neutral segment.
+        if not enabled:
+            if is_probe and not self.conflict_latched:
+                self.active = True
+                self.last_probe_command_time = now
+            return
+
+        if timed_out_active or self.conflict_latched:
+            reason = self.conflict_reason or "probe session safety conflict"
+            raise CommandRejectedError(
+                f"enabled command rejected after latched probe session conflict: {reason}"
+            )
+
+        if is_probe:
+            try:
+                selection = resolve_output_selection(command)
+            except CommandSelectionError as exc:
+                self._latch_conflict(str(exc))
+                raise CommandRejectedError(
+                    f"invalid sim2real probe output selection: {exc}"
+                ) from exc
+            if selection.abad_output_enable:
+                self._latch_conflict("sim2real probe attempted to enable ABAD output")
+                raise CommandRejectedError("sim2real probe must keep ABAD output disabled")
+            if sum(selection.main_drive_enable) != 1:
+                self._latch_conflict(
+                    "sim2real probe did not select exactly one main drive"
+                )
+                raise CommandRejectedError(
+                    "sim2real probe must enable exactly one main drive"
+                )
+            self.active = True
+            self.last_probe_command_time = now
+            return
+
+        if self.active:
+            self._latch_conflict(
+                "non-probe enabled command arrived during an exclusive probe session"
+            )
+            raise CommandRejectedError(
+                "non-probe enabled command rejected during exclusive probe session"
+            )
 
 
 def dispatch_command_fail_closed(gate: FailClosedOutputGate, backend, command) -> OutputSelection:

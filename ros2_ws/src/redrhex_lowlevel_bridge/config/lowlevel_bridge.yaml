@@ -46,6 +46,9 @@ redrhex_lowlevel_bridge:
       # during dry-run so disabled /redrhex/motor_commands do not move ABAD servos.
       publish_when_disabled: false
       disabled_servo_control_mode: 0
+      # Keep false until ABAD power is isolated or mode 0 is physically verified
+      # non-moving. Enabled sim2real probes are rejected while this is false.
+      probe_abad_disable_verified: false
       # Legacy compatibility flag. Shutdown disable packets are now mandatory;
       # false no longer opts out. This does not replace the hardware watchdog.
       publish_shutdown_disable: true
