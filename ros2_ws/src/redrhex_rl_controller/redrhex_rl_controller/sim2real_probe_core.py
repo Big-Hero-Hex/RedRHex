@@ -301,9 +301,9 @@ class ProbeRunner:
             reason = f"scheduler overrun during {phase}: wait returned before its deadline"
             self.request_abort(reason, immediate=True)
             raise ProbeAbort(reason)
-        if lateness > MAX_TICK_LATENESS_S:
+        if lateness >= MAX_TICK_LATENESS_S:
             reason = (
-                f"scheduler overrun during {phase}: {lateness:.6f} s late exceeds "
+                f"scheduler overrun during {phase}: {lateness:.6f} s late reaches "
                 f"{MAX_TICK_LATENESS_S:.6f} s"
             )
             self.request_abort(reason, immediate=True)
@@ -324,7 +324,6 @@ class ProbeRunner:
         self._start_time = self._monotonic()
         last_repetition: int | None = None
         last_segment: tuple[int, int] | None = None
-        last_command_time: float | None = None
         try:
             self._publish_event(
                 self._event(
@@ -337,12 +336,7 @@ class ProbeRunner:
             )
             for tick in schedule:
                 scheduled_deadline = self._start_time + tick.elapsed_s
-                wait_deadline = scheduled_deadline
-                if last_command_time is not None:
-                    wait_deadline = max(
-                        wait_deadline, last_command_time + 1.0 / RATE_HZ
-                    )
-                self._wait_until(wait_deadline)
+                self._wait_until(scheduled_deadline)
                 self._poll()
                 self._raise_if_aborted()
                 actual, lateness = self._check_deadline(
@@ -384,7 +378,6 @@ class ProbeRunner:
                     self.request_abort(failure, immediate=True)
                     raise ProbeAbort(failure)
                 self._publish_command(tick.command)
-                last_command_time = actual
             completion_deadline = self._start_time + len(schedule) / RATE_HZ
             self._wait_until(completion_deadline)
             self._poll()

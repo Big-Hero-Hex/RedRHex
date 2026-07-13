@@ -375,7 +375,7 @@ def test_scheduler_overrun_aborts_before_an_overdue_enabled_tick_is_published() 
     assert [event["event"] for event in events].count("abort") == 1
 
 
-def test_tolerated_jitter_shifts_following_ticks_instead_of_catching_up() -> None:
+def test_one_time_subperiod_jitter_returns_to_the_absolute_schedule() -> None:
     core = _load_core()
     clock = FakeClock()
     published = []
@@ -402,7 +402,41 @@ def test_tolerated_jitter_shifts_following_ticks_instead_of_catching_up() -> Non
 
     scenario_times = [timestamp for timestamp, _command in published[:990]]
     intervals = [later - earlier for earlier, later in zip(scenario_times, scenario_times[1:])]
+    assert min(intervals) == pytest.approx(0.5 / core.RATE_HZ)
+
+
+def test_small_recurring_wake_jitter_does_not_accumulate_into_false_overrun() -> None:
+    core = _load_core()
+    clock = FakeClock()
+    commands = []
+    events = []
+    wake_jitter_s = 0.0001
+
+    def wait_until(deadline: float) -> None:
+        assert deadline >= clock.now
+        clock.deadlines.append(deadline)
+        clock.now = deadline + wake_jitter_s
+
+    runner = core.ProbeRunner(
+        publish_command=lambda command: commands.append((clock.now, command)),
+        publish_event=events.append,
+        safety_snapshot=lambda: _fresh_snapshot(core, clock),
+        monotonic=clock.monotonic,
+        wait_until=wait_until,
+        poll=lambda: None,
+        terminal_pause=lambda: None,
+    )
+
+    runner.run(0)
+
+    assert len(commands) == 990 + core.TERMINAL_DISABLE_PACKETS
+    scenario_times = [timestamp for timestamp, _command in commands[:990]]
+    intervals = [later - earlier for earlier, later in zip(scenario_times, scenario_times[1:])]
     assert min(intervals) == pytest.approx(1.0 / core.RATE_HZ)
+    segment_events = [event for event in events if event["event"] == "segment"]
+    assert max(event["lateness_s"] for event in segment_events) == pytest.approx(
+        wake_jitter_s
+    )
 
 
 def test_immediate_estop_callback_path_publishes_disable_burst_before_loop_unwinds() -> None:
