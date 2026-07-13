@@ -236,11 +236,25 @@ class RinboRosBackend(LowLevelBridgeBase):
             self._block_enabled_command("blocked_no_recent_state", "no recent /motor/state")
             return
         if enabled and self.block_if_duplicate_command_publishers:
-            duplicate_count, endpoint_names = self._command_publisher_count()
-            if duplicate_count > 1:
+            publisher_count, endpoint_names = self._command_publisher_count()
+            if publisher_count < 0:
                 self._block_enabled_command(
-                    "blocked_duplicate_publishers",
-                    f"{duplicate_count} publishers on {self.command_topic}: {endpoint_names}",
+                    "blocked_publisher_graph_query",
+                    f"publisher graph query failed for {self.command_topic}: {endpoint_names}",
+                )
+                return
+            if publisher_count != 1:
+                self._block_enabled_command(
+                    "blocked_command_publisher_exclusivity",
+                    f"found {publisher_count} publishers on {self.command_topic}: {endpoint_names}",
+                )
+                return
+            own_node_name = self._own_node_fully_qualified_name()
+            if own_node_name is None or endpoint_names != own_node_name:
+                expected = own_node_name or "an identifiable backend node"
+                self._block_enabled_command(
+                    "blocked_command_publisher_exclusivity",
+                    f"expected sole publisher {expected} on {self.command_topic}; found {endpoint_names}",
                 )
                 return
         if enabled and self.cmd_pub.get_subscription_count() == 0:
@@ -366,14 +380,30 @@ class RinboRosBackend(LowLevelBridgeBase):
     def _command_publisher_count(self) -> tuple[int, str]:
         try:
             infos = self.node.get_publishers_info_by_topic(self.command_topic)
-        except Exception:
-            return 0, "unknown"
+        except Exception as exc:
+            return -1, f"{type(exc).__name__}: {exc}"
         names = []
         for info in infos:
             node_name = getattr(info, "node_name", "")
             node_namespace = getattr(info, "node_namespace", "")
-            names.append(f"{node_namespace.rstrip('/')}/{node_name}".replace("//", "/") or "<unknown>")
+            names.append(self._fully_qualified_node_name(node_name, node_namespace) or "<unknown>")
         return len(infos), ",".join(names) if names else "none"
+
+    def _own_node_fully_qualified_name(self) -> str | None:
+        try:
+            node_name = self.node.get_name()
+            node_namespace = self.node.get_namespace()
+        except Exception:
+            return None
+        return self._fully_qualified_node_name(node_name, node_namespace) or None
+
+    @staticmethod
+    def _fully_qualified_node_name(node_name: object, node_namespace: object) -> str:
+        name = str(node_name).strip("/")
+        if not name:
+            return ""
+        namespace = str(node_namespace).strip("/")
+        return f"/{namespace}/{name}" if namespace else f"/{name}"
 
     def _publish_shutdown_disable(self) -> None:
         if not hasattr(self, "cmd_pub") or not hasattr(self, "MotorCmdStamped"):

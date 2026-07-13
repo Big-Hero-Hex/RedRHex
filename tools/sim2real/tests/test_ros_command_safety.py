@@ -720,6 +720,121 @@ def test_biorola_enabled_block_paths_raise_without_publishing_enabled_packet(
     assert backend.last_actual_publish_state.startswith("blocked_")
 
 
+def _publisher_info(node_name: str, node_namespace: str = "/") -> SimpleNamespace:
+    return SimpleNamespace(node_name=node_name, node_namespace=node_namespace)
+
+
+def _rinbo_with_publisher_guard(module, publisher_query):
+    backend = _configured_rinbo(module)
+    published = []
+    backend.node = SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: "stamp")),
+        get_logger=lambda: SimpleNamespace(warn=lambda _message: None),
+        get_name=lambda: "redrhex_lowlevel_bridge",
+        get_namespace=lambda: "/robot",
+        get_publishers_info_by_topic=publisher_query,
+    )
+    backend.connected = True
+    backend.publish_preview = False
+    backend.command_topic = "/motor/command"
+    backend.allow_enable = True
+    backend.block_if_duplicate_command_publishers = True
+    backend.last_state_time = module.time.monotonic()
+    backend.state_timeout_s = 1.0
+    backend.last_actual_publish_state = "never"
+    backend.last_block_reason = ""
+    backend._last_warned_block_reason = ""
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: 1,
+    )
+    backend.shutdown_disable_repeats = 2
+    backend.shutdown_disable_period_s = 0.0
+    return backend, published
+
+
+def test_biorola_enabled_command_fails_closed_when_publisher_graph_query_raises(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+
+    def fail_query(_topic):
+        raise RuntimeError("graph unavailable")
+
+    backend, published = _rinbo_with_publisher_guard(module, fail_query)
+
+    with pytest.raises(module.CommandRejectedError, match="publisher graph query failed"):
+        backend.send_motor_command(
+            _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+        )
+
+    assert published == []
+    assert backend.last_command_was_enabled is False
+    assert backend.last_actual_publish_state == "blocked_publisher_graph_query"
+    assert "RuntimeError: graph unavailable" in backend.last_block_reason
+
+
+@pytest.mark.parametrize(
+    ("publisher_infos", "reason_fragment"),
+    [
+        ([], "found 0 publishers"),
+        ([_publisher_info("another_controller", "/robot")], "expected sole publisher /robot/redrhex_lowlevel_bridge"),
+        (
+            [
+                _publisher_info("redrhex_lowlevel_bridge", "/robot"),
+                _publisher_info("another_controller", "/robot"),
+            ],
+            "found 2 publishers",
+        ),
+    ],
+)
+def test_biorola_enabled_command_requires_exactly_one_self_publisher(
+    monkeypatch, publisher_infos, reason_fragment
+):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend, published = _rinbo_with_publisher_guard(
+        module, lambda _topic: publisher_infos
+    )
+
+    with pytest.raises(module.CommandRejectedError, match=reason_fragment):
+        backend.send_motor_command(
+            _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+        )
+
+    assert published == []
+    assert backend.last_actual_publish_state == "blocked_command_publisher_exclusivity"
+
+
+def test_biorola_enabled_command_accepts_exactly_one_self_publisher(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend, published = _rinbo_with_publisher_guard(
+        module,
+        lambda _topic: [_publisher_info("redrhex_lowlevel_bridge", "/robot")],
+    )
+
+    backend.send_motor_command(
+        _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+    )
+
+    assert len(published) == 1
+    assert published[0].r1.enable is True
+    assert backend.last_actual_publish_state == "published_enabled"
+
+
+def test_biorola_disabled_command_does_not_depend_on_publisher_graph_query(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+
+    def fail_query(_topic):
+        raise AssertionError("disabled output must not query the ROS graph")
+
+    backend, published = _rinbo_with_publisher_guard(module, fail_query)
+    backend.publish_when_disabled = True
+
+    backend.send_motor_command(_command(enable=False))
+
+    assert len(published) == 1
+    assert not any(getattr(published[0], field).enable for field in backend.RINBO_LEG_ORDER)
+    assert backend.last_actual_publish_state == "published_disabled"
+
+
 def test_biorola_successful_enabled_send_is_observable_to_dispatcher(monkeypatch):
     module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
     backend = _configured_rinbo(module)
