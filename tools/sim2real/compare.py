@@ -32,6 +32,17 @@ def _compatible(real: LoadedTrace, sim: LoadedTrace, scenario: ScenarioSpecV1) -
         raise ContractError('sim trace must have source "sim"')
     if real.manifest.scenario_id != sim.manifest.scenario_id:
         raise ContractError("scenario id mismatch")
+    calibration_source = real.manifest.metadata.get("calibration_constants", {}).get(
+        "calibration_source"
+    )
+    if scenario.subsystem == "main_drive" and isinstance(calibration_source, str):
+        if calibration_source == "provisional_repository_defaults" or calibration_source.endswith(
+            ":with_provisional_fallbacks"
+        ):
+            raise ContractError(
+                "real main-drive trace uses a provisional hardware mapping; "
+                "a fully measured profile is required for comparison"
+            )
     for field, label in (("units", "unit"), ("frames", "frame")):
         real_values = real.manifest.metadata[field]
         sim_values = sim.manifest.metadata[field]

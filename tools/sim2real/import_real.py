@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import math
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,7 +15,7 @@ from .contracts import (
     TraceManifestV1,
 )
 from .scenarios import load_scenario
-from .traces import write_trace
+from .traces import sha256_json, write_trace
 
 
 _BAG_LATENCY_CLOCK = "bag_receive_time"
@@ -64,6 +65,8 @@ _POSITIVE_DIRECTION = {"l1": True, "l2": True, "l3": True, "r1": False, "r2": Fa
 _COUNTS_PER_REV = 54984.83
 _MAX_PWM = 500.0
 _MAIN_DRIVE_EXPERIMENTS = frozenset({"step", "coast", "step_coast"})
+_PROBE_EVENT_TOPIC = "/redrhex/sim2real_probe/events"
+_PROBE_RATE_HZ = 60.0
 
 
 def _rosbag_dependencies():
@@ -104,6 +107,201 @@ def _vector(message: Any, name: str, topic: str) -> list[float]:
     ]
 
 
+def _probe_event(message: Any) -> dict[str, Any]:
+    raw = _field(message, "data", _PROBE_EVENT_TOPIC)
+    if not isinstance(raw, str):
+        raise ContractError("probe event data must be a JSON string")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key}")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(
+            raw,
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ContractError(f"invalid probe event JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ContractError("probe event JSON must be an object")
+    return payload
+
+
+def _event_int(payload: Mapping[str, Any], field: str) -> int:
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ContractError(f"probe event {field} must be an integer")
+    return value
+
+
+def _event_number(payload: Mapping[str, Any], field: str) -> float:
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractError(f"probe event {field} must be numeric")
+    result = float(value)
+    if not math.isfinite(result):
+        raise ContractError(f"probe event {field} must be finite")
+    return result
+
+
+def _validate_probe_events(
+    samples: list[tuple[float, dict[str, Any]]],
+    scenario: ScenarioSpecV1,
+) -> tuple[dict[str, Any], list[float], list[float]]:
+    if not samples:
+        raise ContractError("rosbag contains no probe events")
+    if any(event.get("event") == "abort" for _, event in samples):
+        raise ContractError("probe event stream contains an abort")
+
+    try:
+        main_index = int(scenario.joint.removeprefix("main_"))
+    except ValueError as exc:
+        raise ContractError(f"probe scenario has invalid main joint {scenario.joint}") from exc
+    digest = sha256_json(scenario.to_dict())
+    for _, event in samples:
+        if _event_int(event, "schema_version") != 1:
+            raise ContractError("probe event schema version mismatch")
+        if event.get("scenario_id") != scenario.scenario_id:
+            raise ContractError("probe event scenario id mismatch")
+        if _event_int(event, "scenario_schema_version") != scenario.schema_version:
+            raise ContractError("probe event scenario schema version mismatch")
+        if event.get("scenario_sha256") != digest:
+            raise ContractError("probe event scenario hash mismatch")
+        if _event_int(event, "main_index") != main_index:
+            raise ContractError("probe event main index mismatch")
+        if event.get("abad_output_enable") is not False:
+            raise ContractError("probe event does not prove ABAD output remained disabled")
+
+    exact_ticks_per_cycle = sum(
+        float(segment["duration_s"]) * _PROBE_RATE_HZ
+        for segment in scenario.command_segments
+    )
+    ticks_per_cycle = int(round(exact_ticks_per_cycle))
+    if not math.isclose(exact_ticks_per_cycle, ticks_per_cycle, abs_tol=1.0e-12):
+        raise ContractError("probe scenario segments are not aligned to 60 Hz")
+    expected_ticks = ticks_per_cycle * scenario.repeats
+    expected_duration_s = expected_ticks / _PROBE_RATE_HZ
+
+    expected: list[tuple[str, int | None, int | None, str | None, int | None]] = [
+        ("scenario", None, None, None, None)
+    ]
+    tick_index = 0
+    for repetition in range(1, scenario.repeats + 1):
+        expected.append(("repetition", repetition, None, None, tick_index))
+        for segment_index, segment in enumerate(scenario.command_segments):
+            expected.append(
+                (
+                    "segment",
+                    repetition,
+                    segment_index,
+                    str(segment.get("label", f"segment_{segment_index}")),
+                    tick_index,
+                )
+            )
+            tick_index += int(round(float(segment["duration_s"]) * _PROBE_RATE_HZ))
+    expected.append(("complete", None, None, None, expected_ticks))
+    observed_names = [event.get("event") for _, event in samples]
+    expected_names = [item[0] for item in expected]
+    if observed_names != expected_names:
+        raise ContractError(
+            "probe events do not contain one ordered scenario, all repetitions/segments, "
+            "and one complete marker"
+        )
+
+    scenario_event = samples[0][1]
+    if not math.isclose(
+        _event_number(scenario_event, "rate_hz"), _PROBE_RATE_HZ, abs_tol=1.0e-12
+    ):
+        raise ContractError("probe event rate mismatch")
+    if _event_int(scenario_event, "repeats") != scenario.repeats:
+        raise ContractError("probe event repeat count mismatch")
+    if _event_int(scenario_event, "ticks") != expected_ticks:
+        raise ContractError("probe event tick count mismatch")
+    if not math.isclose(
+        _event_number(scenario_event, "duration_s"),
+        expected_duration_s,
+        abs_tol=1.0e-12,
+    ):
+        raise ContractError("probe event duration mismatch")
+
+    command_times_s: list[float] = []
+    command_values: list[float] = []
+    for (receive_time_s, event), (_, repetition, segment_index, segment, expected_tick) in zip(
+        samples[1:-1], expected[1:-1], strict=True
+    ):
+        if _event_int(event, "repetition") != repetition:
+            raise ContractError("probe event repetition order mismatch")
+        if event["event"] == "segment":
+            if _event_int(event, "segment_index") != segment_index:
+                raise ContractError("probe event segment index mismatch")
+            if event.get("segment") != segment:
+                raise ContractError("probe event segment label mismatch")
+            if _event_int(event, "tick_index") != expected_tick:
+                raise ContractError("probe event segment tick mismatch")
+            command_times_s.append(receive_time_s)
+            command_values.append(
+                float(scenario.command_segments[int(segment_index)]["value"])
+            )
+        scheduled = _event_number(event, "scheduled_elapsed_s")
+        if not math.isclose(
+            scheduled, float(expected_tick) / _PROBE_RATE_HZ, abs_tol=1.0e-12
+        ):
+            raise ContractError("probe event scheduled time mismatch")
+        actual = _event_number(event, "actual_elapsed_s")
+        lateness = _event_number(event, "lateness_s")
+        if lateness < 0.0 or lateness >= 1.0 / _PROBE_RATE_HZ:
+            raise ContractError("probe event lateness is outside the reviewed bound")
+        if not math.isclose(actual, scheduled + lateness, abs_tol=1.0e-9):
+            raise ContractError("probe event actual time is inconsistent with lateness")
+
+    complete = samples[-1][1]
+    if _event_int(complete, "ticks") != expected_ticks:
+        raise ContractError("probe complete tick count mismatch")
+    if not math.isclose(
+        _event_number(complete, "scheduled_elapsed_s"),
+        expected_duration_s,
+        abs_tol=1.0e-12,
+    ):
+        raise ContractError("probe complete scheduled time mismatch")
+    complete_actual = _event_number(complete, "actual_elapsed_s")
+    complete_lateness = _event_number(complete, "lateness_s")
+    if complete_lateness < 0.0 or complete_lateness >= 1.0 / _PROBE_RATE_HZ:
+        raise ContractError("probe complete lateness is outside the reviewed bound")
+    if not math.isclose(
+        complete_actual,
+        expected_duration_s + complete_lateness,
+        abs_tol=1.0e-9,
+    ):
+        raise ContractError("probe complete time is inconsistent with lateness")
+    if samples[-1][0] < samples[0][0]:
+        raise ContractError("probe complete marker precedes scenario marker")
+
+    if len(command_times_s) > 1 and not np.all(np.diff(command_times_s) > 0.0):
+        raise ContractError("probe segment receive timestamps must be strictly increasing")
+    return (
+        {
+            "scenario_sha256": digest,
+            "scenario_receive_time_s": samples[0][0],
+            "complete_receive_time_s": samples[-1][0],
+            "repetition_count": scenario.repeats,
+            "segment_count": scenario.repeats * len(scenario.command_segments),
+            "complete_ticks": expected_ticks,
+            "abad_output_disabled_verified": True,
+        },
+        command_times_s,
+        command_values,
+    )
+
+
 def _load_rosbag(
     path: Path,
     scenario: ScenarioSpecV1,
@@ -121,19 +319,30 @@ def _load_rosbag(
     topic_types = {
         item.name: item.type for item in reader.get_all_topics_and_types()
     }
-    recognized = {"/motor/command", "/motor/state", "/imu/data", "/power/state"}
+    recognized = {
+        "/motor/command",
+        "/motor/state",
+        "/imu/data",
+        "/power/state",
+        _PROBE_EVENT_TOPIC,
+    }
     message_types = {
         topic: get_message(type_name)
         for topic, type_name in topic_types.items()
         if topic in recognized
     }
     is_main_drive_experiment = scenario.experiment_kind in _MAIN_DRIVE_EXPERIMENTS
+    is_bound_probe = scenario.experiment_kind == "step_coast"
     if is_main_drive_experiment:
         missing_topics = {"/motor/command", "/motor/state"} - set(message_types)
         if missing_topics:
             raise ContractError(
                 "rosbag missing required topics: " + ", ".join(sorted(missing_topics))
             )
+    if is_bound_probe and _PROBE_EVENT_TOPIC not in message_types:
+        raise ContractError(
+            f"rosbag missing required probe events topic {_PROBE_EVENT_TOPIC}"
+        )
     selected_leg = _JOINT_TO_LEG.get(scenario.joint)
     if selected_leg is None and is_main_drive_experiment:
         raise ContractError(f"unsupported main-drive joint for rosbag import: {scenario.joint}")
@@ -150,12 +359,23 @@ def _load_rosbag(
     encoder_sign, has_sign = calibrated(
         "encoder_sign", _ENCODER_SIGN.get(selected_leg, 1.0)
     )
+    joint_direction, has_joint_direction = calibrated("joint_direction", 1.0)
     pwm_scale, has_pwm_scale = calibrated("pwm_scale", 1.0 / _MAX_PWM)
     pwm_cap, has_pwm_cap = calibrated("pwm_cap", 1.0)
-    fully_profiled = all((has_counts, has_zero, has_sign, has_pwm_scale, has_pwm_cap))
+    fully_profiled = all(
+        (
+            has_counts,
+            has_zero,
+            has_sign,
+            has_joint_direction,
+            has_pwm_scale,
+            has_pwm_cap,
+        )
+    )
 
     times: dict[str, list[float]] = {
         "command_time_s": [],
+        "motor_command_time_s": [],
         "position_time_s": [],
         "imu_time_s": [],
         "power_time_s": [],
@@ -171,16 +391,21 @@ def _load_rosbag(
         "power_voltage": [],
         "power_current": [],
     }
+    probe_events: list[tuple[float, dict[str, Any]]] = []
     earliest: float | None = None
     selected_leg_observed_enabled = False
     while reader.has_next():
         topic, serialized, timestamp_ns = reader.read_next()
         if topic not in message_types:
             continue
+        if topic == _PROBE_EVENT_TOPIC and not is_bound_probe:
+            continue
         timestamp_s = float(timestamp_ns) * 1e-9
         earliest = timestamp_s if earliest is None else min(earliest, timestamp_s)
         message = deserialize_message(serialized, message_types[topic])
-        if topic == "/motor/command":
+        if topic == _PROBE_EVENT_TOPIC:
+            probe_events.append((timestamp_s, _probe_event(message)))
+        elif topic == "/motor/command":
             legs = [
                 _leg(message, name, ("enable", "direction", "voltage"), topic)
                 for name in _LEG_ORDER
@@ -204,11 +429,13 @@ def _load_rosbag(
                 voltage = float(leg.voltage) if bool(leg.enable) else 0.0
                 sign = 1.0 if bool(leg.direction) == _POSITIVE_DIRECTION[name] else -1.0
                 signed_pwm.append(sign * voltage)
-            times["command_time_s"].append(timestamp_s)
+            times["motor_command_time_s"].append(timestamp_s)
             values["motor_command_pwm_raw"].append(signed_pwm)
             selected_index = _LEG_ORDER.index(selected_leg)
-            scaled = signed_pwm[selected_index] * pwm_scale
-            values["command"].append(max(-pwm_cap, min(pwm_cap, scaled)))
+            if not is_bound_probe:
+                times["command_time_s"].append(timestamp_s)
+                scaled = signed_pwm[selected_index] * pwm_scale * joint_direction
+                values["command"].append(max(-pwm_cap, min(pwm_cap, scaled)))
         elif topic == "/motor/state":
             legs = [
                 _leg(message, name, ("position",), topic) for name in _LEG_ORDER
@@ -253,6 +480,21 @@ def _load_rosbag(
             "raw main-drive command never enabled the scenario joint "
             f"{scenario.joint} ({selected_leg})"
         )
+    probe_evidence: dict[str, Any] | None = None
+    if is_bound_probe:
+        probe_evidence, event_command_times, event_commands = _validate_probe_events(
+            probe_events, scenario
+        )
+        scenario_start = float(probe_evidence["scenario_receive_time_s"])
+        if not times["motor_command_time_s"] or scenario_start >= times["motor_command_time_s"][0]:
+            raise ContractError(
+                "probe scenario marker must precede the first raw motor command"
+            )
+        # The raw bridge intentionally suppresses globally-disabled packets. The
+        # authenticated segment markers are therefore the authoritative requested
+        # command timeline; raw PWM remains on its own untouched clock for mapping.
+        times["command_time_s"] = event_command_times
+        values["command"] = event_commands
     arrays: dict[str, np.ndarray] = {}
     for time_name, samples in times.items():
         if samples:
@@ -262,7 +504,7 @@ def _load_rosbag(
             arrays[channel] = np.asarray(samples, dtype=float)
     extra_time_bases: dict[str, str] = {}
     for channel, time_name in (
-        ("motor_command_pwm_raw", "command_time_s"),
+        ("motor_command_pwm_raw", "motor_command_time_s"),
         ("motor_state_encoder_raw", "position_time_s"),
         ("imu_acceleration", "imu_time_s"),
         ("imu_angular_velocity", "imu_time_s"),
@@ -285,12 +527,18 @@ def _load_rosbag(
         "encoder_counts_per_rev": counts_per_rev,
         "encoder_zero_count": encoder_zero,
         "encoder_sign": encoder_sign,
+        "joint_direction": joint_direction,
         "pwm_scale": pwm_scale,
         "pwm_cap": pwm_cap,
         "selected_leg": selected_leg,
         "raw_enabled_leg_binding_verified": bool(is_main_drive_experiment),
         "positive_direction_bit": _POSITIVE_DIRECTION.get(selected_leg),
     }
+    if probe_evidence is not None:
+        relative_evidence = dict(probe_evidence)
+        relative_evidence["scenario_receive_time_s"] -= earliest
+        relative_evidence["complete_receive_time_s"] -= earliest
+        constants["probe_event_evidence"] = relative_evidence
     return arrays, extra_time_bases, constants
 
 

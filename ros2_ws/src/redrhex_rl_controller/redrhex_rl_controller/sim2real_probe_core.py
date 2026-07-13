@@ -256,6 +256,7 @@ class ProbeRunner:
             "scenario_schema_version": SCENARIO_SCHEMA_VERSION,
             "scenario_sha256": scenario_sha256(selected) if selected is not None else None,
             "main_index": selected,
+            "abad_output_enable": False,
         }
         payload.update(values)
         return payload

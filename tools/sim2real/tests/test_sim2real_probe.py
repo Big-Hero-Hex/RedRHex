@@ -256,6 +256,7 @@ def test_normal_completion_emits_markers_and_five_terminal_disable_packets() -> 
     assert [event["event"] for event in events].count("segment") == 21
     assert [event["event"] for event in events].count("complete") == 1
     assert [event["event"] for event in events].count("abort") == 0
+    assert all(event["abad_output_enable"] is False for event in events)
     segment_events = [event for event in events if event["event"] == "segment"]
     assert all("scheduled_elapsed_s" in event for event in segment_events)
     assert all("actual_elapsed_s" in event for event in segment_events)
@@ -576,6 +577,7 @@ def test_preflight_abort_marker_is_bound_to_selected_scenario_and_hash() -> None
             "scenario_schema_version": 1,
             "scenario_sha256": core.scenario_sha256(2),
             "main_index": 2,
+            "abad_output_enable": False,
             "reason": "preflight failed",
         }
     ]
