@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 from .repo_binding import bind_redrhex_source
@@ -37,9 +38,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             flush=True,
         )
         return result
-    except BaseException:
+    except BaseException as exc:
         # Kit owns process shutdown. Preserve a failing process status even when
         # framework teardown ends the interpreter before Python can re-raise.
+        print(f"error: {exc}", file=sys.stderr, flush=True)
         simulation_app.app.post_quit(2)
         raise
     finally:

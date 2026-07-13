@@ -98,6 +98,21 @@ def test_isaac_bootstrap_closes_app_on_success_and_failure() -> None:
     assert len(post_quit.args) == 1
     assert isinstance(post_quit.args[0], ast.Constant)
     assert post_quit.args[0].value != 0
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "print"
+        and any(
+            keyword.arg == "file"
+            and isinstance(keyword.value, ast.Attribute)
+            and isinstance(keyword.value.value, ast.Name)
+            and keyword.value.value.id == "sys"
+            and keyword.value.attr == "stderr"
+            for keyword in node.keywords
+        )
+        for statement in failure_handler.body
+        for node in ast.walk(statement)
+    )
 
 
 def test_characterization_runner_is_finite_one_env_and_direct_targeted() -> None:
