@@ -36,12 +36,36 @@ _DERIVED_PROVENANCE_FIELDS = _RUNTIME_PROVENANCE_FIELDS | {
     "real_metadata_sha256",
     "known_load_trace_sha256",
     "known_load_metadata_sha256",
+    "audit_artifact_sha256",
+    "audit_report_sha256",
 }
 
 
 def _main_effort_limit(profile: CalibrationProfileV1) -> Any:
     section = profile.simulation_physics.get("main_drive", {})
     return section.get("effort_limit") if isinstance(section, Mapping) else None
+
+
+def _validate_prefit_audit(
+    artifact: Mapping[str, Any],
+    *,
+    artifact_root: str | Path,
+    profile: CalibrationProfileV1,
+) -> dict[str, Any]:
+    # Promotion imports sweep cache helpers, so keep this dependency lazy.
+    from .promotion import _derive_audit
+
+    root = Path(artifact_root).resolve()
+    if not root.is_dir():
+        raise ContractError("pre-fit audit artifact_root must be an existing directory")
+    report = _derive_audit(root, artifact, profile)
+    checks = report.get("checks")
+    if not isinstance(checks, Mapping):
+        raise ContractError("pre-fit audit report is missing derived checks")
+    failed = sorted(name for name, passed in checks.items() if passed is not True)
+    if failed:
+        raise ContractError("pre-fit audit failed: " + ", ".join(failed))
+    return report
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -514,6 +538,8 @@ def execute_sweep(
     generate_only: bool = False,
     real_trace: str | Path | None = None,
     known_load_trace: str | Path | None = None,
+    audit_artifact: Mapping[str, Any] | None = None,
+    audit_artifact_root: str | Path | None = None,
     run_process: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     """Generate, execute, verify, and resume a bounded characterization sweep."""
@@ -531,6 +557,24 @@ def execute_sweep(
         raise ContractError("scenario must be a ScenarioSpecV1")
     if not isinstance(base_profile, CalibrationProfileV1):
         raise ContractError("base_profile must be a CalibrationProfileV1")
+    base_profile = base_profile.validate()
+    audit_report: dict[str, Any] | None = None
+    if (audit_artifact is None) != (audit_artifact_root is None):
+        raise ContractError(
+            "audit_artifact and audit_artifact_root must be provided together"
+        )
+    if audit_artifact is None:
+        if not generate_only:
+            raise ContractError("executable sweeps require a passing pre-fit audit")
+    else:
+        if not isinstance(audit_artifact, Mapping):
+            raise ContractError("audit_artifact must be a JSON object")
+        assert audit_artifact_root is not None
+        audit_report = _validate_prefit_audit(
+            audit_artifact,
+            artifact_root=audit_artifact_root,
+            profile=base_profile,
+        )
     reference: LoadedTrace | None = None
     if real_trace is None:
         if not generate_only:
@@ -617,6 +661,12 @@ def execute_sweep(
     )
     effective_provenance["known_load_metadata_sha256"] = (
         known_load.metadata_sha256 if known_load is not None else None
+    )
+    effective_provenance["audit_artifact_sha256"] = (
+        sha256_json(dict(audit_artifact)) if audit_artifact is not None else None
+    )
+    effective_provenance["audit_report_sha256"] = (
+        sha256_json(audit_report) if audit_report is not None else None
     )
     provenance_sha256 = sha256_json(effective_provenance)
 

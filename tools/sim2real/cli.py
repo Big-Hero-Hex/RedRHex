@@ -73,6 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Managed manual-load episode required when effort_limit is swept.",
     )
     sweep.add_argument(
+        "--audit-evidence",
+        type=Path,
+        default=None,
+        help=(
+            "Hash-bound audit_artifact JSON required for execution. Relative paths "
+            "inside it resolve from this file's directory."
+        ),
+    )
+    sweep.add_argument(
         "--generate-only",
         action="store_true",
         help="Write candidates and manifests without launching Isaac processes.",
@@ -280,6 +289,16 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
         if not args.generate_only and args.real_trace is None:
             raise ValueError("--real-trace is required unless --generate-only is used")
+        if not args.generate_only and args.audit_evidence is None:
+            raise ValueError("--audit-evidence is required unless --generate-only is used")
+
+        audit_artifact = None
+        audit_artifact_root = None
+        if args.audit_evidence is not None:
+            audit_artifact = _json_file_object(
+                args.audit_evidence, "--audit-evidence"
+            )
+            audit_artifact_root = args.audit_evidence.parent
 
         command_prefix = None
         if not args.generate_only:
@@ -315,6 +334,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             generate_only=args.generate_only,
             real_trace=args.real_trace,
             known_load_trace=args.known_load_trace,
+            audit_artifact=audit_artifact,
+            audit_artifact_root=audit_artifact_root,
         )
     if args.command == "run-sim":
         # Importing this bootstrap is the first point at which Isaac Lab is

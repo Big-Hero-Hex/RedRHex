@@ -153,6 +153,45 @@ $ISAACLAB_ROOT/isaaclab.sh -p -m tools.sim2real run-sim \
 
 Only the six terminal-foot sensor can satisfy contact validation. Body/chassis contacts are logged separately.
 
+`runtime_audit.json` uses audit schema version 2. It records the ordered
+`main_0..5`, `abad_0..5`, and `damper_0..5` mapping to resolved articulation
+joints, each USD axis and effective range, collision prims, per-link mass,
+inertia and CoM, and the aggregate planar CoM in the robot body frame. Its
+canonical JSON hash is embedded in the audit trace metadata; replacing either
+file without the other is rejected.
+
+Before fitting, create a physical audit JSON with schema version 2. It must
+contain the corresponding 18 ordered joint records, six raw main-encoder
+observations (start/end counts, observed count/revolution and zero, physical
+angle change, and uncertainties), at least three scale and planar-CoM
+measurements, the base plus all six terminal collision bodies, and two or more
+known IMU resting orientations. Wrap it with the simulator artifacts in an
+`audit_artifact` binding:
+
+```json
+{
+  "runtime_trace": {
+    "path": "audit-contact",
+    "trace_sha256": "<trace SHA-256>",
+    "metadata_sha256": "<metadata SHA-256>"
+  },
+  "runtime_audit": {
+    "path": "audit-contact/runtime_audit.json",
+    "sha256": "<file SHA-256>"
+  },
+  "physical_measurements": {
+    "path": "physical-audit-v2.json",
+    "sha256": "<file SHA-256>"
+  }
+}
+```
+
+Paths are relative to the binding file's directory. The gate derives separate
+checks for units, frames, joint order, axes, encoder scale/zero/sign,
+mechanical range, total mass, per-link inertia/CoM validity, measured planar
+CoM, collision geometry, IMU mounting, and contact response. These checks are
+computed from numeric evidence; the file cannot supply its own pass booleans.
+
 Replay a verified real episode's independent command timeline with the same scenario and profile:
 
 ```bash
@@ -185,6 +224,7 @@ Execute a one-factor sensitivity set first. Each uncached candidate starts in a 
 python -m tools.sim2real sweep profiles/candidate-v1.json \
   --scenario suspended-main-0-step-coast \
   --real-trace datasets/sim2real/main-drive-bench-v1/episodes/leg0-run1 \
+  --audit-evidence outputs/sim2real/audit-artifact.json \
   --mode one-factor \
   --space-json '{"simulation_physics.main_drive.damping":[0.8,1.0,1.2]}' \
   --seed 0 \
@@ -192,7 +232,7 @@ python -m tools.sim2real sweep profiles/candidate-v1.json \
   --output outputs/sim2real/main-drive-damping-sweep
 ```
 
-The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Executed sweeps require a verified real episode and persist separate real, simulator, and delta metrics for every candidate. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind the real trace plus scenario, profile, seed, mode, device, Git revision, production asset/config, and runner hashes. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
+The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Executed sweeps require a verified real episode and a hash-bound audit artifact whose every derived check passes, and persist separate real, simulator, and delta metrics for every candidate. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac; generation does not claim that fitting is safe. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind the audit artifact and derived report hashes, real trace, scenario, profile, seed, mode, device, Git revision, production asset/config, and runner hashes. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
 
 ## Enter ABAD and friction measurements
 
@@ -256,7 +296,8 @@ A candidate remains experimental until all of the following are reviewed:
 - each fitted subsystem has an unused leg, direction, level, or load condition;
 - every held-out simulated metric lies within `max(instrument uncertainty, 2 × real-run standard deviation)` of the real mean;
 - actuator, timing, rigid-body, spring, and contact results are reported independently;
-- the audit has no unresolved unit, frame, sign, mass, collision, or contact failure;
+- the audit has no unresolved unit, frame, joint order/axis/range, encoder
+  scale/zero/sign, mass/CoM/inertia, collision, IMU, or contact failure;
 - no unrelated parameter was used to conceal a subsystem-model mismatch;
 - a reviewed configuration change explicitly promotes the profile.
 

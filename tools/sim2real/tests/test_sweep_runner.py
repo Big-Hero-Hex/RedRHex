@@ -25,14 +25,17 @@ from tools.sim2real.traces import (
 
 
 def _profile() -> CalibrationProfileV1:
+    main_joints = [f"main_{index}" for index in range(6)]
     return CalibrationProfileV1.from_dict(
         {
             "schema_version": 1,
             "profile_id": "baseline",
             "hardware_mapping": {
-                "encoder_counts_per_rev": {"main_0": 54984.83},
-                "encoder_zero_count": {"main_0": 0.0},
-                "encoder_sign": {"main_0": 1},
+                "encoder_counts_per_rev": {
+                    joint: 54984.83 for joint in main_joints
+                },
+                "encoder_zero_count": {joint: 0.0 for joint in main_joints},
+                "encoder_sign": {joint: 1 for joint in main_joints},
                 "joint_direction": {"main_0": 1},
                 "pwm_scale": {"main_0": 1.0 / 120.0},
                 "pwm_cap": {"main_0": 500.0 / 120.0},
@@ -120,6 +123,26 @@ def _runtime_provenance(**overrides: Any) -> dict[str, str]:
     return provenance
 
 
+_AUDIT_FIXTURES: dict[tuple[str, str], tuple[dict[str, Any], Path]] = {}
+
+
+def _passing_audit(
+    root: Path, profile: CalibrationProfileV1
+) -> tuple[dict[str, Any], Path]:
+    from tools.sim2real.tests.test_promotion import _audit_evidence
+
+    profile_sha = sha256_json(profile.to_dict())
+    key = (str(root.resolve()), profile_sha)
+    cached = _AUDIT_FIXTURES.get(key)
+    if cached is not None:
+        return cached
+    artifact_root = root / f"audit-{profile_sha[:12]}"
+    binding = _audit_evidence(artifact_root, profile)
+    result = (binding, artifact_root)
+    _AUDIT_FIXTURES[key] = result
+    return result
+
+
 def _write_real_reference(output: Path, scenario: ScenarioSpecV1) -> None:
     dataset = output.parent.parent
     raw = dataset / "raw" / f"{output.name}.bin"
@@ -182,19 +205,21 @@ def _write_known_load_reference(output: Path, *, torque_scale: float = 2.0) -> N
     raw = dataset / "raw" / f"{output.name}.bin"
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_bytes(b"immutable known-load measurement")
-    time_s = np.array([0.0, 1.0, 2.0])
+    time_s = np.arange(6, dtype=float)
     manifest = write_trace(
         output,
         {
             "load_force_time_s": time_s,
-            "load_force": np.array([10.0, 10.5, 9.5]) * torque_scale,
+            "load_force": np.array([10.0, 10.0, 10.5, 10.5, 9.5, 9.5])
+            * torque_scale,
             "lever_arm_time_s": time_s,
-            "lever_arm": np.full(3, 0.1),
+            "lever_arm": np.full(6, 0.1),
             "command_time_s": time_s,
-            "command": np.array([0.2, 0.2, 0.2]),
+            "command": np.array([0.2, -0.2] * 3),
             "direction_time_s": time_s,
-            "direction": np.array([1.0, 1.0, 1.0]),
-            "repeat_index": np.arange(3),
+            "direction": np.array([1.0, -1.0] * 3),
+            "saturation_confirmed": np.ones(6),
+            "repeat_index": np.repeat(np.arange(3), 2),
         },
         scenario=scenario,
         source="real",
@@ -206,6 +231,7 @@ def _write_known_load_reference(output: Path, *, torque_scale: float = 2.0) -> N
                 "lever_arm": "m",
                 "command": "normalized",
                 "direction": "1",
+                "saturation_confirmed": "1",
                 "repeat_index": "1",
             },
             "frames": {
@@ -213,6 +239,7 @@ def _write_known_load_reference(output: Path, *, torque_scale: float = 2.0) -> N
                 "lever_arm": "main_0",
                 "command": "main_0",
                 "direction": "main_0",
+                "saturation_confirmed": "main_0",
                 "repeat_index": "main_0",
             },
             # Manual load evidence has no encoder-position channel and therefore
@@ -287,12 +314,21 @@ def _execute(
     run_process,
     generate_only: bool = False,
     real_trace: str | Path | None | object = ...,
+    audit_artifact: dict[str, Any] | None | object = ...,
+    audit_artifact_root: str | Path | None = None,
     provenance: dict[str, Any] | None = None,
     provenance_provider=lambda: _runtime_provenance(),
 ) -> dict[str, Any]:
     from tools.sim2real.sweep_runner import execute_sweep
 
     selected_scenario = scenario or load_scenario("main-step")
+    if audit_artifact is ...:
+        if generate_only:
+            audit_artifact = None
+        else:
+            audit_artifact, audit_artifact_root = _passing_audit(
+                output.parent, _profile()
+            )
     if real_trace is ...:
         if generate_only:
             real_trace = None
@@ -323,6 +359,8 @@ def _execute(
         generate_only=generate_only,
         real_trace=real_trace,
         known_load_trace=None,
+        audit_artifact=audit_artifact,
+        audit_artifact_root=audit_artifact_root,
         run_process=run_process,
     )
 
@@ -375,6 +413,8 @@ def test_execute_sweep_runs_fresh_process_per_candidate_and_verifies_outputs(
     provenance = json.loads((tmp_path / "sweep" / "provenance.json").read_text())
     assert provenance["git_sha"] == "1" * 40
     assert provenance["seed"] == 17
+    assert len(provenance["audit_artifact_sha256"]) == 64
+    assert len(provenance["audit_report_sha256"]) == 64
     assert json.loads((tmp_path / "sweep" / "results.json").read_text()) == result
     for candidate in result["candidates"]:
         assert set(candidate["metrics"]) == {"main_drive"}
@@ -434,6 +474,53 @@ def test_execution_requires_real_reference_before_writing_output(tmp_path: Path)
     assert not output.exists()
 
 
+def test_execution_requires_passing_prefit_audit_before_writing_output(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "sweep"
+
+    with pytest.raises(ContractError, match="passing pre-fit audit"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            audit_artifact=None,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("missing audit must fail before running")
+            ),
+        )
+
+    assert not output.exists()
+
+
+def test_execution_rejects_failed_prefit_audit_and_binds_pass_to_cache(
+    tmp_path: Path,
+) -> None:
+    audit, audit_root = _passing_audit(tmp_path, _profile())
+    physical_binding = audit["physical_measurements"]
+    physical_path = audit_root / physical_binding["path"]
+    physical = json.loads(physical_path.read_text())
+    physical["mass_measurements_kg"] = [20.0, 20.0, 20.0]
+    physical_path.write_text(
+        json.dumps(physical, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    physical_binding["sha256"] = sha256_file(physical_path)
+
+    output = tmp_path / "sweep"
+    with pytest.raises(ContractError, match="pre-fit audit failed.*mass_pass"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            audit_artifact=audit,
+            audit_artifact_root=audit_root,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("failed audit must fail before running")
+            ),
+        )
+
+    assert not output.exists()
+
+
 def test_execution_rejects_standalone_real_reference_before_writing_output(
     tmp_path: Path,
 ) -> None:
@@ -472,6 +559,7 @@ def test_effort_limit_sweep_requires_managed_known_load_evidence(
         / "main-reference-real"
     )
     _write_real_reference(real, scenario)
+    audit_artifact, audit_root = _passing_audit(tmp_path, baseline)
 
     with pytest.raises(ContractError, match="known-load.*effort_limit"):
         execute_sweep(
@@ -489,6 +577,8 @@ def test_effort_limit_sweep_requires_managed_known_load_evidence(
             command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
             real_trace=real,
             known_load_trace=None,
+            audit_artifact=audit_artifact,
+            audit_artifact_root=audit_root,
             run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("missing known load must fail before running")
             ),
@@ -520,6 +610,7 @@ def test_effort_limit_sweep_binds_managed_known_load_evidence(
     )
     _write_real_reference(real, scenario)
     _write_known_load_reference(known_load)
+    audit_artifact, audit_root = _passing_audit(tmp_path, baseline)
 
     def run_process(command, **_kwargs):
         command = list(command)
@@ -541,6 +632,8 @@ def test_effort_limit_sweep_binds_managed_known_load_evidence(
         command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
         real_trace=real,
         known_load_trace=known_load,
+        audit_artifact=audit_artifact,
+        audit_artifact_root=audit_root,
         run_process=run_process,
     )
 
@@ -564,6 +657,7 @@ def test_effort_limit_sweep_must_cover_measured_known_load_envelope(
     known_load = tmp_path / "datasets" / "sim2real" / "load" / "episodes" / "known"
     _write_real_reference(real, scenario)
     _write_known_load_reference(known_load)
+    audit_artifact, audit_root = _passing_audit(tmp_path, baseline)
 
     with pytest.raises(ContractError, match="effort-limit candidates.*known-load envelope"):
         execute_sweep(
@@ -581,6 +675,8 @@ def test_effort_limit_sweep_must_cover_measured_known_load_envelope(
             command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
             real_trace=real,
             known_load_trace=known_load,
+            audit_artifact=audit_artifact,
+            audit_artifact_root=audit_root,
             run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("mismatched known-load evidence must fail before running")
             ),
@@ -887,6 +983,44 @@ def test_runtime_asset_hash_changes_cache_identity(tmp_path: Path) -> None:
         )
 
 
+def test_prefit_audit_hash_changes_cache_identity(tmp_path: Path) -> None:
+    def first_run(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    output = tmp_path / "sweep"
+    audit, audit_root = _passing_audit(tmp_path, _profile())
+    _execute(
+        output,
+        candidates=_candidates(1),
+        audit_artifact=audit,
+        audit_artifact_root=audit_root,
+        run_process=first_run,
+    )
+
+    physical_binding = audit["physical_measurements"]
+    physical_path = audit_root / physical_binding["path"]
+    physical = json.loads(physical_path.read_text())
+    physical["mass_instrument_uncertainty_kg"] = 0.3
+    physical_path.write_text(
+        json.dumps(physical, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    physical_binding["sha256"] = sha256_file(physical_path)
+
+    with pytest.raises(ContractError, match="existing sweep index does not match"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            audit_artifact=audit,
+            audit_artifact_root=audit_root,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("changed audit must invalidate before running")
+            ),
+        )
+
+
 def test_artifact_must_report_all_derived_runtime_provenance(tmp_path: Path) -> None:
     def incomplete_artifact(command, **_kwargs):
         command = list(command)
@@ -964,6 +1098,13 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
 
     profile_path = tmp_path / "profile.json"
     profile_path.write_text(json.dumps(_profile().to_dict()), encoding="utf-8")
+    audit_payload = {
+        "runtime_trace": {"path": "audit-run", "trace_sha256": "a" * 64},
+        "runtime_audit": {"path": "audit-run/runtime_audit.json", "sha256": "b" * 64},
+        "physical_measurements": {"path": "physical.json", "sha256": "c" * 64},
+    }
+    audit_path = tmp_path / "audit-evidence.json"
+    audit_path.write_text(json.dumps(audit_payload), encoding="utf-8")
     isaac_root = tmp_path / "IsaacLab"
     isaac_root.mkdir()
     (isaac_root / "isaaclab.sh").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -997,6 +1138,8 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
             "--headless",
             "--real-trace",
             str(tmp_path / "real-reference"),
+            "--audit-evidence",
+            str(audit_path),
             "--provenance-json",
             '{"operator":"bench"}',
         ]
@@ -1016,6 +1159,8 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
     assert captured["headless"] is True
     assert captured["real_trace"] == tmp_path / "real-reference"
     assert captured["known_load_trace"] is None
+    assert captured["audit_artifact"] == audit_payload
+    assert captured["audit_artifact_root"] == tmp_path
     assert captured["base_profile"].to_dict() == _profile().to_dict()
     assert captured["provenance"]["operator"] == "bench"
     assert captured["provenance_provider"] is production_runtime_provenance
@@ -1058,6 +1203,8 @@ def test_sweep_cli_generate_only_needs_no_isaac_install(
     assert captured["command_prefix"] is None
     assert captured["scene_mode"] == "fixed-base"
     assert captured["real_trace"] is None
+    assert captured["audit_artifact"] is None
+    assert captured["audit_artifact_root"] is None
 
 
 def test_sweep_cli_execution_requires_explicit_real_trace(
@@ -1088,6 +1235,39 @@ def test_sweep_cli_execution_requires_explicit_real_trace(
     )
 
     with pytest.raises(ValueError, match="--real-trace is required"):
+        _run(args)
+
+
+def test_sweep_cli_execution_requires_explicit_audit_evidence(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.cli import _run, build_parser
+
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(_profile().to_dict()), encoding="utf-8")
+    isaac_root = tmp_path / "IsaacLab"
+    isaac_root.mkdir()
+    (isaac_root / "isaaclab.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    args = build_parser().parse_args(
+        [
+            "sweep",
+            str(profile_path),
+            "--scenario",
+            "main-step",
+            "--mode",
+            "one-factor",
+            "--space-json",
+            '{"simulation_physics.main_drive.damping":[0.3]}',
+            "--output",
+            str(tmp_path / "output"),
+            "--isaaclab-root",
+            str(isaac_root),
+            "--real-trace",
+            str(tmp_path / "real-reference"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--audit-evidence is required"):
         _run(args)
 
 
