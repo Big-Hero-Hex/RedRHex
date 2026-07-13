@@ -67,6 +67,7 @@ _MAX_PWM = 500.0
 _MAIN_DRIVE_EXPERIMENTS = frozenset({"step", "coast", "step_coast"})
 _PROBE_EVENT_TOPIC = "/redrhex/sim2real_probe/events"
 _PROBE_RATE_HZ = 60.0
+_PROBE_RECEIVE_JITTER_BOUND_S = 1.0 / _PROBE_RATE_HZ
 
 
 def _rosbag_dependencies():
@@ -218,6 +219,7 @@ def _validate_probe_events(
         )
 
     scenario_event = samples[0][1]
+    scenario_receive_time_s = float(samples[0][0])
     if not math.isclose(
         _event_number(scenario_event, "rate_hz"), _PROBE_RATE_HZ, abs_tol=1.0e-12
     ):
@@ -262,6 +264,16 @@ def _validate_probe_events(
             raise ContractError("probe event lateness is outside the reviewed bound")
         if not math.isclose(actual, scheduled + lateness, abs_tol=1.0e-9):
             raise ContractError("probe event actual time is inconsistent with lateness")
+        receive_elapsed_s = float(receive_time_s) - scenario_receive_time_s
+        if not math.isclose(
+            receive_elapsed_s,
+            actual,
+            rel_tol=0.0,
+            abs_tol=_PROBE_RECEIVE_JITTER_BOUND_S,
+        ):
+            raise ContractError(
+                "probe event receive time is inconsistent with its actual elapsed time"
+            )
 
     complete = samples[-1][1]
     if _event_int(complete, "ticks") != expected_ticks:
@@ -282,11 +294,20 @@ def _validate_probe_events(
         abs_tol=1.0e-9,
     ):
         raise ContractError("probe complete time is inconsistent with lateness")
-    if samples[-1][0] < samples[0][0]:
-        raise ContractError("probe complete marker precedes scenario marker")
+    complete_receive_elapsed_s = float(samples[-1][0]) - scenario_receive_time_s
+    if not math.isclose(
+        complete_receive_elapsed_s,
+        complete_actual,
+        rel_tol=0.0,
+        abs_tol=_PROBE_RECEIVE_JITTER_BOUND_S,
+    ):
+        raise ContractError(
+            "probe complete receive time is inconsistent with its actual elapsed time"
+        )
 
-    if len(command_times_s) > 1 and not np.all(np.diff(command_times_s) > 0.0):
-        raise ContractError("probe segment receive timestamps must be strictly increasing")
+    receive_times_s = np.asarray([receive_time_s for receive_time_s, _ in samples])
+    if len(receive_times_s) > 1 and not np.all(np.diff(receive_times_s) >= 0.0):
+        raise ContractError("probe event receive timestamps must be monotonic")
     return (
         {
             "scenario_sha256": digest,
@@ -295,6 +316,8 @@ def _validate_probe_events(
             "repetition_count": scenario.repeats,
             "segment_count": scenario.repeats * len(scenario.command_segments),
             "complete_ticks": expected_ticks,
+            "receive_duration_s": complete_receive_elapsed_s,
+            "receive_jitter_bound_s": _PROBE_RECEIVE_JITTER_BOUND_S,
             "abad_output_disabled_verified": True,
         },
         command_times_s,
@@ -372,6 +395,15 @@ def _load_rosbag(
             has_pwm_cap,
         )
     )
+    position_fully_profiled = all((has_counts, has_zero, has_sign))
+    command_fully_profiled = all((has_joint_direction, has_pwm_scale, has_pwm_cap))
+
+    def mapping_source(measured: bool) -> str:
+        if profile is None:
+            return "provisional_repository_defaults"
+        if measured:
+            return f"profile:{profile.profile_id}"
+        return f"profile:{profile.profile_id}:with_provisional_fallbacks"
 
     times: dict[str, list[float]] = {
         "command_time_s": [],
@@ -484,6 +516,7 @@ def _load_rosbag(
             f"{scenario.joint} ({selected_leg})"
         )
     probe_evidence: dict[str, Any] | None = None
+    replay_initial_state: dict[str, Any] | None = None
     if is_bound_probe:
         probe_evidence, event_command_times, event_commands = _validate_probe_events(
             probe_events, scenario
@@ -498,6 +531,36 @@ def _load_rosbag(
         # command timeline; raw PWM remains on its own untouched clock for mapping.
         times["command_time_s"] = event_command_times
         values["command"] = event_commands
+        if not times["position_time_s"]:
+            raise ContractError("probe replay initial state has no position samples")
+        position_time = np.asarray(times["position_time_s"], dtype=np.float64)
+        position = np.asarray(values["position"], dtype=np.float64)
+        distances = np.abs(position_time - scenario_start)
+        nearest_distance = float(np.min(distances))
+        tolerance = 1.0e-9
+        if nearest_distance > 1.0 / _PROBE_RATE_HZ + tolerance:
+            raise ContractError(
+                "probe replay initial state has no position sample at scenario start"
+            )
+        nearest = np.flatnonzero(
+            np.isclose(distances, nearest_distance, rtol=0.0, atol=tolerance)
+        )
+        if nearest.size != 1:
+            raise ContractError(
+                "probe replay initial state position sample is ambiguous at scenario start"
+            )
+        sample_index = int(nearest[0])
+        sample_time_s = float(position_time[sample_index]) - earliest
+        scenario_time_s = scenario_start - earliest
+        replay_initial_state = {
+            "schema_version": 1,
+            "joint": scenario.joint,
+            "source_channel": "position",
+            "position_rad": float(position[sample_index]),
+            "sample_time_s": sample_time_s,
+            "scenario_time_s": scenario_time_s,
+            "sample_offset_s": sample_time_s - scenario_time_s,
+        }
     arrays: dict[str, np.ndarray] = {}
     for time_name, samples in times.items():
         if samples:
@@ -519,14 +582,12 @@ def _load_rosbag(
         if channel in arrays:
             extra_time_bases[channel] = time_name
     constants = {
-        "calibration_source": (
-            f"profile:{profile.profile_id}"
-            if profile is not None and fully_profiled
-            else (
-                f"profile:{profile.profile_id}:with_provisional_fallbacks"
-                if profile is not None
-                else "provisional_repository_defaults"
-            )
+        "calibration_source": mapping_source(fully_profiled),
+        "position_mapping_source": mapping_source(position_fully_profiled),
+        "requested_command_source": (
+            f"authenticated_probe_events:{probe_evidence['scenario_sha256']}"
+            if probe_evidence is not None
+            else mapping_source(command_fully_profiled)
         ),
         "encoder_counts_per_rev": counts_per_rev,
         "encoder_zero_count": encoder_zero,
@@ -548,6 +609,9 @@ def _load_rosbag(
         relative_evidence["scenario_receive_time_s"] -= earliest
         relative_evidence["complete_receive_time_s"] -= earliest
         constants["probe_event_evidence"] = relative_evidence
+    if replay_initial_state is not None:
+        constants["replay_initial_state"] = replay_initial_state
+        constants["replay_initial_state_sha256"] = sha256_json(replay_initial_state)
     return arrays, extra_time_bases, constants
 
 

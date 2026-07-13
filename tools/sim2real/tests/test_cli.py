@@ -312,7 +312,9 @@ def test_one_factor_sweep_cli_enforces_max_candidates(tmp_path: Path, capsys) ->
     assert not output.exists()
 
 
-def test_import_real_numeric_trace_and_compare_cli(tmp_path: Path, capsys) -> None:
+def test_import_real_numeric_trace_cli_and_compare_rejects_missing_mapping_provenance(
+    tmp_path: Path, capsys
+) -> None:
     source = _npz(tmp_path / "raw.npz")
     units = '{"command":"normalized","position":"rad"}'
     frames = '{"command":"actuator","position":"main_0"}'
@@ -354,9 +356,8 @@ def test_import_real_numeric_trace_and_compare_cli(tmp_path: Path, capsys) -> No
         latency_clock="bag_receive_time",
     )
 
-    assert main(["compare", str(real), str(sim), "--scenario", "main-step"]) == 0
-    result = json.loads(capsys.readouterr().out)
-    assert set(result["subsystems"]) == {"main_drive"}
+    assert main(["compare", str(real), str(sim), "--scenario", "main-step"]) == 2
+    assert "mapping provenance" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -691,6 +692,12 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     assert calibrated.manifest.metadata["calibration_constants"]["pwm_scale"] == 0.01
     assert calibrated.manifest.metadata["calibration_constants"]["pwm_cap"] == 0.5
     assert calibrated.manifest.metadata["calibration_constants"]["joint_direction"] == -1
+    assert calibrated.manifest.metadata["calibration_constants"][
+        "position_mapping_source"
+    ] == "profile:bag-calibration"
+    assert calibrated.manifest.metadata["calibration_constants"][
+        "requested_command_source"
+    ] == "profile:bag-calibration"
     assert "profile_sha256" in calibrated.manifest.provenance
 
 
@@ -828,6 +835,73 @@ def test_bound_probe_import_rejects_abort_or_missing_complete(
         )
 
 
+@pytest.mark.parametrize(
+    "receive_clock_scale",
+    [1.0e-6, 2.0],
+    ids=("compressed", "stretched"),
+)
+def test_bound_probe_import_rejects_forged_receive_clock_duration(
+    tmp_path: Path,
+    monkeypatch,
+    receive_clock_scale: float,
+) -> None:
+    events = _probe_events()
+    receive_origin_ns = events[0][2]
+    forged_events = [
+        (
+            topic,
+            message,
+            receive_origin_ns
+            + round((receive_time_ns - receive_origin_ns) * receive_clock_scale),
+        )
+        for topic, message, receive_time_ns in events
+    ]
+    command, state = _fake_main_messages()
+    _install_fake_rosbag_reader(
+        monkeypatch,
+        [
+            *forged_events,
+            ("/motor/state", state, 1_010_000_000),
+            ("/motor/command", command, 2_000_000_000),
+        ],
+    )
+    bag = tmp_path / "bag"
+    bag.mkdir()
+
+    with pytest.raises(ContractError, match="receive time"):
+        import_real_trace(
+            bag,
+            tmp_path / "episode",
+            scenario="suspended-main-0-step-coast",
+        )
+
+
+def test_bound_probe_import_rejects_per_event_receive_clock_jitter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    events = _probe_events()
+    topic, message, receive_time_ns = events[5]
+    events[5] = (topic, message, receive_time_ns + 100_000_000)
+    command, state = _fake_main_messages()
+    _install_fake_rosbag_reader(
+        monkeypatch,
+        [
+            *events,
+            ("/motor/state", state, 1_010_000_000),
+            ("/motor/command", command, 2_000_000_000),
+        ],
+    )
+    bag = tmp_path / "bag"
+    bag.mkdir()
+
+    with pytest.raises(ContractError, match="receive time"):
+        import_real_trace(
+            bag,
+            tmp_path / "episode",
+            scenario="suspended-main-0-step-coast",
+        )
+
+
 def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -837,6 +911,7 @@ def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
         monkeypatch,
         [
             *_probe_events(),
+            ("/motor/state", state, 1_010_000_000),
             ("/motor/command", enabled, 2_000_000_000),
             ("/motor/state", state, 2_010_000_000),
             ("/motor/command", disabled, 2_100_000_000),
@@ -882,6 +957,62 @@ def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
     assert evidence["repetition_count"] == 3
     assert evidence["segment_count"] == 21
     assert evidence["complete_ticks"] == 990
+
+
+def test_bound_probe_import_authenticates_commands_separately_from_position_mapping(
+    tmp_path: Path, monkeypatch
+) -> None:
+    command, state = _fake_main_messages()
+    _install_fake_rosbag_reader(
+        monkeypatch,
+        [
+            *_probe_events(),
+            ("/motor/state", state, 1_010_000_000),
+            ("/motor/command", command, 2_000_000_000),
+        ],
+    )
+    profile = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "encoder-only-main-0",
+            "hardware_mapping": {
+                "encoder_counts_per_rev": {"main_0": 54984.83},
+                "encoder_zero_count": {"main_0": 0.0},
+                "encoder_sign": {"main_0": 1.0},
+            },
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+    bag = tmp_path / "bag"
+    bag.mkdir()
+
+    import_real_trace(
+        bag,
+        tmp_path / "episode",
+        scenario="suspended-main-0-step-coast",
+        profile=profile,
+    )
+    trace = load_trace(tmp_path / "episode")
+    constants = trace.manifest.metadata["calibration_constants"]
+    scenario = load_scenario("suspended-main-0-step-coast")
+
+    assert constants["position_mapping_source"] == "profile:encoder-only-main-0"
+    assert constants["requested_command_source"] == (
+        f"authenticated_probe_events:{sha256_json(scenario.to_dict())}"
+    )
+    assert constants["calibration_source"].endswith(":with_provisional_fallbacks")
+    initial_state = constants["replay_initial_state"]
+    assert initial_state == {
+        "schema_version": 1,
+        "joint": "main_0",
+        "source_channel": "position",
+        "position_rad": 0.0,
+        "sample_time_s": pytest.approx(0.01),
+        "scenario_time_s": pytest.approx(0.0),
+        "sample_offset_s": pytest.approx(0.01),
+    }
+    assert constants["replay_initial_state_sha256"] == sha256_json(initial_state)
 
 
 def test_imported_normal_probe_exposes_all_three_bidirectional_repetitions(
