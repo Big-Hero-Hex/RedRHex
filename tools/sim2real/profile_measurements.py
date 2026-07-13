@@ -1,110 +1,157 @@
 from __future__ import annotations
 
 import copy
-import math
-import re
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Sequence
 
-from .contracts import CalibrationProfileV1, ContractError
-
-
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-_ABAD_JOINT = re.compile(r"abad_[0-5]")
-
-
-def _mapping(value: Any, name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise ContractError(f"{name} must be an object")
-    return value
+from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1
+from .metrics import compute_subsystem_metrics
+from .provenance import validate_real_trace_provenance
+from .scenarios import load_scenario
+from .traces import LoadedTrace, load_trace
 
 
-def _number(value: Any, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ContractError(f"{name} must be numeric")
-    result = float(value)
-    if not math.isfinite(result):
-        raise ContractError(f"{name} must be finite")
-    return result
+def _expected_metadata(
+    scenario: ScenarioSpecV1,
+) -> tuple[dict[str, str], dict[str, str]]:
+    if scenario.experiment_kind == "abad_static":
+        units = {
+            "command": "rad",
+            "position": "rad",
+            "repeat_index": "1",
+            "settled": "1",
+        }
+        return units, {name: scenario.joint for name in units}
+    if scenario.experiment_kind == "friction":
+        units = {
+            "breakaway_force": "N",
+            "static_normal_load": "N",
+            "static_repeat_index": "1",
+            "dynamic_pull_force": "N",
+            "dynamic_normal_load": "N",
+            "dynamic_speed": "m/s",
+            "dynamic_repeat_index": "1",
+        }
+        frame = f"{scenario.joint}/ground"
+        return units, {name: frame for name in units}
+    raise ContractError(
+        f"scenario {scenario.scenario_id} is not a direct profile measurement"
+    )
 
 
-def _trace_sha(value: str | None, name: str) -> str:
-    if not isinstance(value, str) or not _SHA256.fullmatch(value):
-        raise ContractError(f"{name} trace SHA must be a lowercase SHA-256 digest")
-    return value
+def _load_measurement_trace(path: str | Path) -> tuple[ScenarioSpecV1, LoadedTrace]:
+    discovered = load_trace(path, require_managed_dataset=True)
+    if discovered.manifest.scenario_id not in {"abad-static", "friction"}:
+        raise ContractError(
+            f"scenario {discovered.manifest.scenario_id} is not a direct profile measurement"
+        )
+    scenario = load_scenario(discovered.manifest.scenario_id)
+    units, frames = _expected_metadata(scenario)
+    trace = load_trace(
+        path,
+        scenario=scenario,
+        require_managed_dataset=True,
+        expected_metadata_sha256=discovered.metadata_sha256,
+        expected_units=units,
+        expected_frames=frames,
+    )
+    validate_real_trace_provenance(trace, scenario)
+    if trace.dataset is None:  # pragma: no cover - guarded by load_trace
+        raise ContractError("measurement trace has no managed dataset identity")
+    return scenario, trace
 
 
-def _abad_values(metrics: Mapping[str, Any]) -> tuple[str, float, float]:
-    if metrics.get("schema_version") != 1 or metrics.get("metric_kind") != "abad_static_mapping":
-        raise ContractError("ABAD metric contract is invalid")
-    frame = metrics.get("frame")
-    if not isinstance(frame, str) or not _ABAD_JOINT.fullmatch(frame):
-        raise ContractError("ABAD metric frame must be a canonical abad_0..abad_5 joint")
-    units = _mapping(metrics.get("units"), "ABAD metric units")
-    if units.get("target_scale") != "1" or units.get("target_offset_rad") != "rad":
-        raise ContractError("ABAD metric contract has incompatible units")
-    aggregate = _mapping(metrics.get("aggregate"), "ABAD metric aggregate")
-    scale = _number(aggregate.get("target_scale"), "ABAD target scale")
-    offset = _number(aggregate.get("target_offset_rad"), "ABAD target offset")
-    if scale <= 0.0:
-        raise ContractError("ABAD target scale must be positive")
-    return frame, scale, offset
-
-
-def _friction_values(metrics: Mapping[str, Any]) -> tuple[float, float]:
-    if metrics.get("schema_version") != 1 or metrics.get("metric_kind") != "ground_friction":
-        raise ContractError("friction metric contract is invalid")
-    units = _mapping(metrics.get("units"), "friction metric units")
-    if units.get("coefficient") != "1":
-        raise ContractError("friction metric coefficient must be dimensionless")
-    static = _mapping(metrics.get("static"), "static friction metric")
-    dynamic = _mapping(metrics.get("dynamic"), "dynamic friction metric")
-    static_value = _number(static.get("coefficient_mean"), "static friction coefficient")
-    dynamic_value = _number(dynamic.get("coefficient_mean"), "dynamic friction coefficient")
-    if static_value < 0.0 or dynamic_value < 0.0:
-        raise ContractError("friction coefficients must be non-negative")
-    return static_value, dynamic_value
+def _source_record(
+    scenario: ScenarioSpecV1,
+    trace: LoadedTrace,
+    *,
+    metric_kind: str,
+    frame: str,
+    repeat_count: int,
+) -> dict[str, Any]:
+    dataset = trace.dataset
+    if dataset is None:  # pragma: no cover - guarded by _load_measurement_trace
+        raise ContractError("measurement trace has no managed dataset identity")
+    return {
+        "trace_sha256": trace.manifest.provenance["trace_sha256"],
+        "metadata_sha256": trace.metadata_sha256,
+        "scenario_id": scenario.scenario_id,
+        "scenario_sha256": trace.manifest.provenance["scenario_sha256"],
+        "source": trace.manifest.source,
+        "metric_kind": metric_kind,
+        "frame": frame,
+        "repeat_count": repeat_count,
+        "dataset_id": dataset.dataset_id,
+        "episode_id": dataset.episode_id,
+    }
 
 
 def apply_measurements_to_profile(
     baseline: CalibrationProfileV1,
     *,
     profile_id: str,
-    abad_metrics: Mapping[str, Any] | None = None,
-    abad_trace_sha256: str | None = None,
-    friction_metrics: Mapping[str, Any] | None = None,
-    friction_trace_sha256: str | None = None,
+    trace_paths: Sequence[str | Path],
 ) -> CalibrationProfileV1:
-    """Return a candidate profile populated only from versioned measurement results."""
+    """Build a candidate only from verified, managed real measurement traces.
+
+    Metrics and source digests are recomputed from immutable dataset episodes;
+    callers cannot supply either result directly.
+    """
 
     source = baseline.validate()
-    if abad_metrics is None and friction_metrics is None:
-        raise ContractError("at least one measurement result is required")
-    if abad_metrics is None and abad_trace_sha256 is not None:
-        raise ContractError("ABAD trace SHA was supplied without ABAD metrics")
-    if friction_metrics is None and friction_trace_sha256 is not None:
-        raise ContractError("friction trace SHA was supplied without friction metrics")
+    if isinstance(trace_paths, (str, Path)) or not trace_paths:
+        raise ContractError("trace_paths must contain at least one trace artifact")
 
     payload = copy.deepcopy(source.to_dict())
     payload["profile_id"] = profile_id
     hardware = payload["hardware_mapping"]
     physics = payload["simulation_physics"]
     sources = payload["measurement_sources"]
+    applied_keys: set[str] = set()
 
-    if abad_metrics is not None:
-        trace_sha = _trace_sha(abad_trace_sha256, "ABAD")
-        joint, scale, offset = _abad_values(_mapping(abad_metrics, "ABAD metrics"))
-        hardware.setdefault("abad_target_scale", {})[joint] = scale
-        hardware.setdefault("abad_target_offset_rad", {})[joint] = offset
-        sources[f"abad_target:{joint}"] = trace_sha
-
-    if friction_metrics is not None:
-        trace_sha = _trace_sha(friction_trace_sha256, "friction")
-        static, dynamic = _friction_values(
-            _mapping(friction_metrics, "friction metrics")
-        )
-        ground = physics.setdefault("ground", {})
-        ground["static_friction"] = static
-        ground["dynamic_friction"] = dynamic
-        sources["ground_friction"] = trace_sha
+    for path in trace_paths:
+        scenario, trace = _load_measurement_trace(path)
+        metrics = compute_subsystem_metrics(scenario, trace)
+        if scenario.experiment_kind == "abad_static":
+            key = f"abad_target:{scenario.joint}"
+            if key in applied_keys:
+                raise ContractError(f"duplicate measurement source for {key}")
+            repeat_count = len(metrics["repeats"])
+            if repeat_count != scenario.repeats:
+                raise ContractError("ABAD metric repeat count does not match its scenario")
+            hardware.setdefault("abad_target_scale", {})[scenario.joint] = metrics[
+                "aggregate"
+            ]["target_scale"]
+            hardware.setdefault("abad_target_offset_rad", {})[scenario.joint] = metrics[
+                "aggregate"
+            ]["target_offset_rad"]
+            sources[key] = _source_record(
+                scenario,
+                trace,
+                metric_kind="abad_static_mapping",
+                frame=scenario.joint,
+                repeat_count=repeat_count,
+            )
+        elif scenario.experiment_kind == "friction":
+            key = "ground_friction"
+            if key in applied_keys:
+                raise ContractError("duplicate measurement source for ground_friction")
+            static_count = int(metrics["static"]["coefficient_count"])
+            dynamic_count = int(metrics["dynamic"]["coefficient_count"])
+            if static_count != scenario.repeats or dynamic_count != scenario.repeats:
+                raise ContractError("friction metric repeat count does not match its scenario")
+            ground = physics.setdefault("ground", {})
+            ground["static_friction"] = metrics["static"]["coefficient_mean"]
+            ground["dynamic_friction"] = metrics["dynamic"]["coefficient_mean"]
+            sources[key] = _source_record(
+                scenario,
+                trace,
+                metric_kind="ground_friction",
+                frame=f"{scenario.joint}/ground",
+                repeat_count=static_count,
+            )
+        else:  # pragma: no cover - guarded by _load_measurement_trace
+            raise ContractError(f"unsupported measurement scenario: {scenario.scenario_id}")
+        applied_keys.add(key)
 
     return CalibrationProfileV1.from_dict(payload)

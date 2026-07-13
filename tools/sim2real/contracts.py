@@ -12,6 +12,15 @@ from typing import Any, Callable, Mapping
 SCHEMA_VERSION = 1
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_ABAD_JOINT_RE = re.compile(r"^abad_[0-5]$")
+# 50 rad/s is about 477 rpm: well above the reviewed 4.17 rad/s bridge cap,
+# while still rejecting normalized/raw-PWM unit mistakes as physical profiles.
+_MAX_CANONICAL_PWM_CAP_RAD_S = 50.0
+# Static angle calibration is a correction near identity, not an alternate
+# kinematic model. Larger deviations require a geometry/encoder audit first.
+_MIN_ABAD_TARGET_SCALE = 0.5
+_MAX_ABAD_TARGET_SCALE = 1.5
+_MAX_ABAD_TARGET_OFFSET_RAD = 0.35
 
 
 class ContractError(ValueError):
@@ -454,7 +463,7 @@ class CalibrationProfileV1:
     sensor_timing: dict[str, float]
     simulation_physics: dict[str, Any]
     description: str = ""
-    measurement_sources: dict[str, str] = field(default_factory=dict)
+    measurement_sources: dict[str, Any] = field(default_factory=dict)
     schema_version: int = field(default=SCHEMA_VERSION, init=False)
 
     @classmethod
@@ -484,12 +493,25 @@ class CalibrationProfileV1:
                     if value not in {-1, 1} or isinstance(value, bool):
                         raise ContractError(f"{path} must be -1 or 1")
                     clean[joint] = int(value)
-                elif key in {"gear_ratio", "pwm_scale", "abad_target_scale"}:
+                elif key in {"gear_ratio", "pwm_scale"}:
                     clean[joint] = _positive(value, path)
+                elif key == "abad_target_scale":
+                    if not _ABAD_JOINT_RE.fullmatch(joint):
+                        raise ContractError(f"{path} must name abad_0..abad_5")
+                    scale = _positive(value, path)
+                    if not _MIN_ABAD_TARGET_SCALE <= scale <= _MAX_ABAD_TARGET_SCALE:
+                        raise ContractError(
+                            f"{path} must be between {_MIN_ABAD_TARGET_SCALE} and "
+                            f"{_MAX_ABAD_TARGET_SCALE}"
+                        )
+                    clean[joint] = scale
                 elif key == "pwm_cap":
                     cap = _positive(value, path)
-                    if cap > 1.0:
-                        raise ContractError(f"{path} must be at most 1")
+                    if cap > _MAX_CANONICAL_PWM_CAP_RAD_S:
+                        raise ContractError(
+                            f"{path} is a canonical velocity cap in rad/s and must be at "
+                            f"most {_MAX_CANONICAL_PWM_CAP_RAD_S}"
+                        )
                     clean[joint] = cap
                 elif key == "actuator_id":
                     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -500,7 +522,16 @@ class CalibrationProfileV1:
                 elif key == "encoder_zero_count":
                     clean[joint] = _number(value, path, minimum=0.0)
                 else:
-                    clean[joint] = _number(value, path)
+                    number = _number(value, path)
+                    if key == "abad_target_offset_rad":
+                        if not _ABAD_JOINT_RE.fullmatch(joint):
+                            raise ContractError(f"{path} must name abad_0..abad_5")
+                        if abs(number) > _MAX_ABAD_TARGET_OFFSET_RAD:
+                            raise ContractError(
+                                f"{path} must be within "
+                                f"+/-{_MAX_ABAD_TARGET_OFFSET_RAD} rad"
+                            )
+                    clean[joint] = number
             clean_hardware[key] = clean
 
         timing = _clean_profile_section(data["sensor_timing"], "sensor_timing", _TIMING_FIELDS)
@@ -629,16 +660,73 @@ class CalibrationProfileV1:
         description = data.get("description", "")
         if not isinstance(description, str):
             raise ContractError("description must be a string")
-        raw_sources = _string_map(
-            data.get("measurement_sources", {}), "measurement_sources"
-        )
-        measurement_sources: dict[str, str] = {}
-        for name, digest in raw_sources.items():
-            if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+        raw_sources = _string_map(data.get("measurement_sources", {}), "measurement_sources")
+        measurement_sources: dict[str, Any] = {}
+        source_fields = {
+            "trace_sha256",
+            "metadata_sha256",
+            "scenario_id",
+            "scenario_sha256",
+            "source",
+            "metric_kind",
+            "frame",
+            "repeat_count",
+            "dataset_id",
+            "episode_id",
+        }
+        for name, raw_source in raw_sources.items():
+            is_abad = name.startswith("abad_target:")
+            is_ground = name == "ground_friction"
+            if not (is_abad or is_ground):
+                if not isinstance(raw_source, str) or not _SHA256_RE.fullmatch(raw_source):
+                    raise ContractError(
+                        f"measurement_sources.{name} must be a lowercase SHA-256 digest"
+                    )
+                measurement_sources[name] = raw_source
+                continue
+
+            source_record = _mapping(raw_source, f"measurement_sources.{name}")
+            _keys(source_record, required=source_fields)
+            for field_name in ("trace_sha256", "metadata_sha256", "scenario_sha256"):
+                digest = source_record[field_name]
+                if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+                    raise ContractError(
+                        f"measurement_sources.{name}.{field_name} must be a lowercase SHA-256 digest"
+                    )
+            scenario_id = _identifier(
+                source_record["scenario_id"], f"measurement_sources.{name}.scenario_id"
+            )
+            _identifier(source_record["dataset_id"], f"measurement_sources.{name}.dataset_id")
+            _identifier(source_record["episode_id"], f"measurement_sources.{name}.episode_id")
+            if source_record["source"] != "real":
+                raise ContractError(f"measurement_sources.{name}.source must be real")
+            repeat_count = source_record["repeat_count"]
+            if isinstance(repeat_count, bool) or not isinstance(repeat_count, int) or repeat_count < 3:
                 raise ContractError(
-                    f"measurement_sources.{name} must be a lowercase SHA-256 digest"
+                    f"measurement_sources.{name}.repeat_count must be an integer of at least 3"
                 )
-            measurement_sources[name] = digest
+            expected_kind = "abad_static_mapping" if is_abad else "ground_friction"
+            expected_scenario = "abad-static" if is_abad else "friction"
+            if scenario_id != expected_scenario:
+                raise ContractError(
+                    f"measurement_sources.{name}.scenario_id must be {expected_scenario}"
+                )
+            if source_record["metric_kind"] != expected_kind:
+                raise ContractError(
+                    f"measurement_sources.{name}.metric_kind must be {expected_kind}"
+                )
+            frame = _string(source_record["frame"], f"measurement_sources.{name}.frame")
+            if is_abad:
+                joint = name.removeprefix("abad_target:")
+                if not _ABAD_JOINT_RE.fullmatch(joint) or frame != joint:
+                    raise ContractError(
+                        f"measurement_sources.{name}.frame must match its canonical ABAD joint"
+                    )
+            elif not frame.endswith("/ground"):
+                raise ContractError(
+                    "measurement_sources.ground_friction.frame must describe a ground pair"
+                )
+            measurement_sources[name] = copy.deepcopy(source_record)
         return cls(
             profile_id,
             clean_hardware,
@@ -656,7 +744,7 @@ class CalibrationProfileV1:
             "hardware_mapping": copy.deepcopy(self.hardware_mapping),
             "sensor_timing": dict(self.sensor_timing),
             "simulation_physics": copy.deepcopy(self.simulation_physics),
-            "measurement_sources": dict(self.measurement_sources),
+            "measurement_sources": copy.deepcopy(self.measurement_sources),
         }
 
     def validate(self) -> "CalibrationProfileV1":

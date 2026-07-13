@@ -210,8 +210,21 @@ def test_train_play_and_characterization_apply_measured_abad_target_mapping_at_b
     delay_call = env_source.index("advance_target_delay(")
     mapping_call = env_source.index("mapped_abad = map_abad_targets(", delay_call)
     assert delay_call < mapping_call
+    assert "lower=(self._abad_rest_pos - self._abad_pos_limit_rad)" in env_source
+    assert "upper=(self._abad_rest_pos + self._abad_pos_limit_rad)" in env_source
     assert "apply_abad_target_mapping(" in runner_source
+    assert "minimum_rad=abad_rest_rad - abad_limit_rad" in runner_source
+    assert "maximum_rad=abad_rest_rad + abad_limit_rad" in runner_source
     assert "measurement_annotations(requested_schedule" in runner_source
+
+
+def test_contact_holdout_reuses_native_runner_channels_and_adds_annotations() -> None:
+    source = _source("tools/sim2real/isaac_runner.py")
+
+    assert 'elif channel not in traces:' in source
+    assert 'time_bases.get(channel) != scenario.time_bases[channel]' in source
+    assert '"repeat_index": repeat_index' in source
+    assert '"settled": settled' in source
 
 
 def test_replay_initial_state_is_applied_before_stepping_and_audited() -> None:

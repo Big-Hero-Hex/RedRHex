@@ -77,15 +77,23 @@ def apply_abad_target_mapping(
     profile: CalibrationProfileV1 | None,
     *,
     joint: str,
+    minimum_rad: float,
+    maximum_rad: float,
 ) -> float:
-    """Apply the measured relation ``actual = scale * requested + offset``."""
+    """Apply the measured relation and final physical target clamp."""
 
-    if profile is None:
-        return float(requested_rad)
-    hardware = profile.validate().hardware_mapping
-    scale = float(hardware.get("abad_target_scale", {}).get(joint, 1.0))
-    offset = float(hardware.get("abad_target_offset_rad", {}).get(joint, 0.0))
-    return scale * float(requested_rad) + offset
+    lower = float(minimum_rad)
+    upper = float(maximum_rad)
+    requested = float(requested_rad)
+    if not all(np.isfinite(value) for value in (requested, lower, upper)) or lower >= upper:
+        raise ContractError("ABAD target mapping requires finite ordered physical bounds")
+    scale = 1.0
+    offset = 0.0
+    if profile is not None:
+        hardware = profile.validate().hardware_mapping
+        scale = float(hardware.get("abad_target_scale", {}).get(joint, 1.0))
+        offset = float(hardware.get("abad_target_offset_rad", {}).get(joint, 0.0))
+    return min(max(scale * requested + offset, lower), upper)
 
 
 def _apply_abad_mapping_config(
@@ -180,8 +188,20 @@ def apply_profile_to_config(
                 material_targets.append(material)
         if not material_targets:
             raise ContractError("environment configuration has no ground material")
+        has_friction = any(
+            name in ground for name in ("static_friction", "dynamic_friction")
+        )
+        if has_friction and any(
+            not hasattr(material, "friction_combine_mode") for material in material_targets
+        ):
+            raise ContractError("ground material does not expose a friction combine mode")
         for material in material_targets:
             _set_fields(material, ground)
+            # Runtime overrides every robot collision shape to the same measured
+            # coefficient. Max-combine then makes the effective pair value equal
+            # the measurement regardless of the material embedded in the USD.
+            if has_friction:
+                material.friction_combine_mode = "max"
 
     return {
         "schema_version": 1,

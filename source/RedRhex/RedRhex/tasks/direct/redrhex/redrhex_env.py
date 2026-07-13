@@ -2061,6 +2061,8 @@ class RedrhexEnv(DirectRLEnv):
             applied_abad,
             scale=self._sim2real_abad_target_scale,
             offset=self._sim2real_abad_target_offset,
+            lower=(self._abad_rest_pos - self._abad_pos_limit_rad).expand_as(applied_abad),
+            upper=(self._abad_rest_pos + self._abad_pos_limit_rad).expand_as(applied_abad),
         )
         self._target_drive_vel = applied_drive.clone()
         self._target_abad_pos = mapped_abad.clone()

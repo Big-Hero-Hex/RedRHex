@@ -53,8 +53,18 @@ def _profile() -> CalibrationProfileV1:
 
 
 def _fake_env_cfg() -> SimpleNamespace:
-    material_a = SimpleNamespace(static_friction=1.2, dynamic_friction=1.0, restitution=0.0)
-    material_b = SimpleNamespace(static_friction=1.2, dynamic_friction=1.0, restitution=0.0)
+    material_a = SimpleNamespace(
+        static_friction=1.2,
+        dynamic_friction=1.0,
+        restitution=0.0,
+        friction_combine_mode="multiply",
+    )
+    material_b = SimpleNamespace(
+        static_friction=1.2,
+        dynamic_friction=1.0,
+        restitution=0.0,
+        friction_combine_mode="multiply",
+    )
     actuators = {
         name: SimpleNamespace(
             stiffness=0.0,
@@ -105,6 +115,8 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert candidate.robot_cfg.init_state.joint_pos["Revolute_5"] == 0.7
     assert candidate.sim.physics_material.static_friction == 0.9
     assert candidate.terrain.physics_material.dynamic_friction == 0.8
+    assert candidate.sim.physics_material.friction_combine_mode == "max"
+    assert candidate.terrain.physics_material.friction_combine_mode == "max"
     assert summary["profile_id"] == "candidate-a"
     assert summary["sensor_timing"]["aggregate_command_delay_s"] == 0.025
     assert summary["sensor_timing"]["command_delay_steps"] == 3
@@ -119,9 +131,18 @@ def test_scalar_abad_mapping_uses_actual_equals_scale_times_requested_plus_offse
 
     profile = _profile()
 
-    assert apply_abad_target_mapping(0.2, profile, joint="abad_0") == pytest.approx(0.21)
-    assert apply_abad_target_mapping(0.2, profile, joint="abad_1") == pytest.approx(0.2)
-    assert apply_abad_target_mapping(0.2, None, joint="abad_0") == pytest.approx(0.2)
+    assert apply_abad_target_mapping(
+        0.2, profile, joint="abad_0", minimum_rad=-0.5, maximum_rad=0.5
+    ) == pytest.approx(0.21)
+    assert apply_abad_target_mapping(
+        0.2, profile, joint="abad_1", minimum_rad=-0.5, maximum_rad=0.5
+    ) == pytest.approx(0.2)
+    assert apply_abad_target_mapping(
+        0.2, None, joint="abad_0", minimum_rad=-0.5, maximum_rad=0.5
+    ) == pytest.approx(0.2)
+    assert apply_abad_target_mapping(
+        0.5, profile, joint="abad_0", minimum_rad=-0.4, maximum_rad=0.4
+    ) == pytest.approx(0.4)
 
 
 def test_none_profile_is_a_noop() -> None:
@@ -131,6 +152,19 @@ def test_none_profile_is_a_noop() -> None:
     before = copy.deepcopy(cfg)
     assert apply_profile_to_config(cfg, None) is None
     assert cfg.robot_cfg.spawn.rigid_props.linear_damping == before.robot_cfg.spawn.rigid_props.linear_damping
+
+
+def test_restitution_only_profile_does_not_change_friction_combine_mode() -> None:
+    from tools.sim2real.physics_profile import apply_profile_to_config
+
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {"ground": {"restitution": 0.2}}
+    cfg = _fake_env_cfg()
+
+    apply_profile_to_config(cfg, CalibrationProfileV1.from_dict(payload))
+
+    assert cfg.sim.physics_material.friction_combine_mode == "multiply"
+    assert cfg.terrain.physics_material.friction_combine_mode == "multiply"
 
 
 @pytest.mark.parametrize(
@@ -265,3 +299,53 @@ def test_runtime_mass_profile_replaces_domain_randomization_baseline() -> None:
     torch.testing.assert_close(data.default_mass, expected)
     torch.testing.assert_close(unwrapped._default_body_masses, expected)
     assert unwrapped._robot_mass == 11.0
+
+
+def test_runtime_profile_overrides_unknown_robot_material_for_measured_pair_friction() -> None:
+    import torch
+
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    class FakeView:
+        def __init__(self) -> None:
+            self.materials = torch.tensor(
+                [[[1.7, 1.4, 0.3], [0.2, 0.1, 0.4], [3.0, 2.0, 0.5]]]
+            )
+
+        def get_material_properties(self):
+            return self.materials
+
+        def set_material_properties(self, values, _indices):
+            self.materials = values.clone()
+
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {
+        "ground": {"static_friction": 0.9, "dynamic_friction": 0.8}
+    }
+    profile = CalibrationProfileV1.from_dict(payload)
+    view = FakeView()
+    robot = SimpleNamespace(
+        root_physx_view=view,
+        data=SimpleNamespace(),
+        num_instances=1,
+        device="cpu",
+        joint_names=[],
+    )
+
+    summary = apply_profile_to_runtime_env(SimpleNamespace(robot=robot), profile)
+
+    torch.testing.assert_close(view.materials[..., 0], torch.full((1, 3), 0.9))
+    torch.testing.assert_close(view.materials[..., 1], torch.full((1, 3), 0.8))
+    torch.testing.assert_close(
+        view.materials[..., 2], torch.tensor([[0.3, 0.4, 0.5]])
+    )
+    assert summary["contact_material"] == {
+        "friction_combine_mode": "max",
+        "robot_shape_count": 3,
+        "static_friction": 0.9,
+        "dynamic_friction": 0.8,
+    }
+    # Both pair materials are explicitly 0.9/0.8 and use max-combine, so the
+    # effective coefficients are the measured values (never their square).
+    assert max(float(view.materials[0, 0, 0]), 0.9) == pytest.approx(0.9)
+    assert max(float(view.materials[0, 0, 1]), 0.8) == pytest.approx(0.8)

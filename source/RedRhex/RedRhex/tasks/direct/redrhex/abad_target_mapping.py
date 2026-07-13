@@ -10,13 +10,23 @@ def map_abad_targets(
     *,
     scale: torch.Tensor,
     offset: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
 ) -> torch.Tensor:
-    """Return actual targets from ``actual = scale * requested + offset``."""
+    """Map measured targets, then clamp them to the physical joint range."""
 
-    if scale.shape != requested.shape or offset.shape != requested.shape:
+    if any(
+        value.shape != requested.shape for value in (scale, offset, lower, upper)
+    ):
         raise ValueError("ABAD target mapping tensors must match the requested shape")
-    if not torch.isfinite(requested).all() or not torch.isfinite(scale).all() or not torch.isfinite(offset).all():
+    if not all(
+        torch.isfinite(value).all()
+        for value in (requested, scale, offset, lower, upper)
+    ):
         raise ValueError("ABAD target mapping tensors must be finite")
     if torch.any(scale <= 0.0):
         raise ValueError("ABAD target mapping scale must be positive")
-    return scale * requested + offset
+    if torch.any(lower >= upper):
+        raise ValueError("ABAD target mapping bounds must satisfy lower < upper")
+    mapped = scale * requested + offset
+    return torch.maximum(torch.minimum(mapped, upper), lower)

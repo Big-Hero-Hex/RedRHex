@@ -123,6 +123,40 @@ def _apply_passive_springs(robot: object, springs: dict[str, Any]) -> list[str]:
     return sorted(springs)
 
 
+def _apply_contact_material(
+    robot: object,
+    ground: dict[str, Any],
+) -> dict[str, Any] | None:
+    friction = {
+        name: float(ground[name])
+        for name in ("static_friction", "dynamic_friction")
+        if name in ground
+    }
+    if not friction:
+        return None
+    view = robot.root_physx_view
+    try:
+        materials = view.get_material_properties().clone()
+    except AttributeError as exc:
+        raise ContractError(
+            "runtime articulation does not expose collision material properties"
+        ) from exc
+    if materials.ndim != 3 or materials.shape[0] != int(robot.num_instances) or materials.shape[2] < 3:
+        raise ContractError(
+            "runtime collision materials must have shape (environment, shape, 3)"
+        )
+    if "static_friction" in friction:
+        materials[..., 0] = friction["static_friction"]
+    if "dynamic_friction" in friction:
+        materials[..., 1] = friction["dynamic_friction"]
+    view.set_material_properties(materials, _indices(robot))
+    return {
+        "friction_combine_mode": "max",
+        "robot_shape_count": int(materials.shape[1]),
+        **friction,
+    }
+
+
 def apply_profile_to_runtime_env(
     env: object,
     profile: CalibrationProfileV1 | None,
@@ -148,6 +182,9 @@ def apply_profile_to_runtime_env(
         "schema_version": 1,
         "profile_id": profile.profile_id,
         "mass": mass_summary,
+        "contact_material": _apply_contact_material(
+            robot, physics.get("ground", {})
+        ),
         "friction_joints": _apply_joint_friction(robot, physics),
         "passive_spring_joints": _apply_passive_springs(
             robot, physics.get("passive_spring", {})

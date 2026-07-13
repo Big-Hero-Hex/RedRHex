@@ -105,7 +105,7 @@ python -m tools.sim2real import-real datasets/raw/main-leg0-run1 \
 
 For another leg, select its matching built-in scenario and frames. The importer checks the raw BioRoLa enable bits and rejects bags that enable a different main drive, enable multiple main drives, or never enable the scenario joint. The authenticated segment events form the requested `command` timeline; `motor_command_pwm_raw` remains unchanged on its independent clock for mapping work. This preserves the initial disabled neutral even though the bridge intentionally suppresses repeated disabled raw packets.
 
-Within a reviewed hardware profile, `pwm_scale.main_N` is the inverse command conversion in `(rad/s)/raw-PWM`; for example, a bridge setting of `120 PWM/(rad/s)` starts at `1/120`. `joint_direction.main_N` maps the raw bridge direction to the canonical simulator direction. Count/revolution, zero, encoder sign, command direction, PWM scale, and PWM cap must all be present before the mapping is considered complete. Imports using any fallback are marked provisional and are rejected by physics comparison.
+Within a reviewed hardware profile, `pwm_scale.main_N` is the inverse command conversion in `(rad/s)/raw-PWM`; for example, a bridge setting of `120 PWM/(rad/s)` starts at `1/120`. `pwm_cap.main_N` is the resulting canonical velocity cap in `rad/s` (so a raw cap of `500` with that scale is `500/120 = 4.1667 rad/s`), not a normalized PWM fraction. `joint_direction.main_N` maps the raw bridge direction to the canonical simulator direction. Count/revolution, zero, encoder sign, command direction, PWM scale, and PWM cap must all be present before the mapping is considered complete. Imports using any fallback are marked provisional and are rejected by physics comparison.
 
 The resulting layout is:
 
@@ -205,20 +205,15 @@ from pathlib import Path
 import json
 
 from tools.sim2real.contracts import load_profile
-from tools.sim2real.metrics import compute_subsystem_metrics
 from tools.sim2real.profile_measurements import apply_measurements_to_profile
-from tools.sim2real.scenarios import load_scenario
-from tools.sim2real.traces import load_trace
 
-abad_trace = load_trace("datasets/sim2real/abad/episodes/abad-0")
-friction_trace = load_trace("datasets/sim2real/contact/episodes/friction")
 candidate = apply_measurements_to_profile(
     load_profile("profiles/candidate-v1.json"),
     profile_id="candidate-v2",
-    abad_metrics=compute_subsystem_metrics(load_scenario("abad-static"), abad_trace),
-    abad_trace_sha256=abad_trace.manifest.provenance["trace_sha256"],
-    friction_metrics=compute_subsystem_metrics(load_scenario("friction"), friction_trace),
-    friction_trace_sha256=friction_trace.manifest.provenance["trace_sha256"],
+    trace_paths=[
+        "datasets/sim2real/abad/episodes/abad-0",
+        "datasets/sim2real/contact/episodes/friction",
+    ],
 )
 Path("profiles/candidate-v2.json").write_text(
     json.dumps(candidate.to_dict(), indent=2, sort_keys=True) + "\n",
@@ -226,7 +221,7 @@ Path("profiles/candidate-v2.json").write_text(
 )
 ```
 
-The helper preserves unrelated profile values, maps ABAD results to `hardware_mapping.abad_target_scale` and `abad_target_offset_rad`, maps friction to `simulation_physics.ground`, and records both source trace hashes in `measurement_sources`. Characterization, training, and playback apply the ABAD relation at the final target boundary. With no measured fields, scale `1` and offset `0` preserve existing behavior.
+The helper accepts only hash-verified real episodes linked by a managed dataset, enforces each reviewed scenario's units, frames, and repeat count, and recomputes the metrics itself. It preserves unrelated profile values, maps ABAD results to `hardware_mapping.abad_target_scale` and `abad_target_offset_rad`, maps friction to `simulation_physics.ground`, and records dataset/episode identity plus actual trace, metadata, and scenario hashes in `measurement_sources`; caller-supplied metrics and hashes are not accepted. Characterization, training, and playback apply the ABAD relation and then clamp the final target to the configured physical joint range. Measured foot/ground friction uses explicit max-combine materials on both sides, with runtime robot collision coefficients overwritten to the measured pair values, so the effective coefficient is the measurement rather than its square. With no measured fields, scale `1` and offset `0` preserve existing behavior.
 
 ## Profile validation and explicit use
 

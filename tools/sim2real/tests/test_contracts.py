@@ -209,6 +209,30 @@ def test_profile_models_hardware_timing_friction_and_passive_spring() -> None:
 
 
 def test_profile_models_measured_abad_target_mapping_and_source_hashes() -> None:
+    abad_source = {
+        "trace_sha256": "a" * 64,
+        "metadata_sha256": "b" * 64,
+        "scenario_id": "abad-static",
+        "scenario_sha256": "c" * 64,
+        "source": "real",
+        "metric_kind": "abad_static_mapping",
+        "frame": "abad_0",
+        "repeat_count": 3,
+        "dataset_id": "bench-20260713",
+        "episode_id": "abad-0-run-1",
+    }
+    friction_source = {
+        "trace_sha256": "d" * 64,
+        "metadata_sha256": "e" * 64,
+        "scenario_id": "friction",
+        "scenario_sha256": "f" * 64,
+        "source": "real",
+        "metric_kind": "ground_friction",
+        "frame": "foot_0/ground",
+        "repeat_count": 3,
+        "dataset_id": "bench-20260713",
+        "episode_id": "friction-run-1",
+    }
     profile = CalibrationProfileV1.from_dict(
         {
             "schema_version": 1,
@@ -220,8 +244,8 @@ def test_profile_models_measured_abad_target_mapping_and_source_hashes() -> None
             "sensor_timing": {},
             "simulation_physics": {},
             "measurement_sources": {
-                "abad_target:abad_0": "a" * 64,
-                "ground_friction": "b" * 64,
+                "abad_target:abad_0": abad_source,
+                "ground_friction": friction_source,
             },
         }
     )
@@ -229,8 +253,8 @@ def test_profile_models_measured_abad_target_mapping_and_source_hashes() -> None
     assert profile.hardware_mapping["abad_target_scale"]["abad_0"] == 1.1
     assert profile.hardware_mapping["abad_target_offset_rad"]["abad_0"] == -0.02
     assert profile.measurement_sources == {
-        "abad_target:abad_0": "a" * 64,
-        "ground_friction": "b" * 64,
+        "abad_target:abad_0": abad_source,
+        "ground_friction": friction_source,
     }
 
 
@@ -243,10 +267,10 @@ def test_profile_models_measured_abad_target_mapping_and_source_hashes() -> None
         },
         {
             "hardware_mapping": {},
-            "measurement_sources": {"abad_target:abad_0": "not-a-hash"},
+            "measurement_sources": {"abad_target:abad_0": "a" * 64},
         },
     ],
-    ids=("nonpositive-abad-scale", "invalid-source-hash"),
+    ids=("nonpositive-abad-scale", "legacy-abad-source-without-semantics"),
 )
 def test_profile_rejects_invalid_abad_mapping_or_measurement_source(payload) -> None:
     with pytest.raises(ContractError):
@@ -262,8 +286,35 @@ def test_profile_rejects_invalid_abad_mapping_or_measurement_source(payload) -> 
         )
 
 
-@pytest.mark.parametrize("pwm_cap", [1e-12, 0.5, 1.0])
-def test_profile_accepts_normalized_pwm_cap_through_one(pwm_cap: float) -> None:
+def test_profile_rejects_measurement_source_with_wrong_scenario_semantics() -> None:
+    source = {
+        "trace_sha256": "a" * 64,
+        "metadata_sha256": "b" * 64,
+        "scenario_id": "friction",
+        "scenario_sha256": "c" * 64,
+        "source": "real",
+        "metric_kind": "abad_static_mapping",
+        "frame": "abad_0",
+        "repeat_count": 3,
+        "dataset_id": "bench-20260713",
+        "episode_id": "wrong-scenario",
+    }
+
+    with pytest.raises(ContractError, match="scenario_id"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "wrong-source-semantics",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {},
+                "measurement_sources": {"abad_target:abad_0": source},
+            }
+        )
+
+
+@pytest.mark.parametrize("pwm_cap", [1e-12, 0.5, 4.1667, 50.0])
+def test_profile_accepts_canonical_velocity_cap_rad_s(pwm_cap: float) -> None:
     profile = CalibrationProfileV1.from_dict(
         {
             "schema_version": 1,
@@ -277,8 +328,8 @@ def test_profile_accepts_normalized_pwm_cap_through_one(pwm_cap: float) -> None:
     assert profile.hardware_mapping["pwm_cap"]["main_0"] == pwm_cap
 
 
-@pytest.mark.parametrize("pwm_cap", [0.0, -0.1, 1.000001, 2.0])
-def test_profile_rejects_normalized_pwm_cap_outside_open_closed_unit_interval(
+@pytest.mark.parametrize("pwm_cap", [0.0, -0.1, 50.000001, 500.0])
+def test_profile_rejects_canonical_velocity_cap_outside_physical_range(
     pwm_cap: float,
 ) -> None:
     with pytest.raises(ContractError, match="pwm_cap"):
@@ -287,6 +338,31 @@ def test_profile_rejects_normalized_pwm_cap_outside_open_closed_unit_interval(
                 "schema_version": 1,
                 "profile_id": "invalid-cap",
                 "hardware_mapping": {"pwm_cap": {"main_0": pwm_cap}},
+                "sensor_timing": {},
+                "simulation_physics": {},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("abad_target_scale", 0.49),
+        ("abad_target_scale", 1.51),
+        ("abad_target_offset_rad", -0.351),
+        ("abad_target_offset_rad", 0.351),
+    ],
+)
+def test_profile_rejects_abad_corrections_outside_conservative_range(
+    field: str,
+    value: float,
+) -> None:
+    with pytest.raises(ContractError, match=field):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "unsafe-abad-correction",
+                "hardware_mapping": {field: {"abad_0": value}},
                 "sensor_timing": {},
                 "simulation_physics": {},
             }
