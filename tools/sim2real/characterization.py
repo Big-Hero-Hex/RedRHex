@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -55,6 +56,30 @@ class ScheduledCommand:
 class ReplaySchedule:
     schedule: tuple[ScheduledCommand, ...]
     trace_sha256: str
+    initial_state: "ReplayInitialState"
+    initial_state_sha256: str
+
+
+@dataclass(frozen=True)
+class ReplayInitialState:
+    joint: str
+    source_channel: str
+    position_rad: float
+    sample_time_s: float
+    scenario_time_s: float
+    sample_offset_s: float
+    schema_version: int = 1
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "joint": self.joint,
+            "source_channel": self.source_channel,
+            "position_rad": self.position_rad,
+            "sample_time_s": self.sample_time_s,
+            "scenario_time_s": self.scenario_time_s,
+            "sample_offset_s": self.sample_offset_s,
+        }
 
 
 def characterization_channel_metadata(
@@ -285,6 +310,121 @@ def apply_schedule_delay(
     return tuple(applied)
 
 
+def _replay_initial_state(
+    loaded: Any,
+    scenario: ScenarioSpecV1,
+    *,
+    scenario_time_s: float,
+) -> tuple[ReplayInitialState, str]:
+    from .traces import sha256_json
+
+    constants = loaded.manifest.metadata.get("calibration_constants", {})
+    declaration = (
+        constants.get("replay_initial_state")
+        if isinstance(constants, Mapping)
+        else None
+    )
+    declared_hash = (
+        constants.get("replay_initial_state_sha256")
+        if isinstance(constants, Mapping)
+        else None
+    )
+    if not isinstance(declaration, Mapping) or not isinstance(declared_hash, str):
+        raise ContractError("replay trace is missing its initial state declaration and hash")
+    expected_fields = {
+        "schema_version",
+        "joint",
+        "source_channel",
+        "position_rad",
+        "sample_time_s",
+        "scenario_time_s",
+        "sample_offset_s",
+    }
+    if set(declaration) != expected_fields:
+        raise ContractError("replay initial state declaration has missing or unknown fields")
+    payload = dict(declaration)
+    if sha256_json(payload) != declared_hash:
+        raise ContractError("replay initial state hash does not match its declaration")
+    if payload["schema_version"] != 1 or isinstance(payload["schema_version"], bool):
+        raise ContractError("replay initial state schema version must be 1")
+    if payload["joint"] != scenario.joint:
+        raise ContractError("replay initial state joint does not match the scenario")
+    if payload["source_channel"] != "position":
+        raise ContractError("replay initial state must use the selected position channel")
+
+    def finite_number(field: str) -> float:
+        value = payload[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ContractError(f"replay initial state {field} must be numeric")
+        result = float(value)
+        if not math.isfinite(result):
+            raise ContractError(f"replay initial state {field} must be finite")
+        return result
+
+    position_rad = finite_number("position_rad")
+    sample_time_s = finite_number("sample_time_s")
+    declared_scenario_time_s = finite_number("scenario_time_s")
+    sample_offset_s = finite_number("sample_offset_s")
+    tolerance = 1.0e-9
+    if not math.isclose(
+        declared_scenario_time_s,
+        scenario_time_s,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay initial state scenario time does not match command coverage")
+    if not math.isclose(
+        sample_offset_s,
+        sample_time_s - scenario_time_s,
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay initial state sample offset is inconsistent")
+
+    time_name = loaded.manifest.time_bases.get("position")
+    if time_name is None:
+        raise ContractError("replay trace has no position time base for initial state")
+    position_time = np.asarray(loaded.arrays[time_name], dtype=np.float64)
+    position = np.asarray(loaded.arrays["position"], dtype=np.float64)
+    if position.ndim != 1:
+        raise ContractError("replay initial state position channel must be one-dimensional")
+    distances = np.abs(position_time - scenario_time_s)
+    nearest_distance = float(np.min(distances))
+    if nearest_distance > 1.0 / 60.0 + tolerance:
+        raise ContractError("replay initial state has no sample at the scenario start")
+    nearest = np.flatnonzero(
+        np.isclose(distances, nearest_distance, rtol=0.0, atol=tolerance)
+    )
+    if nearest.size != 1:
+        raise ContractError("replay initial state sample is ambiguous at the scenario start")
+    sample_index = int(nearest[0])
+    if not math.isclose(
+        sample_time_s,
+        float(position_time[sample_index]),
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay initial state does not select the nearest position sample")
+    if not math.isclose(
+        position_rad,
+        float(position[sample_index]),
+        rel_tol=0.0,
+        abs_tol=tolerance,
+    ):
+        raise ContractError("replay initial state position does not match the verified trace")
+    return (
+        ReplayInitialState(
+            joint=scenario.joint,
+            source_channel="position",
+            position_rad=position_rad,
+            sample_time_s=sample_time_s,
+            scenario_time_s=declared_scenario_time_s,
+            sample_offset_s=sample_offset_s,
+        ),
+        declared_hash,
+    )
+
+
 def load_replay_schedule(
     value: str | Path,
     scenario: ScenarioSpecV1,
@@ -303,8 +443,8 @@ def load_replay_schedule(
     loaded = load_trace(
         value,
         scenario=scenario,
-        expected_units={"command": command_unit},
-        expected_frames={"command": scenario.joint},
+        expected_units={"command": command_unit, "position": "rad"},
+        expected_frames={"command": scenario.joint, "position": scenario.joint},
     )
     if loaded.manifest.source != "real":
         raise ContractError("replay trace must have source='real'")
@@ -337,6 +477,12 @@ def load_replay_schedule(
         if not np.isfinite([time_origin_s, coverage_end_s]).all():
             raise ContractError("probe replay coverage times must be finite")
 
+    initial_state, initial_state_sha256 = _replay_initial_state(
+        loaded,
+        scenario,
+        scenario_time_s=time_origin_s,
+    )
+
     relative_time = command_time - time_origin_s
     relative_coverage_end = coverage_end_s - time_origin_s
     tolerance = max(1.0e-9, physics_dt * 1.0e-6)
@@ -367,6 +513,8 @@ def load_replay_schedule(
     return ReplaySchedule(
         schedule=tuple(schedule),
         trace_sha256=loaded.manifest.provenance["trace_sha256"],
+        initial_state=initial_state,
+        initial_state_sha256=initial_state_sha256,
     )
 
 

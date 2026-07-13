@@ -198,3 +198,17 @@ def test_train_play_and_characterization_apply_measured_abad_target_mapping_at_b
     assert delay_call < mapping_call
     assert "apply_abad_target_mapping(" in runner_source
     assert "measurement_annotations(requested_schedule" in runner_source
+
+
+def test_replay_initial_state_is_applied_before_stepping_and_audited() -> None:
+    source = _source("tools/sim2real/isaac_runner.py")
+
+    apply_state = source.index(
+        "initial_joint_position[:, selected_joint] = replay.initial_state.position_rad"
+    )
+    write_state = source.index("robot.write_joint_state_to_sim(")
+    physics_loop = source.index("for step_index in range(request.steps)")
+
+    assert apply_state < write_state < physics_loop
+    assert '"replay_initial_state": replay_initial_state' in source
+    assert '"replay_initial_state_sha256": replay_initial_state_sha256' in source

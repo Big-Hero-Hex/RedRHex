@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from tools.sim2real.compare import compare_traces
-from tools.sim2real.contracts import ContractError, ScenarioSpecV1
+from tools.sim2real.contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1
 from tools.sim2real.metrics import (
     abad_static_mapping_metrics,
     bidirectional_coast_metrics,
@@ -152,6 +152,32 @@ def _write_drive_trace(
     command = np.where((time_s >= 0.5) & (time_s < 2.0), 0.25, 0.0)
     velocity = np.where((time_s >= 0.7) & (time_s < 2.0), 2.0, 0.0)
     position = np.cumsum(velocity) * 0.05 * position_scale
+    profile = None
+    constants = (
+        {} if calibration_source is None else {"calibration_source": calibration_source}
+    )
+    if source == "real" and calibration_source is None:
+        profile = CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "measured-main-0",
+                "hardware_mapping": {
+                    "encoder_counts_per_rev": {"main_0": 54984.83},
+                    "encoder_zero_count": {"main_0": 0.0},
+                    "encoder_sign": {"main_0": 1.0},
+                    "joint_direction": {"main_0": 1.0},
+                    "pwm_scale": {"main_0": 0.002},
+                    "pwm_cap": {"main_0": 1.0},
+                },
+                "sensor_timing": {},
+                "simulation_physics": {},
+            }
+        )
+        source_name = f"profile:{profile.profile_id}"
+        constants = {
+            "position_mapping_source": source_name,
+            "requested_command_source": source_name,
+        }
     metadata = {
         "units": {"command": "normalized", "position": position_unit},
         "frames": {"command": "actuator", "position": "main_0"},
@@ -164,9 +190,7 @@ def _write_drive_trace(
         "git_sha": None,
         "asset_sha256": None,
         "config_sha256": None,
-        "calibration_constants": (
-            {} if calibration_source is None else {"calibration_source": calibration_source}
-        ),
+        "calibration_constants": constants,
     }
     if source == "real":
         assert source_path is not None
@@ -182,6 +206,7 @@ def _write_drive_trace(
         scenario=scenario,
         source=source,
         source_path=source_path,
+        profile=profile,
         metadata=metadata,
     )
     return load_trace(directory, scenario=scenario)

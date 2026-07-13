@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -276,6 +277,9 @@ def _write_replay_trace(
     end_time_s: float | None = None,
     source: str = "real",
     calibration_constants: dict[str, object] | None = None,
+    initial_position_rad: float = 0.125,
+    declare_initial_state: bool = True,
+    ambiguous_position: bool = False,
 ) -> Path:
     from tools.sim2real.characterization import scenario_schedule, scenario_step_count
     from tools.sim2real.traces import write_trace
@@ -293,13 +297,33 @@ def _write_replay_trace(
     raw = tmp_path / f"{scenario_id}-raw.bin"
     raw.write_bytes(b"immutable raw replay source")
     output = tmp_path / f"{scenario_id}-episode"
+    constants = dict(calibration_constants or {})
+    initial_state = {
+        "schema_version": 1,
+        "joint": scenario.joint,
+        "source_channel": "position",
+        "position_rad": initial_position_rad,
+        "sample_time_s": 0.0,
+        "scenario_time_s": 0.0,
+        "sample_offset_s": 0.0,
+    }
+    if declare_initial_state:
+        from tools.sim2real.traces import sha256_json
+
+        constants["replay_initial_state"] = initial_state
+        constants["replay_initial_state_sha256"] = sha256_json(initial_state)
+    position = (
+        np.full((2, 2), initial_position_rad, dtype=np.float64)
+        if ambiguous_position
+        else np.full(2, initial_position_rad, dtype=np.float64)
+    )
     metadata = {
         "units": {"command": unit, "position": "rad"},
         "frames": {
             "command": frame or scenario.joint,
             "position": scenario.joint,
         },
-        "calibration_constants": dict(calibration_constants or {}),
+        "calibration_constants": constants,
     }
     write_trace(
         output,
@@ -307,7 +331,7 @@ def _write_replay_trace(
             "command_time_s": command_time,
             "command": command,
             "position_time_s": np.asarray([0.0, final_time], dtype=np.float64),
-            "position": np.zeros(2, dtype=np.float64),
+            "position": position,
         },
         scenario=scenario,
         source=source,
@@ -334,6 +358,55 @@ def test_real_trace_replay_verifies_provenance_and_resamples_exact_scenario(
     assert replay.schedule[59].value == pytest.approx(0.0)
     assert replay.schedule[60].value == pytest.approx(0.25)
     assert len(replay.trace_sha256) == 64
+    assert replay.initial_state.position_rad == pytest.approx(0.125)
+    assert replay.initial_state.joint == "main_0"
+    assert len(replay.initial_state_sha256) == 64
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({"declare_initial_state": False}, "initial state declaration"),
+        ({"ambiguous_position": True}, "one-dimensional"),
+    ],
+    ids=("missing-declaration", "ambiguous-position-channel"),
+)
+def test_real_trace_replay_rejects_missing_or_ambiguous_initial_state(
+    tmp_path: Path,
+    override: dict[str, object],
+    expected: str,
+) -> None:
+    from tools.sim2real.characterization import load_replay_schedule
+
+    trace = _write_replay_trace(tmp_path, **override)
+
+    with pytest.raises(ContractError, match=expected):
+        load_replay_schedule(
+            trace,
+            load_scenario("main-step"),
+            steps=1260,
+            physics_dt=1.0 / 120.0,
+        )
+
+
+def test_real_trace_replay_rejects_initial_state_hash_mismatch(tmp_path: Path) -> None:
+    from tools.sim2real.characterization import load_replay_schedule
+
+    trace = _write_replay_trace(tmp_path)
+    metadata_path = trace / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["metadata"]["calibration_constants"]["replay_initial_state"][
+        "position_rad"
+    ] = 0.5
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="initial state hash"):
+        load_replay_schedule(
+            trace,
+            load_scenario("main-step"),
+            steps=1260,
+            physics_dt=1.0 / 120.0,
+        )
 
 
 @pytest.mark.parametrize(
