@@ -240,6 +240,17 @@ def _resolve_selected_joint(scenario: Any, env_cfg: RedrhexEnvCfg, robot: Any) -
         raise ContractError(f"scenario selects unknown simulation joint: {scenario.joint}") from exc
 
 
+def _resolve_main_joint_indices(env_cfg: RedrhexEnvCfg, robot: Any) -> list[int]:
+    names = list(env_cfg.main_drive_joint_names)
+    if len(names) != 6 or len(set(names)) != 6:
+        raise ContractError("production configuration must expose six ordered main joints")
+    try:
+        indices = [list(robot.joint_names).index(name) for name in names]
+    except ValueError as exc:
+        raise ContractError("replay main joint is absent from the runtime articulation") from exc
+    return indices
+
+
 def _required_aliases(
     scenario: Any,
     traces: dict[str, np.ndarray],
@@ -398,12 +409,23 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     robot.write_root_pose_to_sim(root_state[:, :7])
     robot.write_root_velocity_to_sim(root_state[:, 7:])
     initial_joint_position = robot.data.default_joint_pos.clone()
+    initial_joint_velocity = robot.data.default_joint_vel.clone()
     if replay is not None:
-        if selected_joint is None:
-            raise ContractError("replay initial state requires one selected joint")
-        initial_joint_position[:, selected_joint] = replay.initial_state.position_rad
+        main_joint_indices = _resolve_main_joint_indices(env_cfg, robot)
+        replay_position = torch.as_tensor(
+            replay.initial_state.position_rad,
+            dtype=initial_joint_position.dtype,
+            device=initial_joint_position.device,
+        ).unsqueeze(0)
+        replay_velocity = torch.as_tensor(
+            replay.initial_state.velocity_rad_s,
+            dtype=initial_joint_velocity.dtype,
+            device=initial_joint_velocity.device,
+        ).unsqueeze(0)
+        initial_joint_position[:, main_joint_indices] = replay_position
+        initial_joint_velocity[:, main_joint_indices] = replay_velocity
     robot.write_joint_state_to_sim(
-        initial_joint_position, robot.data.default_joint_vel.clone()
+        initial_joint_position, initial_joint_velocity
     )
     scene.reset()
     apply_profile_to_runtime_env(SimpleNamespace(robot=robot), profile)

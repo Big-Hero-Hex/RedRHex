@@ -231,11 +231,15 @@ def test_replay_initial_state_is_applied_before_stepping_and_audited() -> None:
     source = _source("tools/sim2real/isaac_runner.py")
 
     apply_state = source.index(
-        "initial_joint_position[:, selected_joint] = replay.initial_state.position_rad"
+        "initial_joint_position[:, main_joint_indices] = replay_position"
+    )
+    apply_velocity = source.index(
+        "initial_joint_velocity[:, main_joint_indices] = replay_velocity"
     )
     write_state = source.index("robot.write_joint_state_to_sim(")
     physics_loop = source.index("for step_index in range(request.steps)")
 
-    assert apply_state < write_state < physics_loop
+    assert "main_joint_indices = _resolve_main_joint_indices(env_cfg, robot)" in source
+    assert apply_state < apply_velocity < write_state < physics_loop
     assert '"replay_initial_state": replay_initial_state' in source
     assert '"replay_initial_state_sha256": replay_initial_state_sha256' in source
