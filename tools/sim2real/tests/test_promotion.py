@@ -26,11 +26,19 @@ from tools.sim2real.traces import (
 
 
 def _profile(profile_id: str, damping: float) -> CalibrationProfileV1:
+    joints = [f"main_{index}" for index in range(6)]
     return CalibrationProfileV1.from_dict(
         {
             "schema_version": 1,
             "profile_id": profile_id,
-            "hardware_mapping": {},
+            "hardware_mapping": {
+                "encoder_counts_per_rev": {joint: 54984.83 for joint in joints},
+                "encoder_zero_count": {joint: 0.0 for joint in joints},
+                "encoder_sign": {joint: 1 for joint in joints},
+                "joint_direction": {joint: 1 for joint in joints},
+                "pwm_scale": {joint: 1.0 / 120.0 for joint in joints},
+                "pwm_cap": {joint: 500.0 / 120.0 for joint in joints},
+            },
             "sensor_timing": {},
             "simulation_physics": {"main_drive": {"damping": damping}},
         }
