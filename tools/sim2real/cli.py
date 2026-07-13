@@ -25,6 +25,15 @@ def build_parser() -> argparse.ArgumentParser:
     importer.add_argument("--dataset-id", required=True)
     importer.add_argument("--episode-id", required=True)
     importer.add_argument("--profile", type=Path, default=None)
+    importer.add_argument(
+        "--replay-fixture",
+        type=Path,
+        default=None,
+        help=(
+            "Operator-reviewed fixed-base fixture JSON. Required to make a real "
+            "probe episode eligible for replay; import without it remains metrics-only."
+        ),
+    )
 
     comparison = subparsers.add_parser("compare", help="Compare real and simulated traces.")
     comparison.add_argument("real", type=Path)
@@ -114,6 +123,28 @@ def _json_object(value: str, name: str) -> dict[str, Any]:
     return payload
 
 
+def _json_file_object(path: Path, name: str) -> dict[str, Any]:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key}")
+            result[key] = value
+        return result
+
+    payload = json.loads(
+        path.read_text(encoding="utf-8"),
+        parse_constant=reject_constant,
+        object_pairs_hook=unique_object,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError(f"{name} must be a JSON object")
+    return payload
+
+
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary = tempfile.mkstemp(prefix=f".{path.name}-", suffix=".tmp", dir=path.parent)
@@ -175,6 +206,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             latency_clock=args.latency_clock,
             time_bases=_json_object(args.time_bases_json, "--time-bases-json"),
             profile=load_profile(args.profile) if args.profile is not None else None,
+            replay_fixture=(
+                _json_file_object(args.replay_fixture, "--replay-fixture")
+                if args.replay_fixture is not None
+                else None
+            ),
         )
         episode = next(
             item

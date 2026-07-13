@@ -75,7 +75,7 @@ Each leg has a bound reviewed scenario, `suspended-main-0-step-coast` through `s
 
 ## Record raw evidence
 
-Record the raw BioRoLa topics. `/motor/command` and `/motor/state` are mandatory for main-drive response tests; IMU and power are optional independent streams:
+Record the raw BioRoLa topics. `/motor/command` and `/motor/state` are mandatory for main-drive response tests. IMU is also mandatory for replay-state verification; power remains an optional independent stream:
 
 ```bash
 ros2 bag record -o datasets/raw/main-leg0-run1 \
@@ -100,8 +100,11 @@ python -m tools.sim2real import-real datasets/raw/main-leg0-run1 \
   --episode-id leg0-run1 \
   --units-json '{"command":"rad/s","position":"rad"}' \
   --frames-json '{"command":"main_0","position":"main_0"}' \
-  --profile profiles/candidate-v1.json
+  --profile profiles/candidate-v1.json \
+  --replay-fixture fixtures/suspended-level-v1.json
 ```
+
+`--replay-fixture` is optional for metric-only imports and mandatory if the episode will be replayed. It is a reviewed JSON object containing `schema_version`, `fixture_id`, `scene_mode`, `fixture_frame`, the simulator `root_orientation_wxyz`, and the raw sensor `expected_imu_orientation_xyzw`. The importer requires at least three encoder and IMU samples in the first 0.4 s neutral window, derives all six initial velocities, and rejects joint motion, IMU angular motion, or more than 5 degrees of fixture-orientation error. Record `/imu/data` when replay is intended.
 
 For another leg, select its matching built-in scenario and frames. The importer checks the raw BioRoLa enable bits and rejects bags that enable a different main drive, enable multiple main drives, or never enable the scenario joint. The authenticated segment events form the requested `command` timeline; `motor_command_pwm_raw` remains unchanged on its independent clock for mapping work. This preserves the initial disabled neutral even though the bridge intentionally suppresses repeated disabled raw packets.
 

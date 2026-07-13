@@ -242,10 +242,75 @@ def test_parser_exposes_the_five_pure_python_commands() -> None:
             "episode",
             "--profile",
             "profile.json",
+            "--replay-fixture",
+            "fixture.json",
         ]
     )
     assert parsed.profile == Path("profile.json")
+    assert parsed.replay_fixture == Path("fixture.json")
     assert parsed.latency_clock is None
+
+
+def test_replay_fixture_cli_is_strict_and_reaches_the_importer(
+    tmp_path: Path, capsys
+) -> None:
+    fixture = tmp_path / "fixture.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fixture_id": "suspended-level-v1",
+                "scene_mode": "fixed_base",
+                "fixture_frame": "world",
+                "root_orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "expected_imu_orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = _npz(tmp_path / "raw.npz")
+
+    assert main(
+        [
+            "import-real",
+            str(source),
+            "--scenario",
+            "main-step",
+            "--output",
+            str(tmp_path),
+            "--dataset-id",
+            "fixture-propagation",
+            "--episode-id",
+            "episode",
+            "--latency-clock",
+            "bag_receive_time",
+            "--replay-fixture",
+            str(fixture),
+        ]
+    ) == 2
+    assert "supported only for rosbag imports" in capsys.readouterr().err
+
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
+    assert main(
+        [
+            "import-real",
+            str(source),
+            "--scenario",
+            "main-step",
+            "--output",
+            str(tmp_path),
+            "--dataset-id",
+            "fixture-duplicate",
+            "--episode-id",
+            "episode",
+            "--latency-clock",
+            "bag_receive_time",
+            "--replay-fixture",
+            str(duplicate),
+        ]
+    ) == 2
+    assert "duplicate JSON key" in capsys.readouterr().err
 
 
 def test_list_validate_and_sweep_commands_emit_json(tmp_path: Path, capsys) -> None:
