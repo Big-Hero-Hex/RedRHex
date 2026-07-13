@@ -447,6 +447,8 @@ class RedRhexRLControllerNode(Node):
         msg.kd = decoded.kd
         msg.effort_limit_nm = decoded.effort_limit_nm
         msg.enable = bool(decoded.enable and self.enable_motor_output and not self.estop)
+        msg.main_drive_enable = [bool(msg.enable)] * 6
+        msg.abad_output_enable = bool(msg.enable)
         msg.mode = decoded.mode
         self.motor_cmd_pub.publish(msg)
         return bool(msg.enable)

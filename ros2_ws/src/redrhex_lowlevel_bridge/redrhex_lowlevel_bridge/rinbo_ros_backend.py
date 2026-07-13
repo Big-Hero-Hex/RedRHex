@@ -19,6 +19,7 @@ from sensor_msgs.msg import JointState
 from redrhex_msgs.msg import RedRhexMotorState
 
 from .bridge_base import LowLevelBridgeBase
+from .command_safety import OutputSelection, resolve_output_selection
 
 
 @dataclass(frozen=True)
@@ -145,8 +146,8 @@ class RinboRosBackend(LowLevelBridgeBase):
             raise ValueError("main_velocity_max_dt_s must be positive")
         if self.main_velocity_clip_rad_s <= 0.0:
             raise ValueError("main_velocity_clip_rad_s must be positive")
-        if self.shutdown_disable_repeats < 0:
-            raise ValueError("shutdown_disable_repeats must be non-negative")
+        if self.shutdown_disable_repeats < 2:
+            raise ValueError("shutdown_disable_repeats must be at least 2")
         if self.shutdown_disable_period_s < 0.0:
             raise ValueError("shutdown_disable_period_s must be non-negative")
 
@@ -190,6 +191,7 @@ class RinboRosBackend(LowLevelBridgeBase):
         if not self.connected:
             raise RuntimeError("Rinbo ROS backend is not connected")
         self._validate_command_shape(cmd)
+        selection = resolve_output_selection(cmd)
         enabled = bool(cmd.enable)
 
         preview_msg = self._make_motor_cmd_msg(cmd, enabled=enabled, preview=True)
@@ -197,35 +199,34 @@ class RinboRosBackend(LowLevelBridgeBase):
             self.preview_pub.publish(preview_msg)
 
         if enabled and not self.allow_enable:
-            self.last_actual_publish_state = "blocked_allow_enable"
-            self.last_block_reason = "rinbo.allow_enable is false"
-            self._warn_once(self.last_block_reason)
-            self.last_command_was_enabled = False
+            self._block_enabled_command("blocked_allow_enable", "rinbo.allow_enable is false")
             return
-        if enabled and self.require_state and not self.is_alive():
-            self.last_actual_publish_state = "blocked_no_recent_state"
-            self.last_block_reason = "no recent /motor/state"
-            self._warn_once(self.last_block_reason)
-            self.last_command_was_enabled = False
+        if enabled and not self.output_state_is_fresh():
+            self._block_enabled_command("blocked_no_recent_state", "no recent /motor/state")
             return
         if enabled and self.block_if_duplicate_command_publishers:
             duplicate_count, endpoint_names = self._command_publisher_count()
             if duplicate_count > 1:
-                self.last_actual_publish_state = "blocked_duplicate_publishers"
-                self.last_block_reason = f"{duplicate_count} publishers on {self.command_topic}: {endpoint_names}"
-                self._warn_once(self.last_block_reason)
-                self.last_command_was_enabled = False
+                self._block_enabled_command(
+                    "blocked_duplicate_publishers",
+                    f"{duplicate_count} publishers on {self.command_topic}: {endpoint_names}",
+                )
                 return
         if enabled and self.cmd_pub.get_subscription_count() == 0:
-            self.last_actual_publish_state = "blocked_no_command_subscriber"
-            self.last_block_reason = f"no subscriber on {self.command_topic}"
-            self._warn_once(self.last_block_reason)
-            self.last_command_was_enabled = False
+            self._block_enabled_command(
+                "blocked_no_command_subscriber",
+                f"no subscriber on {self.command_topic}",
+            )
+            return
+
+        if not enabled and self.last_command_was_enabled:
+            self.emergency_disable()
+            self.last_actual_publish_state = "published_disabled_repeated"
             return
 
         # During dry-run, avoid publishing disabled preview packets because
         # BioRoLaROS2 servo commands have no per-servo enable. If motors were
-        # previously enabled, still send one disabled packet to release legs.
+        # previously enabled, the transition above sends repeated disable packets.
         if not enabled and not self.publish_when_disabled and not self.last_command_was_enabled:
             self.last_command_was_enabled = False
             self.last_pwm_rinbo_order = [0.0] * 6
@@ -234,10 +235,11 @@ class RinboRosBackend(LowLevelBridgeBase):
 
         msg = self._make_motor_cmd_msg(cmd, enabled=enabled, preview=False)
         self.cmd_pub.publish(msg)
-        self.last_command_was_enabled = enabled
-        self.last_actual_publish_state = "published_enabled" if enabled else "published_disabled"
+        self.last_command_was_enabled = selection.any_enabled
+        self.last_actual_publish_state = "published_enabled" if selection.any_enabled else "published_disabled"
 
     def _make_motor_cmd_msg(self, cmd, enabled: bool, preview: bool):
+        selection = resolve_output_selection(cmd)
         msg = self.MotorCmdStamped()
         now = self.node.get_clock().now().to_msg()
         if preview:
@@ -248,11 +250,12 @@ class RinboRosBackend(LowLevelBridgeBase):
         msg.header.seq = seq
         msg.header.stamp = now
         msg.header.frame_id = "redrhex_preview" if preview else "redrhex_base"
-        msg.servo_control_mode = self.servo_control_mode if enabled else self.disabled_servo_control_mode
+        abad_enabled = enabled and selection.abad_output_enable
+        msg.servo_control_mode = self.servo_control_mode if abad_enabled else self.disabled_servo_control_mode
 
         self._disable_all_legs(msg)
-        self._set_main_drive_pwm(msg, cmd, enabled)
-        if enabled:
+        self._set_main_drive_pwm(msg, cmd, enabled, selection)
+        if abad_enabled:
             self._set_abad_servo_targets(msg, cmd)
         else:
             self._set_abad_neutral_targets(msg)
@@ -265,7 +268,9 @@ class RinboRosBackend(LowLevelBridgeBase):
             raise ValueError("target_position_rad must contain 6 main-drive + 6 ABAD values")
 
     def read_motor_state(self):
-        return self.latest_motor_state
+        state = self.latest_motor_state
+        self.latest_motor_state = None
+        return state
 
     def is_alive(self) -> bool:
         if not self.connected:
@@ -276,9 +281,20 @@ class RinboRosBackend(LowLevelBridgeBase):
             return False
         return time.monotonic() - self.last_state_time <= self.state_timeout_s
 
-    def shutdown(self) -> None:
-        if self.connected and self.publish_shutdown_disable:
+    def output_state_is_fresh(self) -> bool:
+        if not self.connected or self.last_state_time is None:
+            return False
+        return time.monotonic() - self.last_state_time <= self.state_timeout_s
+
+    def emergency_disable(self) -> None:
+        if self.connected:
             self._publish_shutdown_disable()
+        self.last_command_was_enabled = False
+        self.last_pwm_rinbo_order = [0.0] * 6
+
+    def shutdown(self) -> None:
+        if self.connected:
+            self.emergency_disable()
         self.connected = False
 
     def diagnostic_values(self) -> dict[str, str]:
@@ -312,6 +328,15 @@ class RinboRosBackend(LowLevelBridgeBase):
             self.node.get_logger().warn(f"Blocking enabled BioRoLaROS2 command: {reason}")
             self._last_warned_block_reason = reason
 
+    def _block_enabled_command(self, publish_state: str, reason: str) -> None:
+        output_was_active = self.last_command_was_enabled
+        self.last_block_reason = reason
+        self._warn_once(reason)
+        if output_was_active:
+            self.emergency_disable()
+        self.last_command_was_enabled = False
+        self.last_actual_publish_state = publish_state
+
     def _command_publisher_count(self) -> tuple[int, str]:
         try:
             infos = self.node.get_publishers_info_by_topic(self.command_topic)
@@ -332,11 +357,13 @@ class RinboRosBackend(LowLevelBridgeBase):
         msg.servo_control_mode = self.disabled_servo_control_mode
         self._disable_all_legs(msg)
         self._set_abad_neutral_targets(msg)
-        for _ in range(self.shutdown_disable_repeats):
+        for _ in range(max(2, self.shutdown_disable_repeats)):
             msg.header.stamp = self.node.get_clock().now().to_msg()
             self.cmd_pub.publish(msg)
             if self.shutdown_disable_period_s > 0.0:
                 time.sleep(self.shutdown_disable_period_s)
+        self.last_command_was_enabled = False
+        self.last_pwm_rinbo_order = [0.0] * 6
 
     def _disable_all_legs(self, msg) -> None:
         for field in self.RINBO_LEG_ORDER:
@@ -347,7 +374,13 @@ class RinboRosBackend(LowLevelBridgeBase):
             leg.state = 0
             leg.reset_position = False
 
-    def _set_main_drive_pwm(self, msg, cmd, enabled: bool) -> None:
+    def _set_main_drive_pwm(
+        self,
+        msg,
+        cmd,
+        enabled: bool,
+        selection: OutputSelection,
+    ) -> None:
         self.last_pwm_rinbo_order = [0.0] * 6
         for mapping in self.POLICY_TO_RINBO_LEGS:
             leg = getattr(msg, mapping.rinbo_field)
@@ -357,8 +390,9 @@ class RinboRosBackend(LowLevelBridgeBase):
                 * self.main_velocity_sign_policy_order[mapping.policy_index]
             )
             pwm = max(-self.main_max_pwm, min(self.main_max_pwm, target_velocity * self.main_pwm_per_rad_s))
-            self.last_pwm_rinbo_order[rinbo_idx] = float(pwm)
-            if enabled:
+            selected = enabled and selection.main_drive_enable[mapping.policy_index]
+            self.last_pwm_rinbo_order[rinbo_idx] = float(pwm) if selected else 0.0
+            if selected:
                 leg.enable = True
                 leg.state = 1
                 leg.reset_position = False

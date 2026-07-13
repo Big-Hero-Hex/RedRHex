@@ -6,4 +6,6 @@ float64[] kp
 float64[] kd
 float64[] effort_limit_nm
 bool enable
+bool[6] main_drive_enable
+bool abad_output_enable
 uint8 mode

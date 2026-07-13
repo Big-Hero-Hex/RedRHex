@@ -73,6 +73,10 @@ ros2 launch redrhex_lowlevel_bridge lowlevel_bridge.launch.py \\
   rinbo_require_state:=true \\
   rinbo_block_if_duplicate_command_publishers:=true
 
+# In another terminal, establish the fail-closed software gate only after
+# checking the physical E-stop, current limit, support, and fresh motor state.
+ros2 run redrhex_rl_controller estop_tool clear --confirm-clear
+
 # In another terminal, list policy-order joints.
 ros2 run redrhex_rl_controller motor_command_tool list-joints
 
@@ -187,6 +191,8 @@ ros2 run redrhex_rl_controller motor_command_tool single-main-velocity --index 0
         source /opt/ros/{args.ros_distro}/setup.bash
         source {rinbo_ws}/install/setup.bash
         source {redrhex_ws}/install/setup.bash
+        # The low-level heartbeat remains false until this explicit clear.
+        ros2 run redrhex_rl_controller estop_tool clear --confirm-clear
         ros2 topic echo /redrhex/lowlevel_heartbeat
         ros2 topic echo /joint_states --once
         ros2 topic echo /motor_feedback --once

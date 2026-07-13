@@ -8,8 +8,8 @@ redrhex_lowlevel_bridge:
       port: "/dev/ttyUSB0"
       baudrate: 921600
       timeout_s: 0.005
-      # Keep false while the MCU packet format is provisional. Set true only
-      # after the low-level board has its own watchdog, CRC validation, and E-stop path.
+      # Compatibility-only setting. Enabled commands are always rejected while
+      # this provisional packet format cannot encode the fixed output masks.
       allow_enable: false
     sbrio:
       remote_host: "192.168.0.2"
@@ -18,8 +18,8 @@ redrhex_lowlevel_bridge:
       feedback_port: 15001
       timeout_s: 0.002
       heartbeat_timeout_s: 0.25
-      # Keep false while the sbRIO LabVIEW RT/FPGA protocol is provisional.
-      # Set true only after watchdog, CRC validation, E-stop, and single-motor tests pass.
+      # Compatibility-only setting. Enabled commands are always rejected while
+      # this provisional packet format cannot encode the fixed output masks.
       allow_enable: false
       # If true, /redrhex/lowlevel_heartbeat only stays true after receiving
       # sbRIO heartbeat/feedback packets within heartbeat_timeout_s.
@@ -46,12 +46,13 @@ redrhex_lowlevel_bridge:
       # during dry-run so disabled /redrhex/motor_commands do not move ABAD servos.
       publish_when_disabled: false
       disabled_servo_control_mode: 0
-      # On Ctrl-C/shutdown, publish a few disabled packets to release main-drive
-      # PWM commands. This does not replace the sbRIO watchdog or physical E-stop.
+      # Legacy compatibility flag. Shutdown disable packets are now mandatory;
+      # false no longer opts out. This does not replace the hardware watchdog.
       publish_shutdown_disable: true
       shutdown_disable_repeats: 5
       shutdown_disable_period_s: 0.02
-      # If true, /redrhex/lowlevel_heartbeat is false until /motor/state arrives.
+      # If true, transport diagnostics also require recent /motor/state. Enabled
+      # output always requires fresh raw state regardless of this setting.
       require_state: true
       # When enabled commands are allowed, block them if another node is also
       # publishing /motor/command. This catches accidental rinbo_tripod +

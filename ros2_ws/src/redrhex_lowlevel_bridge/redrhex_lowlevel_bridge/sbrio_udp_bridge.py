@@ -90,14 +90,22 @@ class SbrioUdpBridge(LowLevelBridgeBase):
             return False
         return time.monotonic() - self.last_rx_time <= self.heartbeat_timeout_s
 
+    def output_state_is_fresh(self) -> bool:
+        return self.is_alive()
+
+    def emergency_disable(self) -> None:
+        # Enabled packets are unconditionally rejected until this protocol can
+        # encode the fixed output masks, so this backend cannot own active output.
+        return
+
     def shutdown(self) -> None:
         if self.sock is not None:
             self.sock.close()
             self.sock = None
 
     def _encode_command(self, cmd) -> bytes:
-        if bool(cmd.enable) and not self.allow_enable:
-            raise RuntimeError("sbrio.allow_enable is false; refusing enabled motor command over provisional UDP protocol")
+        if bool(cmd.enable):
+            raise RuntimeError("provisional UDP protocol cannot represent output masks; refusing enabled command")
         self.sequence = (self.sequence + 1) & 0xFFFFFFFF
         n = len(cmd.joint_names)
         if n <= 0 or n > 255:

@@ -10,6 +10,7 @@ from std_msgs.msg import Bool
 
 from redrhex_msgs.msg import RedRhexMotorCommand, RedRhexMotorState
 
+from .command_safety import FailClosedOutputGate, dispatch_command_fail_closed
 from .mock_bridge import MockLowLevelBridge
 from .rinbo_ros_backend import RinboRosBackend
 from .serial_bridge import SerialLowLevelBridge
@@ -34,6 +35,7 @@ MAIN_JOINT_NAMES_POLICY_ORDER = [
 class LowLevelBridgeNode(Node):
     def __init__(self) -> None:
         super().__init__("redrhex_lowlevel_bridge")
+        self.output_gate = FailClosedOutputGate()
         self.declare_parameter("backend", "mock")
         self.declare_parameter("mock.print_every_n", 50)
         self.declare_parameter("serial.port", "/dev/ttyUSB0")
@@ -144,6 +146,7 @@ class LowLevelBridgeNode(Node):
         self.bridge.connect()
 
         self.create_subscription(RedRhexMotorCommand, "/redrhex/motor_commands", self._on_motor_command, 10)
+        self.create_subscription(Bool, "/estop", self._on_estop, 10)
         self.feedback_pub = self.create_publisher(RedRhexMotorState, "/motor_feedback", 10)
         self.heartbeat_pub = self.create_publisher(Bool, "/redrhex/lowlevel_heartbeat", 10)
         self.diag_pub = self.create_publisher(DiagnosticArray, "/redrhex/lowlevel_diagnostics", 10)
@@ -154,20 +157,37 @@ class LowLevelBridgeNode(Node):
 
     def _on_motor_command(self, msg: RedRhexMotorCommand) -> None:
         try:
-            self.bridge.send_motor_command(msg)
+            dispatch_command_fail_closed(self.output_gate, self.bridge, msg)
         except Exception as exc:
             self.get_logger().error(f"Failed to send motor command: {exc}")
+            if self.output_gate.output_active:
+                self._emergency_disable("motor command rejected or failed")
+
+    def _on_estop(self, msg: Bool) -> None:
+        if self.output_gate.on_estop(bool(msg.data)):
+            self._emergency_disable("E-stop asserted")
+
+    def _emergency_disable(self, reason: str) -> None:
+        try:
+            self.bridge.emergency_disable()
+            self.output_gate.mark_disabled()
+            self.get_logger().warn(f"Emergency motor disable: {reason}")
+        except Exception as exc:
+            self.get_logger().error(f"Emergency motor disable failed ({reason}): {exc}")
 
     def _tick(self) -> None:
         alive = self.bridge.is_alive()
+        state_fresh = self.bridge.output_state_is_fresh()
+        if self.output_gate.estop_state is True and self.output_gate.output_active:
+            self._emergency_disable("retry while E-stop remains asserted")
+        elif self.output_gate.on_state_freshness(state_fresh):
+            self._emergency_disable("raw motor state became stale while output was active")
         hb = Bool()
-        hb.data = bool(alive)
+        hb.data = bool(alive and state_fresh and self.output_gate.ready_for_output)
         self.heartbeat_pub.publish(hb)
 
         state = self.bridge.read_motor_state()
         if state is not None:
-            state.header.stamp = self.get_clock().now().to_msg()
-            state.header.frame_id = "redrhex_base"
             self.feedback_pub.publish(state)
 
         status = DiagnosticStatus()

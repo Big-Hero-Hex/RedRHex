@@ -85,7 +85,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "rinbo_publish_shutdown_disable",
             default_value="",
-            description="Optional bool override for sending disabled packets on shutdown.",
+            description="Legacy compatibility override; shutdown disable packets remain mandatory.",
         ),
         DeclareLaunchArgument("rinbo_main_pwm_per_rad_s", default_value="", description="Optional float override for main velocity to PWM conversion."),
         DeclareLaunchArgument("rinbo_main_max_pwm", default_value="", description="Optional float override for max PWM/voltage command."),

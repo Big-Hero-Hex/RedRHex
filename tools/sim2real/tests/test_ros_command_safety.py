@@ -1,0 +1,609 @@
+from __future__ import annotations
+
+import ast
+import importlib
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+LOWLEVEL_ROOT = REPO_ROOT / "ros2_ws/src/redrhex_lowlevel_bridge"
+LOWLEVEL_PACKAGE = LOWLEVEL_ROOT / "redrhex_lowlevel_bridge"
+CONTROLLER_ROOT = REPO_ROOT / "ros2_ws/src/redrhex_rl_controller"
+CONTROLLER_PACKAGE = CONTROLLER_ROOT / "redrhex_rl_controller"
+
+
+def _load_standalone(path: Path, name: str):
+    assert path.is_file(), f"missing ROS-independent safety module: {path}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _install_ros_message_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Header:
+        def __init__(self) -> None:
+            self.seq = 0
+            self.stamp = None
+            self.frame_id = ""
+
+    class RedRhexMotorState:
+        def __init__(self) -> None:
+            self.header = Header()
+            self.joint_names = []
+            self.position_rad = []
+            self.velocity_rad_s = []
+            self.effort_nm = []
+            self.current_a = []
+            self.temperature_c = []
+            self.fault = []
+
+    class JointState:
+        def __init__(self) -> None:
+            self.header = Header()
+            self.name = []
+            self.position = []
+            self.velocity = []
+
+    redrhex_msgs = types.ModuleType("redrhex_msgs")
+    redrhex_msgs_msg = types.ModuleType("redrhex_msgs.msg")
+    redrhex_msgs_msg.RedRhexMotorState = RedRhexMotorState
+    redrhex_msgs.msg = redrhex_msgs_msg
+    sensor_msgs = types.ModuleType("sensor_msgs")
+    sensor_msgs_msg = types.ModuleType("sensor_msgs.msg")
+    sensor_msgs_msg.JointState = JointState
+    sensor_msgs.msg = sensor_msgs_msg
+    monkeypatch.setitem(sys.modules, "redrhex_msgs", redrhex_msgs)
+    monkeypatch.setitem(sys.modules, "redrhex_msgs.msg", redrhex_msgs_msg)
+    monkeypatch.setitem(sys.modules, "sensor_msgs", sensor_msgs)
+    monkeypatch.setitem(sys.modules, "sensor_msgs.msg", sensor_msgs_msg)
+
+
+def _import_lowlevel(monkeypatch: pytest.MonkeyPatch, module: str):
+    _install_ros_message_stubs(monkeypatch)
+    monkeypatch.syspath_prepend(str(LOWLEVEL_ROOT))
+    for name in list(sys.modules):
+        if name == "redrhex_lowlevel_bridge" or name.startswith("redrhex_lowlevel_bridge."):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    return importlib.import_module(f"redrhex_lowlevel_bridge.{module}")
+
+
+def _command(
+    *,
+    enable: bool,
+    main_drive_enable=(False, False, False, False, False, False),
+    abad_output_enable: bool = False,
+):
+    names = [f"joint_{index}" for index in range(12)]
+    return SimpleNamespace(
+        enable=enable,
+        mode=2,
+        joint_names=names,
+        target_position_rad=[0.0] * 12,
+        target_velocity_rad_s=[0.0] * 12,
+        kp=[0.0] * 12,
+        kd=[0.0] * 12,
+        effort_limit_nm=[1.0] * 12,
+        main_drive_enable=list(main_drive_enable),
+        abad_output_enable=abad_output_enable,
+    )
+
+
+def _command_safety():
+    return _load_standalone(LOWLEVEL_PACKAGE / "command_safety.py", "redrhex_command_safety_under_test")
+
+
+def _manual_safety():
+    return _load_standalone(
+        CONTROLLER_PACKAGE / "manual_command_safety.py",
+        "redrhex_manual_command_safety_under_test",
+    )
+
+
+def test_motor_command_message_declares_fixed_output_masks():
+    text = (REPO_ROOT / "ros2_ws/src/redrhex_msgs/msg/RedRhexMotorCommand.msg").read_text(encoding="utf-8")
+    assert "bool[6] main_drive_enable" in text
+    assert "bool abad_output_enable" in text
+
+
+def test_disabled_command_overrides_even_malformed_masks():
+    safety = _command_safety()
+    selection = safety.resolve_output_selection(
+        SimpleNamespace(enable=False, main_drive_enable=[True], abad_output_enable="invalid")
+    )
+    assert selection.main_drive_enable == (False,) * 6
+    assert selection.abad_output_enable is False
+    assert selection.any_enabled is False
+
+
+@pytest.mark.parametrize(
+    "mask",
+    ([True] * 5, [True] * 7, [True, False, True, False, True, 1]),
+)
+def test_enabled_command_rejects_malformed_main_masks(mask):
+    safety = _command_safety()
+    with pytest.raises(safety.CommandSelectionError):
+        safety.resolve_output_selection(
+            SimpleNamespace(enable=True, main_drive_enable=mask, abad_output_enable=False)
+        )
+
+
+def test_enabled_command_resolves_explicit_outputs():
+    safety = _command_safety()
+    selection = safety.resolve_output_selection(
+        _command(enable=True, main_drive_enable=[False, True, False, False, False, False], abad_output_enable=True)
+    )
+    assert selection.main_drive_enable == (False, True, False, False, False, False)
+    assert selection.abad_output_enable is True
+    assert selection.any_enabled is True
+
+
+def test_enabled_command_accepts_ros_generated_numpy_boolean_array():
+    safety = _command_safety()
+    selection = safety.resolve_output_selection(
+        SimpleNamespace(
+            enable=True,
+            main_drive_enable=np.array([False, True, False, False, False, False], dtype=np.bool_),
+            abad_output_enable=np.bool_(True),
+        )
+    )
+    assert selection.main_drive_enable == (False, True, False, False, False, False)
+    assert selection.abad_output_enable is True
+
+
+def test_enabled_command_rejects_non_vector_numpy_mask():
+    safety = _command_safety()
+    with pytest.raises(safety.CommandSelectionError, match="exactly 6"):
+        safety.resolve_output_selection(
+            SimpleNamespace(
+                enable=True,
+                main_drive_enable=np.zeros((6, 1), dtype=np.bool_),
+                abad_output_enable=False,
+            )
+        )
+
+
+def test_gate_starts_fail_closed_and_requires_explicit_estop_clear():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    assert gate.ready_for_output is False
+    with pytest.raises(safety.CommandRejectedError, match="E-stop"):
+        gate.accept_command(_command(enable=True, main_drive_enable=[True] + [False] * 5), state_fresh=True)
+    assert gate.on_estop(False) is False
+    assert gate.ready_for_output is True
+    selection = gate.accept_command(
+        _command(enable=True, main_drive_enable=[True] + [False] * 5), state_fresh=True
+    )
+    assert selection.any_enabled is True
+    assert gate.output_active is False
+    gate.mark_command_sent(selection)
+    assert gate.output_active is True
+
+
+def test_gate_requests_immediate_disable_for_estop_and_stale_state_once():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    selection = gate.accept_command(_command(enable=True, abad_output_enable=True), state_fresh=True)
+    gate.mark_command_sent(selection)
+    assert gate.on_state_freshness(False) is True
+    assert gate.output_active is True
+    gate.mark_disabled()
+    assert gate.output_active is False
+    assert gate.on_state_freshness(False) is False
+    selection = gate.accept_command(_command(enable=True, abad_output_enable=True), state_fresh=True)
+    gate.mark_command_sent(selection)
+    assert gate.on_estop(True) is True
+    assert gate.ready_for_output is False
+    assert gate.output_active is True
+    gate.mark_disabled()
+    assert gate.output_active is False
+
+
+def test_failed_disabled_transition_preserves_active_output_for_emergency_disable():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    enabled = gate.accept_command(
+        _command(enable=True, main_drive_enable=[True] + [False] * 5),
+        state_fresh=True,
+    )
+    gate.mark_command_sent(enabled)
+    disabled = gate.accept_command(
+        SimpleNamespace(enable=False, main_drive_enable=[True], abad_output_enable=True),
+        state_fresh=False,
+    )
+    assert disabled.any_enabled is False
+    assert gate.output_active is True
+    assert gate.on_command_failure(command_enabled=False) is True
+
+
+def test_dispatcher_emergency_disables_when_malformed_disabled_send_fails():
+    safety = _command_safety()
+
+    class Backend:
+        def __init__(self) -> None:
+            self.emergency_disable_calls = 0
+
+        @staticmethod
+        def output_state_is_fresh() -> bool:
+            return True
+
+        @staticmethod
+        def send_motor_command(command) -> None:
+            if not command.enable:
+                raise ValueError("malformed disabled command arrays")
+
+        def emergency_disable(self) -> None:
+            self.emergency_disable_calls += 1
+
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    backend = Backend()
+    safety.dispatch_command_fail_closed(
+        gate,
+        backend,
+        _command(enable=True, main_drive_enable=[True] + [False] * 5),
+    )
+    assert gate.output_active is True
+
+    with pytest.raises(ValueError, match="malformed disabled"):
+        safety.dispatch_command_fail_closed(
+            gate,
+            backend,
+            _command(enable=False),
+        )
+    assert backend.emergency_disable_calls == 1
+    assert gate.output_active is False
+
+
+def test_backend_interface_requires_emergency_disable_and_state_freshness(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "bridge_base")
+    abstract_methods = module.LowLevelBridgeBase.__abstractmethods__
+    assert "emergency_disable" in abstract_methods
+    assert "output_state_is_fresh" in abstract_methods
+
+
+@pytest.mark.parametrize(
+    ("module_name", "class_name", "kwargs"),
+    [
+        ("serial_bridge", "SerialLowLevelBridge", {"port": "/dev/null", "allow_enable": True}),
+        ("sbrio_udp_bridge", "SbrioUdpBridge", {"allow_enable": True}),
+    ],
+)
+def test_provisional_packet_backends_reject_every_enabled_command(
+    monkeypatch, module_name, class_name, kwargs
+):
+    module = _import_lowlevel(monkeypatch, module_name)
+    backend = getattr(module, class_name)(**kwargs)
+    with pytest.raises(RuntimeError, match="cannot represent output masks"):
+        backend._encode_command(
+            _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+        )
+
+
+class _Header:
+    def __init__(self) -> None:
+        self.seq = 0
+        self.stamp = None
+        self.frame_id = ""
+
+
+class _Leg:
+    def __init__(self) -> None:
+        self.enable = False
+        self.direction = False
+        self.voltage = 0.0
+        self.state = 0
+        self.reset_position = False
+
+
+class _Servo:
+    def __init__(self) -> None:
+        self.position_encoder = 0
+
+
+class _MotorCmd:
+    def __init__(self) -> None:
+        self.header = _Header()
+        self.servo_control_mode = 0
+        for field in ("l1", "l2", "l3", "r1", "r2", "r3"):
+            setattr(self, field, _Leg())
+        for field in ("sl1", "sl2", "sl3", "sr1", "sr2", "sr3"):
+            setattr(self, field, _Servo())
+
+
+def _configured_rinbo(module):
+    backend = module.RinboRosBackend.__new__(module.RinboRosBackend)
+    backend.MotorCmdStamped = _MotorCmd
+    backend.node = SimpleNamespace(
+        get_clock=lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: "stamp"))
+    )
+    backend.sequence = 0
+    backend.servo_control_mode = 2
+    backend.disabled_servo_control_mode = 0
+    backend.main_velocity_sign_policy_order = [1.0] * 6
+    backend.main_pwm_per_rad_s = 100.0
+    backend.main_max_pwm = 500.0
+    backend.main_direction_positive_rinbo_order = [True, True, True, False, False, False]
+    backend.abad_encoder_zero_rinbo_order = [10, 20, 30, 40, 50, 60]
+    backend.abad_sign_rinbo_order = [1.0] * 6
+    backend.abad_encoder_counts_per_rad = 1000.0
+    backend.abad_encoder_min = 0
+    backend.abad_encoder_max = 65535
+    backend.last_pwm_rinbo_order = [0.0] * 6
+    backend.last_abad_encoder_targets_rinbo_order = [10, 20, 30, 40, 50, 60]
+    backend.last_command_was_enabled = False
+    return backend
+
+
+def test_biorola_applies_individual_main_mask(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    cmd = _command(enable=True, main_drive_enable=[False, False, True, False, False, False])
+    cmd.target_velocity_rad_s[2] = 0.25
+    msg = backend._make_motor_cmd_msg(cmd, enabled=True, preview=False)
+    enabled_fields = [
+        field for field in backend.RINBO_LEG_ORDER if getattr(msg, field).enable
+    ]
+    assert enabled_fields == ["r3"]
+    assert msg.r3.voltage == pytest.approx(25.0)
+
+
+def test_biorola_disables_aggregate_abad_output_independently(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    main_only = _command(enable=True, main_drive_enable=[True] + [False] * 5, abad_output_enable=False)
+    msg = backend._make_motor_cmd_msg(main_only, enabled=True, preview=False)
+    assert msg.servo_control_mode == backend.disabled_servo_control_mode
+    assert backend.last_abad_encoder_targets_rinbo_order == backend.abad_encoder_zero_rinbo_order
+
+    abad_only = _command(enable=True, abad_output_enable=True)
+    abad_only.target_position_rad[6] = 0.1
+    msg = backend._make_motor_cmd_msg(abad_only, enabled=True, preview=False)
+    assert msg.servo_control_mode == backend.servo_control_mode
+    assert not any(getattr(msg, field).enable for field in backend.RINBO_LEG_ORDER)
+
+
+def test_biorola_motor_state_is_consumed_only_once(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = module.RinboRosBackend.__new__(module.RinboRosBackend)
+    state = object()
+    backend.latest_motor_state = state
+    assert backend.read_motor_state() is state
+    assert backend.read_motor_state() is None
+
+
+def test_biorola_emergency_disable_repeats_all_disabled_packets(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.cmd_pub = SimpleNamespace(publish=published.append)
+    backend.shutdown_disable_repeats = 3
+    backend.shutdown_disable_period_s = 0.0
+    backend.emergency_disable()
+    assert len(published) == 3
+    assert all(msg.servo_control_mode == backend.disabled_servo_control_mode for msg in published)
+    assert all(
+        not getattr(msg, field).enable
+        for msg in published
+        for field in backend.RINBO_LEG_ORDER
+    )
+    assert backend.last_command_was_enabled is False
+
+
+def test_biorola_emergency_disable_has_a_two_packet_minimum(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.cmd_pub = SimpleNamespace(publish=published.append)
+    backend.shutdown_disable_repeats = 0
+    backend.shutdown_disable_period_s = 0.0
+    backend.emergency_disable()
+    assert len(published) >= 2
+
+
+def test_biorola_shutdown_disable_cannot_be_opted_out(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.cmd_pub = SimpleNamespace(publish=published.append)
+    backend.publish_shutdown_disable = False
+    backend.shutdown_disable_repeats = 2
+    backend.shutdown_disable_period_s = 0.0
+    backend.shutdown()
+    assert len(published) == 2
+    assert backend.connected is False
+
+
+def test_biorola_repeats_disable_on_active_to_disabled_transition(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.publish_preview = False
+    backend.command_topic = "/motor/command"
+    backend.publish_when_disabled = False
+    backend.last_command_was_enabled = True
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: 1,
+    )
+    backend.shutdown_disable_repeats = 3
+    backend.shutdown_disable_period_s = 0.0
+    backend.send_motor_command(_command(enable=False))
+    assert len(published) == 3
+    assert backend.last_command_was_enabled is False
+
+
+def test_biorola_repeats_disable_when_a_new_enabled_command_is_blocked(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.node.get_logger = lambda: SimpleNamespace(warn=lambda _message: None)
+    backend.connected = True
+    backend.publish_preview = False
+    backend.command_topic = "/motor/command"
+    backend.allow_enable = True
+    backend.block_if_duplicate_command_publishers = False
+    backend.last_state_time = module.time.monotonic()
+    backend.state_timeout_s = 1.0
+    backend.last_command_was_enabled = True
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: 0,
+    )
+    backend.shutdown_disable_repeats = 2
+    backend.shutdown_disable_period_s = 0.0
+    backend.last_actual_publish_state = "published_enabled"
+    backend.last_block_reason = ""
+    backend._last_warned_block_reason = ""
+    backend.send_motor_command(
+        _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+    )
+    assert len(published) == 2
+    assert backend.last_command_was_enabled is False
+    assert backend.last_actual_publish_state == "blocked_no_command_subscriber"
+
+
+def test_mock_records_effective_selection_and_disable_override(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "mock_bridge")
+    backend = module.MockLowLevelBridge(print_every_n=1000)
+    backend.connect()
+    backend.send_motor_command(
+        _command(enable=True, main_drive_enable=[False, True, False, False, False, False])
+    )
+    assert backend.last_main_drive_enable == (False, True, False, False, False, False)
+    assert backend.last_abad_output_enable is False
+    backend.send_motor_command(
+        SimpleNamespace(
+            **{
+                **vars(_command(enable=False)),
+                "main_drive_enable": [True],
+                "abad_output_enable": True,
+            }
+        )
+    )
+    assert backend.last_main_drive_enable == (False,) * 6
+    assert backend.last_abad_output_enable is False
+
+
+def test_lowlevel_node_wires_estop_emergency_gate_and_preserves_state_timestamp():
+    path = LOWLEVEL_PACKAGE / "lowlevel_bridge_node.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    source = path.read_text(encoding="utf-8")
+    assert '"/estop"' in source
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "emergency_disable"
+        for node in ast.walk(tree)
+    )
+    tick = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_tick"
+    )
+    assert not any(
+        isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Attribute)
+            and target.attr == "stamp"
+            and isinstance(target.value, ast.Attribute)
+            and target.value.attr == "header"
+            and isinstance(target.value.value, ast.Name)
+            and target.value.value.id == "state"
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+        for node in ast.walk(tick)
+    )
+    assert "FailClosedOutputGate" in source
+    assert "dispatch_command_fail_closed" in source
+
+
+def test_rl_controller_explicitly_selects_all_outputs_only_when_enabled():
+    path = CONTROLLER_PACKAGE / "rl_controller_node.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    publish_fn = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_publish_motor_command"
+    )
+    assigned = {
+        target.attr
+        for node in ast.walk(publish_fn)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == "msg"
+    }
+    assert {"main_drive_enable", "abad_output_enable"} <= assigned
+    source = ast.unparse(publish_fn)
+    assert "msg.enable" in source
+
+
+@pytest.mark.parametrize(
+    ("mode", "index", "expected_main", "expected_abad"),
+    [
+        ("disable", 0, (False,) * 6, False),
+        ("init-stand", 0, (False,) * 6, True),
+        ("single-main-velocity", 2, (False, False, True, False, False, False), False),
+        ("all-main-velocity", 0, (True,) * 6, False),
+        ("single-abad", 3, (False,) * 6, True),
+        ("all-abad", 0, (False,) * 6, True),
+    ],
+)
+def test_manual_modes_select_only_requested_outputs(
+    mode, index, expected_main, expected_abad
+):
+    safety = _manual_safety()
+    selection = safety.selection_for_mode(mode, index=index, enabled=True)
+    assert selection == (expected_main, expected_abad)
+    assert safety.selection_for_mode(mode, index=index, enabled=False) == ((False,) * 6, False)
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, RuntimeError])
+def test_fail_safe_runner_repeats_terminal_disable_on_interrupt_or_exception(failure):
+    safety = _manual_safety()
+    disables = []
+
+    def operation():
+        raise failure("stop")
+
+    with pytest.raises(failure):
+        safety.run_with_terminal_disable(operation, lambda: disables.append("disable"), repeats=5)
+    assert disables == ["disable"] * 5
+
+
+def test_fail_safe_runner_repeats_terminal_disable_on_normal_completion():
+    safety = _manual_safety()
+    disables = []
+    result = safety.run_with_terminal_disable(lambda: 7, lambda: disables.append("disable"), repeats=4)
+    assert result == 7
+    assert disables == ["disable"] * 4
+
+
+def test_fail_safe_runner_rejects_a_single_terminal_disable():
+    safety = _manual_safety()
+    with pytest.raises(ValueError, match="at least 2"):
+        safety.run_with_terminal_disable(lambda: None, lambda: None, repeats=1)
+
+
+def test_manual_tool_wires_estop_masks_and_fail_safe_finalization():
+    source = (CONTROLLER_PACKAGE / "motor_command_tool.py").read_text(encoding="utf-8")
+    assert "main_drive_enable" in source
+    assert "abad_output_enable" in source
+    assert '"/estop"' in source or "estop_topic" in source
+    assert "run_with_terminal_disable" in source
+    assert "estop_state" in source

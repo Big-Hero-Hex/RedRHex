@@ -23,5 +23,13 @@ class LowLevelBridgeBase(ABC):
         """Return True if the backend heartbeat/transport is healthy."""
 
     @abstractmethod
+    def output_state_is_fresh(self) -> bool:
+        """Return True when feedback needed for hardware output is fresh."""
+
+    @abstractmethod
+    def emergency_disable(self) -> None:
+        """Immediately drive every representable output to its disabled state."""
+
+    @abstractmethod
     def shutdown(self) -> None:
         """Close the backend connection."""

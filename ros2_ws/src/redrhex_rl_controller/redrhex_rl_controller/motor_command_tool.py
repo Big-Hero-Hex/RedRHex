@@ -19,6 +19,7 @@ from std_msgs.msg import Bool
 from redrhex_msgs.msg import RedRhexMotorCommand
 
 from . import redrhex_contract as C
+from .manual_command_safety import run_with_terminal_disable, selection_for_mode
 
 try:
     from rclpy._rclpy_pybind11 import RCLError
@@ -36,6 +37,8 @@ def _base_command(enable: bool, mode: int) -> RedRhexMotorCommand:
     msg.kd = [1.0] * 6 + [1.0] * 6
     msg.effort_limit_nm = [20.0] * 6 + [3.0] * 6
     msg.enable = bool(enable)
+    msg.main_drive_enable = [False] * 6
+    msg.abad_output_enable = False
     msg.mode = int(mode)
     return msg
 
@@ -45,11 +48,16 @@ class MotorCommandTool(Node):
         super().__init__("redrhex_motor_command_tool")
         self.args = args
         self.lowlevel_heartbeat = False
+        self.estop_state: bool | None = None
         self.pub = self.create_publisher(RedRhexMotorCommand, args.topic, 10)
         self.create_subscription(Bool, args.heartbeat_topic, self._on_heartbeat, 10)
+        self.create_subscription(Bool, args.estop_topic, self._on_estop, 10)
 
     def _on_heartbeat(self, msg: Bool) -> None:
         self.lowlevel_heartbeat = bool(msg.data)
+
+    def _on_estop(self, msg: Bool) -> None:
+        self.estop_state = bool(msg.data)
 
     def build_command(self) -> RedRhexMotorCommand:
         msg = _base_command(enable=self.args.enable, mode=self.args.mode_id)
@@ -92,6 +100,13 @@ class MotorCommandTool(Node):
                 msg.effort_limit_nm[i] = float(self.args.effort_limit)
         else:
             raise ValueError(f"Unsupported mode {self.args.mode}")
+        main_enable, abad_enable = selection_for_mode(
+            self.args.mode,
+            index=self.args.index,
+            enabled=bool(msg.enable),
+        )
+        msg.main_drive_enable = list(main_enable)
+        msg.abad_output_enable = abad_enable
         return msg
 
     @staticmethod
@@ -111,18 +126,28 @@ class MotorCommandTool(Node):
             )
         return {
             "enable": bool(msg.enable),
+            "main_drive_enable": [bool(value) for value in msg.main_drive_enable],
+            "abad_output_enable": bool(msg.abad_output_enable),
             "mode": int(msg.mode),
             "joint_count": len(msg.joint_names),
             "joints": rows,
         }
 
     def run(self) -> None:
-        msg = self.build_command()
         if self.args.dry_run:
+            msg = self.build_command()
             print(json.dumps(self.summarize_command(msg), indent=2))
             return
-        self.wait_until_ready(msg.enable)
 
+        run_with_terminal_disable(
+            self._run_commands,
+            self._publish_terminal_disable_once,
+            repeats=int(self.args.disable_repeats),
+        )
+
+    def _run_commands(self) -> None:
+        msg = self.build_command()
+        self.wait_until_ready(msg.enable)
         period = 1.0 / max(float(self.args.rate_hz), 1.0)
         end_time = time.monotonic() + max(float(self.args.duration), period)
         self.get_logger().warn(
@@ -130,22 +155,43 @@ class MotorCommandTool(Node):
             f"duration={self.args.duration:.2f}s. Keep E-stop in hand."
         )
         while rclpy.ok() and time.monotonic() < end_time:
+            rclpy.spin_once(self, timeout_sec=0.0)
+            if msg.enable and self.estop_state is not False:
+                raise RuntimeError("Stopping enabled manual command because E-stop is asserted or unknown")
+            if msg.enable and not self.lowlevel_heartbeat and not self.args.skip_heartbeat_check:
+                raise RuntimeError("Stopping enabled manual command because low-level heartbeat is false")
             msg.header.stamp = self.get_clock().now().to_msg()
             self.pub.publish(msg)
-            rclpy.spin_once(self, timeout_sec=0.0)
+            time.sleep(period)
+
+    def _publish_terminal_disable_once(self) -> None:
+        try:
+            msg = _base_command(enable=False, mode=self.args.mode_id)
+            msg.kp = [0.0] * 12
+            msg.kd = [0.0] * 12
+            msg.target_velocity_rad_s = [0.0] * 12
+            msg.header.stamp = self.get_clock().now().to_msg()
+            self.pub.publish(msg)
+        except Exception as exc:
+            self.get_logger().error(f"Terminal disable publish failed: {exc}")
+        period = max(0.0, float(self.args.disable_period_s))
+        if period > 0.0:
             time.sleep(period)
 
     def wait_until_ready(self, enabled: bool) -> None:
         self._wait_for_motor_command_subscriber()
-        if enabled and not self.args.skip_heartbeat_check:
+        if enabled:
             deadline = time.monotonic() + max(float(self.args.heartbeat_timeout_s), 0.0)
             while rclpy.ok() and time.monotonic() < deadline:
-                if self.lowlevel_heartbeat:
+                if self.estop_state is True:
+                    raise RuntimeError("Refusing enabled command because E-stop is asserted")
+                heartbeat_ready = self.lowlevel_heartbeat or self.args.skip_heartbeat_check
+                if self.estop_state is False and heartbeat_ready:
                     return
                 rclpy.spin_once(self, timeout_sec=0.05)
             raise RuntimeError(
-                f"Refusing enabled command because {self.args.heartbeat_topic} did not become true. "
-                "Start/fix redrhex_lowlevel_bridge first."
+                "Refusing enabled command because E-stop was not explicitly clear or "
+                f"{self.args.heartbeat_topic} did not become true. Start/fix redrhex_lowlevel_bridge first."
             )
 
     def _wait_for_motor_command_subscriber(self) -> None:
@@ -183,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="Print the command JSON and do not publish.")
     parser.add_argument("--topic", default="/redrhex/motor_commands")
     parser.add_argument("--heartbeat-topic", default="/redrhex/lowlevel_heartbeat")
+    parser.add_argument("--estop-topic", default="/estop")
     parser.add_argument("--wait-for-subscriber-s", type=float, default=2.0)
     parser.add_argument(
         "--allow-no-subscriber",
@@ -203,6 +250,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--effort-limit", type=float, default=2.0)
     parser.add_argument("--duration", type=float, default=2.0)
     parser.add_argument("--rate-hz", type=float, default=50.0)
+    parser.add_argument("--disable-repeats", type=int, default=5)
+    parser.add_argument("--disable-period-s", type=float, default=0.02)
     parser.add_argument("--mode-id", type=int, default=2)
     return parser
 
@@ -223,6 +272,10 @@ def main(argv=None) -> None:
         raise SystemExit("Refusing ABAD position > 0.25 rad in manual tool. Increase only after bench validation.")
     if args.duration > 10.0:
         raise SystemExit("Refusing duration > 10 s in manual tool.")
+    if args.disable_repeats < 2:
+        raise SystemExit("--disable-repeats must be at least 2.")
+    if args.disable_period_s < 0.0:
+        raise SystemExit("--disable-period-s must be non-negative.")
 
     rclpy.init()
     node = MotorCommandTool(args)
