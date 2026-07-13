@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -151,21 +152,121 @@ def _passing_audit(
     return result
 
 
-def _write_real_reference(output: Path, scenario: ScenarioSpecV1) -> None:
+def _write_real_reference(
+    output: Path,
+    scenario: ScenarioSpecV1,
+    *,
+    replay_ready: bool = True,
+) -> None:
     dataset = output.parent.parent
     raw = dataset / "raw" / f"{output.name}.bin"
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_bytes(b"immutable managed real reference")
+    arrays = _response_arrays(scale=1.0)
+    metadata = _trace_metadata(scenario)
+    time_bases = None
+    if replay_ready:
+        time_s = arrays["position_time_s"]
+        canonical_position = np.tile(
+            np.array([0.0, 0.2, 0.3, -0.1, -0.2, -0.3]),
+            (time_s.size, 1),
+        )
+        canonical_position[:, 0] += arrays["position"]
+        fixture = {
+            "schema_version": 1,
+            "fixture_id": "suspended-level-v1",
+            "scene_mode": "fixed_base",
+            "fixture_frame": "world",
+            "root_orientation_wxyz": [
+                0.7071067811865476,
+                0.7071067811865475,
+                0.0,
+                0.0,
+            ],
+            "expected_imu_orientation_xyzw": [
+                0.7071067811865475,
+                0.0,
+                0.0,
+                0.7071067811865476,
+            ],
+        }
+        initial_state = {
+            "schema_version": 2,
+            "joint_order": [f"main_{index}" for index in range(6)],
+            "position_source_channel": "main_joint_position_canonical",
+            "position_rad": canonical_position[0].tolist(),
+            "velocity_rad_s": [0.0] * 6,
+            "velocity_source": "stationary_window_linear_fit",
+            "velocity_window_start_s": 0.0,
+            "velocity_window_end_s": 0.4,
+            "velocity_stationarity_limit_rad_s": 0.05,
+            "fixture_mode": "fixed_base",
+            "fixture_frame": "world",
+            "root_pose_source": "reviewed_fixture",
+            "fixture_id": fixture["fixture_id"],
+            "fixture_sha256": sha256_json(fixture),
+            "root_orientation_wxyz": fixture["root_orientation_wxyz"],
+            "imu_orientation_source_channel": "imu_orientation_xyzw",
+            "measured_imu_orientation_xyzw": fixture[
+                "expected_imu_orientation_xyzw"
+            ],
+            "expected_imu_orientation_xyzw": fixture[
+                "expected_imu_orientation_xyzw"
+            ],
+            "imu_orientation_error_rad": 0.0,
+            "imu_orientation_tolerance_rad": math.radians(5.0),
+            "imu_angular_velocity_source_channel": "imu_angular_velocity",
+            "max_imu_angular_speed_rad_s": 0.0,
+            "imu_stationarity_limit_rad_s": 0.1,
+            "sample_time_s": 0.0,
+            "scenario_time_s": 0.0,
+            "sample_offset_s": 0.0,
+        }
+        arrays = {
+            **arrays,
+            "main_joint_position_canonical": canonical_position,
+            "imu_time_s": time_s,
+            "imu_orientation_xyzw": np.tile(
+                np.asarray(fixture["expected_imu_orientation_xyzw"]),
+                (time_s.size, 1),
+            ),
+            "imu_angular_velocity": np.zeros((time_s.size, 3)),
+        }
+        metadata["units"].update(
+            {
+                "main_joint_position_canonical": "rad",
+                "imu_orientation_xyzw": "quaternion_xyzw",
+                "imu_angular_velocity": "rad/s",
+            }
+        )
+        metadata["frames"].update(
+            {
+                "main_joint_position_canonical": "canonical_main_joint_order",
+                "imu_orientation_xyzw": "imu_mount",
+                "imu_angular_velocity": "imu_mount",
+            }
+        )
+        metadata["calibration_constants"].update(
+            {
+                "all_main_position_mapping_source": "profile:baseline",
+                "replay_initial_state": initial_state,
+                "replay_initial_state_sha256": sha256_json(initial_state),
+            }
+        )
+        time_bases = {
+            "main_joint_position_canonical": "position_time_s",
+            "imu_orientation_xyzw": "imu_time_s",
+            "imu_angular_velocity": "imu_time_s",
+        }
     manifest = write_trace(
         output,
-        _response_arrays(scale=1.0),
+        arrays,
         scenario=scenario,
         source="real",
         source_path=raw,
         profile=_profile(),
-        metadata={
-            **_trace_metadata(scenario),
-        },
+        metadata=metadata,
+        time_bases=time_bases,
     )
     metadata_sha256 = sha256_file(output / "metadata.json")
     dataset_manifest = {
@@ -409,6 +510,9 @@ def test_execute_sweep_runs_fresh_process_per_candidate_and_verifies_outputs(
     assert _argument(commands[0], "--seed") == "17"
     assert _argument(commands[0], "--device") == "cpu"
     assert "--headless" in commands[0]
+    replay_trace = Path(_argument(commands[0], "--replay-trace"))
+    assert replay_trace.is_absolute()
+    assert replay_trace.name == "sweep-real"
     assert _argument(commands[0], "--physics-profile") != _argument(
         commands[1], "--physics-profile"
     )
@@ -430,6 +534,7 @@ def test_execute_sweep_runs_fresh_process_per_candidate_and_verifies_outputs(
     provenance = json.loads((tmp_path / "sweep" / "provenance.json").read_text())
     assert provenance["git_sha"] == "1" * 40
     assert provenance["seed"] == 17
+    assert len(provenance["replay_initial_state_sha256"]) == 64
     assert len(provenance["audit_artifact_sha256"]) == 64
     assert len(provenance["audit_report_sha256"]) == 64
     assert json.loads((tmp_path / "sweep" / "results.json").read_text()) == result
@@ -554,6 +659,35 @@ def test_execution_rejects_standalone_real_reference_before_writing_output(
             real_trace=standalone,
             run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("standalone reference must fail before running")
+            ),
+        )
+
+    assert not output.exists()
+
+
+def test_execution_requires_replay_ready_real_reference_before_launch(
+    tmp_path: Path,
+) -> None:
+    scenario = load_scenario("main-step")
+    reference = (
+        tmp_path
+        / "datasets"
+        / "sim2real"
+        / "metrics-only-dataset"
+        / "episodes"
+        / "metrics-only-real"
+    )
+    _write_real_reference(reference, scenario, replay_ready=False)
+    output = tmp_path / "sweep"
+
+    with pytest.raises(ContractError, match="replay requires"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            scenario=scenario,
+            real_trace=reference,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("metrics-only evidence must fail before launching Isaac")
             ),
         )
 

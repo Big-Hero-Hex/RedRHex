@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,7 +15,11 @@ from tools.sim2real.compare import compare_traces
 from tools.sim2real.contracts import CalibrationProfileV1, ContractError, load_profile
 from tools.sim2real.metrics import compute_subsystem_metrics
 from tools.sim2real.profile_measurements import apply_measurements_to_profile
-from tools.sim2real.promotion import _validate_changed_field_evidence, evaluate_promotion
+from tools.sim2real.promotion import (
+    _validate_changed_field_evidence,
+    _validate_measurement_sources,
+    evaluate_promotion,
+)
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.traces import (
     load_trace,
@@ -54,6 +59,7 @@ def _response_trace(
     profile: CalibrationProfileV1 | None = None,
     load_coordinate: str | None = None,
     runtime_provenance: dict[str, str] | None = None,
+    replay_ready: bool = False,
 ) -> None:
     scenario = load_scenario(scenario_id)
     scenario_hash = sha256_json(scenario.to_dict())
@@ -125,19 +131,124 @@ def _response_trace(
         else:
             source_path = directory.parent / f"{directory.name}.raw"
         source_path.write_bytes(f"raw:{directory.name}".encode())
+    arrays = {
+        "command_time_s": time_s,
+        "command": command,
+        "position_time_s": time_s,
+        "position": position,
+    }
+    time_bases = None
+    if replay_ready:
+        if source != "real" or profile is None:
+            raise AssertionError("replay-ready fixture requires a profiled real trace")
+        selected_index = int(scenario.joint.removeprefix("main_"))
+        canonical_position = np.tile(
+            np.array([0.0, 0.2, 0.3, -0.1, -0.2, -0.3]),
+            (time_s.size, 1),
+        )
+        canonical_position[:, selected_index] += position
+        fixture = {
+            "schema_version": 1,
+            "fixture_id": "suspended-level-v1",
+            "scene_mode": "fixed_base",
+            "fixture_frame": "world",
+            "root_orientation_wxyz": [
+                0.7071067811865476,
+                0.7071067811865475,
+                0.0,
+                0.0,
+            ],
+            "expected_imu_orientation_xyzw": [
+                0.7071067811865475,
+                0.0,
+                0.0,
+                0.7071067811865476,
+            ],
+        }
+        initial_state = {
+            "schema_version": 2,
+            "joint_order": [f"main_{index}" for index in range(6)],
+            "position_source_channel": "main_joint_position_canonical",
+            "position_rad": canonical_position[0].tolist(),
+            "velocity_rad_s": [0.0] * 6,
+            "velocity_source": "stationary_window_linear_fit",
+            "velocity_window_start_s": 0.0,
+            "velocity_window_end_s": 0.4,
+            "velocity_stationarity_limit_rad_s": 0.05,
+            "fixture_mode": "fixed_base",
+            "fixture_frame": "world",
+            "root_pose_source": "reviewed_fixture",
+            "fixture_id": fixture["fixture_id"],
+            "fixture_sha256": sha256_json(fixture),
+            "root_orientation_wxyz": fixture["root_orientation_wxyz"],
+            "imu_orientation_source_channel": "imu_orientation_xyzw",
+            "measured_imu_orientation_xyzw": fixture[
+                "expected_imu_orientation_xyzw"
+            ],
+            "expected_imu_orientation_xyzw": fixture[
+                "expected_imu_orientation_xyzw"
+            ],
+            "imu_orientation_error_rad": 0.0,
+            "imu_orientation_tolerance_rad": math.radians(5.0),
+            "imu_angular_velocity_source_channel": "imu_angular_velocity",
+            "max_imu_angular_speed_rad_s": 0.0,
+            "imu_stationarity_limit_rad_s": 0.1,
+            "sample_time_s": 0.0,
+            "scenario_time_s": 0.0,
+            "sample_offset_s": 0.0,
+        }
+        arrays.update(
+            {
+                "main_joint_position_canonical": canonical_position,
+                "imu_time_s": time_s,
+                "imu_orientation_xyzw": np.tile(
+                    np.asarray(fixture["expected_imu_orientation_xyzw"]),
+                    (time_s.size, 1),
+                ),
+                "imu_angular_velocity": np.zeros((time_s.size, 3)),
+            }
+        )
+        metadata["units"].update(
+            {
+                "main_joint_position_canonical": "rad",
+                "imu_orientation_xyzw": "quaternion_xyzw",
+                "imu_angular_velocity": "rad/s",
+            }
+        )
+        metadata["frames"].update(
+            {
+                "main_joint_position_canonical": "canonical_main_joint_order",
+                "imu_orientation_xyzw": "imu_mount",
+                "imu_angular_velocity": "imu_mount",
+            }
+        )
+        metadata["calibration_constants"].update(
+            {
+                "all_main_position_mapping_source": f"profile:{profile.profile_id}",
+                "replay_initial_state": initial_state,
+                "replay_initial_state_sha256": sha256_json(initial_state),
+            }
+        )
+        metadata["calibration_constants"]["probe_event_evidence"].update(
+            {
+                "scenario_receive_time_s": 0.0,
+                "complete_receive_time_s": duration_s,
+            }
+        )
+        time_bases = {
+            "main_joint_position_canonical": "position_time_s",
+            "imu_orientation_xyzw": "imu_time_s",
+            "imu_angular_velocity": "imu_time_s",
+        }
     write_trace(
         directory,
-        {
-            "command_time_s": time_s,
-            "command": command,
-            "position_time_s": time_s,
-            "position": position,
-        },
+        arrays,
         scenario=scenario,
         source=source,
         source_path=source_path,
         profile=profile,
         metadata=metadata,
+        time_bases=time_bases,
     )
     if source == "real" and directory.parent.name == "episodes":
         dataset_root = directory.parent.parent
@@ -709,6 +820,7 @@ def _fixture(root: Path, *, sim_scale: float = 1.02) -> tuple[CalibrationProfile
         speed_scale=1.0,
         profile=candidate,
         load_coordinate="holdout-load",
+        replay_ready=True,
     )
     real_trace = load_trace(holdout)
     sweep_binding, simulated = _sweep_evidence(
@@ -1759,11 +1871,91 @@ def test_effort_candidate_itself_must_match_confirmed_known_load_envelope(
     payload["simulation_physics"]["main_drive"]["effort_limit"] = 4.0
     mismatch = CalibrationProfileV1.from_dict(payload)
     evidence["candidate_profile_sha256"] = sha256_json(mismatch.to_dict())
-    failed = evaluate_promotion(mismatch, evidence, artifact_root=tmp_path)
-    assert failed["eligible_for_review"] is False
-    assert any(
-        "direct-measurement envelope" in reason for reason in failed["failures"]
+    with pytest.raises(ContractError, match="does not match its calibration measurement"):
+        evaluate_promotion(mismatch, evidence, artifact_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("direct_case", "field_case"),
+    [
+        ("abad", "target_scale"),
+        ("abad", "target_offset"),
+        ("contact", "static_friction"),
+        ("contact", "dynamic_friction"),
+        ("spring", "stiffness"),
+        ("rigid_body", "total_mass"),
+        ("rigid_body", "com_x"),
+        ("rigid_body", "com_y"),
+        ("rigid_body", "joint_reference"),
+        ("rigid_body", "root_reference"),
+        ("effort_limit", "effort_limit"),
+    ],
+)
+def test_direct_measurement_source_binds_candidate_value_to_calibration_trace(
+    tmp_path: Path,
+    direct_case: str,
+    field_case: str,
+) -> None:
+    if direct_case in {"abad", "contact"}:
+        candidate, evidence = _direct_measurement_fixture(
+            tmp_path, subsystem=direct_case
+        )
+    elif direct_case in {"spring", "rigid_body"}:
+        candidate, evidence = _manual_route_fixture(
+            tmp_path, subsystem=direct_case
+        )
+    else:
+        candidate, evidence = _known_load_promotion_fixture(tmp_path)
+
+    payload = candidate.to_dict()
+    if field_case == "target_scale":
+        payload["hardware_mapping"]["abad_target_scale"]["abad_0"] += 0.01
+    elif field_case == "target_offset":
+        payload["hardware_mapping"]["abad_target_offset_rad"]["abad_0"] += 0.01
+    elif field_case in {"static_friction", "dynamic_friction"}:
+        payload["simulation_physics"]["ground"][field_case] += 0.01
+    elif field_case == "stiffness":
+        payload["simulation_physics"]["passive_spring"]["damper_0"][
+            "stiffness"
+        ] += 0.05
+    elif field_case == "total_mass":
+        payload["simulation_physics"]["mass"]["target_total_mass_kg"] += 0.05
+    elif field_case in {"com_x", "com_y"}:
+        index = 0 if field_case == "com_x" else 1
+        payload["simulation_physics"]["mass"]["reference_planar_com_xy_m"][
+            index
+        ] += 0.01
+    elif field_case == "joint_reference":
+        payload["simulation_physics"]["mass"]["reference_joint_position_rad"][
+            "main_0"
+        ] += 0.01
+    elif field_case == "root_reference":
+        orientation = payload["simulation_physics"]["mass"][
+            "reference_root_orientation_xyzw"
+        ]
+        payload["simulation_physics"]["mass"][
+            "reference_root_orientation_xyzw"
+        ] = [-value for value in orientation]
+    else:
+        payload["simulation_physics"]["main_drive"]["effort_limit"] += 0.05
+    tampered = CalibrationProfileV1.from_dict(payload)
+
+    baseline = load_profile(tmp_path / evidence["baseline_profile"]["path"])
+    calibration_binding = evidence["conditions"][0]["real_episodes"][0]
+    calibration_trace = load_trace(
+        tmp_path / calibration_binding["path"], require_managed_dataset=True
     )
+    scenario = load_scenario(calibration_trace.manifest.scenario_id)
+    conditions = {
+        "calibration": {
+            "role": "calibration",
+            "scenario": scenario,
+            "real_traces": [calibration_trace],
+        }
+    }
+
+    with pytest.raises(ContractError, match="does not match its calibration measurement"):
+        _validate_measurement_sources(baseline, tampered, conditions)
 
 
 def _tamper_bound_episode_metadata(

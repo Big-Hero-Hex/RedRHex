@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .compare import compare_traces
+from .characterization import load_replay_schedule, scenario_step_count
 from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1, load_profile
 from .metrics import compute_subsystem_metrics
 from .provenance import validate_real_trace_provenance
@@ -38,6 +39,7 @@ _RUNTIME_PROVENANCE_FIELDS = {
 _DERIVED_PROVENANCE_FIELDS = _RUNTIME_PROVENANCE_FIELDS | {
     "real_trace_sha256",
     "real_metadata_sha256",
+    "replay_initial_state_sha256",
     "known_load_trace_sha256",
     "known_load_metadata_sha256",
     "audit_artifact_sha256",
@@ -602,6 +604,7 @@ def execute_sweep(
             profile=base_profile,
         )
     reference: LoadedTrace | None = None
+    replay_initial_state_sha256: str | None = None
     if real_trace is None:
         if not generate_only:
             raise ContractError("real_trace is required when sweep execution is enabled")
@@ -612,6 +615,13 @@ def execute_sweep(
             require_managed_dataset=True,
         )
         validate_real_trace_provenance(reference, scenario)
+        if not generate_only:
+            replay = load_replay_schedule(
+                reference.directory,
+                scenario,
+                steps=scenario_step_count(scenario),
+            )
+            replay_initial_state_sha256 = replay.initial_state_sha256
     clean_candidates = list(candidates)
     if not all(isinstance(candidate, CalibrationProfileV1) for candidate in clean_candidates):
         raise ContractError("candidates must contain CalibrationProfileV1 values")
@@ -706,6 +716,9 @@ def execute_sweep(
     )
     effective_provenance["real_metadata_sha256"] = (
         reference.metadata_sha256 if reference is not None else None
+    )
+    effective_provenance["replay_initial_state_sha256"] = (
+        replay_initial_state_sha256
     )
     effective_provenance["known_load_trace_sha256"] = (
         known_load.manifest.provenance["trace_sha256"]
@@ -915,6 +928,8 @@ def execute_sweep(
             scene_mode,
             "--physics-profile",
             str(profile_path),
+            "--replay-trace",
+            str(reference.directory.resolve()),
             "--output",
             str(run_output.resolve()),
             "--seed",

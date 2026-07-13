@@ -10,7 +10,12 @@ import numpy as np
 
 from .compare import compare_traces
 from .contracts import CalibrationProfileV1, ContractError, load_profile
-from .characterization import EXPECTED_FOOT_BODY_NAMES, PHYSICS_DT
+from .characterization import (
+    EXPECTED_FOOT_BODY_NAMES,
+    PHYSICS_DT,
+    load_replay_schedule,
+    scenario_step_count,
+)
 from .metrics import compute_subsystem_metrics
 from .provenance import validate_real_trace_provenance
 from .scenarios import load_scenario
@@ -783,6 +788,118 @@ def _main_effort_limit_changed(
     return before_value != after_value
 
 
+def _require_calibration_value(actual: Any, expected: Any, field: str) -> None:
+    measured = _number(expected, f"calibration measurement {field}")
+    configured = _number(actual, f"candidate {field}")
+    if not math.isclose(configured, measured, rel_tol=1.0e-12, abs_tol=1.0e-12):
+        raise ContractError(
+            f"candidate {field} does not match its calibration measurement"
+        )
+
+
+def _validate_direct_measurement_value(
+    candidate: CalibrationProfileV1,
+    key: str,
+    trace: LoadedTrace,
+    metrics: Mapping[str, Any],
+) -> None:
+    """Bind directly applied profile fields to their immutable calibration trace."""
+
+    if key.startswith("abad_target:"):
+        joint = key.removeprefix("abad_target:")
+        aggregate = _mapping(metrics.get("aggregate"), "ABAD calibration metrics")
+        for field, metric in (
+            ("abad_target_scale", "target_scale"),
+            ("abad_target_offset_rad", "target_offset_rad"),
+        ):
+            values = _mapping(
+                candidate.hardware_mapping.get(field), f"candidate {field}"
+            )
+            _require_calibration_value(
+                values.get(joint),
+                aggregate.get(metric),
+                f"hardware_mapping.{field}.{joint}",
+            )
+        return
+
+    physics = candidate.simulation_physics
+    if key == "ground_friction":
+        ground = _mapping(physics.get("ground"), "candidate ground profile")
+        for field, section in (
+            ("static_friction", "static"),
+            ("dynamic_friction", "dynamic"),
+        ):
+            measured = _mapping(
+                metrics.get(section), f"ground calibration {section} metrics"
+            )
+            _require_calibration_value(
+                ground.get(field),
+                measured.get("coefficient_mean"),
+                f"simulation_physics.ground.{field}",
+            )
+        return
+
+    if key == "mass_com":
+        mass = _mapping(physics.get("mass"), "candidate mass profile")
+        _require_calibration_value(
+            mass.get("target_total_mass_kg"),
+            metrics.get("mass_kg"),
+            "simulation_physics.mass.target_total_mass_kg",
+        )
+        planar = mass.get("reference_planar_com_xy_m")
+        if not isinstance(planar, list) or len(planar) != 2:
+            raise ContractError(
+                "candidate simulation_physics.mass.reference_planar_com_xy_m "
+                "does not match its calibration measurement"
+            )
+        for index, metric in enumerate(("com_x_m", "com_y_m")):
+            _require_calibration_value(
+                planar[index],
+                metrics.get(metric),
+                f"simulation_physics.mass.reference_planar_com_xy_m[{index}]",
+            )
+        constants = _mapping(
+            trace.manifest.metadata.get("calibration_constants"),
+            "mass calibration constants",
+        )
+        for field in (
+            "reference_joint_position_rad",
+            "reference_root_orientation_xyzw",
+        ):
+            if mass.get(field) != constants.get(field):
+                raise ContractError(
+                    f"candidate simulation_physics.mass.{field} does not match "
+                    "its calibration measurement"
+                )
+        return
+
+    if key.startswith("passive_spring:"):
+        joint = key.removeprefix("passive_spring:")
+        springs = _mapping(
+            physics.get("passive_spring"), "candidate passive_spring profile"
+        )
+        spring = _mapping(springs.get(joint), f"candidate passive spring {joint}")
+        _require_calibration_value(
+            spring.get("stiffness"),
+            metrics.get("stiffness_nm_per_rad"),
+            f"simulation_physics.passive_spring.{joint}.stiffness",
+        )
+        return
+
+    if key.startswith("main_drive_effort_limit:"):
+        actuator = _mapping(
+            physics.get("main_drive"), "candidate main_drive profile"
+        )
+        _require_calibration_value(
+            actuator.get("effort_limit"),
+            metrics.get("torque_saturation_nm"),
+            "simulation_physics.main_drive.effort_limit",
+        )
+        return
+
+    raise ContractError(f"measurement source {key} has no direct profile binding")
+
+
 def _validate_measurement_sources(
     baseline: CalibrationProfileV1,
     candidate: CalibrationProfileV1,
@@ -798,7 +915,7 @@ def _validate_measurement_sources(
             raise ContractError(
                 f"measurement source {key} is required for the fitted profile field"
             )
-        matches: list[tuple[str, LoadedTrace]] = []
+        matches: list[tuple[str, LoadedTrace, Mapping[str, Any]]] = []
         for condition_id, internal in conditions.items():
             if internal["role"] != "calibration":
                 continue
@@ -822,12 +939,13 @@ def _validate_measurement_sources(
                     "episode_id": dataset.episode_id,
                 }
                 if dict(raw_source) == expected:
-                    matches.append((condition_id, trace))
+                    matches.append((condition_id, trace, metrics))
         if len(matches) != 1:
             raise ContractError(
                 f"measurement source {key} must bind exactly one calibration-role real episode"
             )
-        condition_id, trace = matches[0]
+        condition_id, trace, metrics = matches[0]
+        _validate_direct_measurement_value(candidate, key, trace, metrics)
         bindings[key] = {
             "condition_id": condition_id,
             "dataset_id": trace.dataset.dataset_id,
@@ -1658,6 +1776,7 @@ def _verify_sweep_for_holdout(
         "runtime_bundle_sha256",
         "real_trace_sha256",
         "real_metadata_sha256",
+        "replay_initial_state_sha256",
         "known_load_trace_sha256",
         "known_load_metadata_sha256",
         "audit_artifact_sha256",
@@ -1677,6 +1796,7 @@ def _verify_sweep_for_holdout(
         "characterization_runner_sha256",
         "sweep_runner_sha256",
         "runtime_bundle_sha256",
+        "replay_initial_state_sha256",
         "audit_artifact_sha256",
         "audit_report_sha256",
     ):
@@ -1705,6 +1825,13 @@ def _verify_sweep_for_holdout(
         raise ContractError("actuator sweep real reference trace mismatch")
     if provenance["real_metadata_sha256"] != real_trace.metadata_sha256:
         raise ContractError("actuator sweep real reference metadata mismatch")
+    replay = load_replay_schedule(
+        real_trace.directory,
+        scenario,
+        steps=scenario_step_count(scenario),
+    )
+    if provenance["replay_initial_state_sha256"] != replay.initial_state_sha256:
+        raise ContractError("actuator sweep replay initial-state provenance mismatch")
     if provenance["scene_mode"] != results["scene_mode"]:
         raise ContractError("actuator sweep scene mode provenance mismatch")
     known_load_identity = (
