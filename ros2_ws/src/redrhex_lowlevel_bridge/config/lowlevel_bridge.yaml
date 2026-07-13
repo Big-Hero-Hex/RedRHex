@@ -2,6 +2,10 @@ redrhex_lowlevel_bridge:
   ros__parameters:
     backend: "mock"  # mock, serial, sbrio_udp, rinbo_ros, or biorola_ros
     feedback_rate_hz: 50.0
+    sim2real_probe:
+      # Bridge-owned exclusive lease; longer than the 60 Hz command period but
+      # short enough to force disable promptly after a crashed probe.
+      session_timeout_s: 0.25
     mock:
       print_every_n: 50
     serial:
