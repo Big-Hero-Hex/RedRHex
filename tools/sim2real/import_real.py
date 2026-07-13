@@ -17,20 +17,12 @@ from .scenarios import load_scenario
 from .traces import write_trace
 
 
-_FORBIDDEN_LATENCY_CLOCKS = {
-    "/motor_feedback.header",
-    "motor_feedback.header",
-}
+_BAG_LATENCY_CLOCK = "bag_receive_time"
 
 
 def validate_latency_clock(value: str) -> str:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         raise ContractError("latency clock must be a non-empty name")
-    if value.strip().lower() in _FORBIDDEN_LATENCY_CLOCKS:
-        raise ContractError(
-            "/motor_feedback.header cannot be used as the latency clock; "
-            "use bag receive time or an independently synchronized clock"
-        )
     return value
 
 
@@ -276,14 +268,20 @@ def import_real_trace(
     time_bases: Mapping[str, str] | None = None,
     profile: CalibrationProfileV1 | None = None,
 ) -> TraceManifestV1:
-    clock = validate_latency_clock(latency_clock)
     source = Path(source_path)
     spec = scenario if isinstance(scenario, ScenarioSpecV1) else load_scenario(scenario)
     if source.is_file() and source.suffix == ".npz":
+        clock = validate_latency_clock(latency_clock)
         arrays = _load_numeric_npz(source)
         extracted_time_bases: dict[str, str] = {}
         calibration_constants: dict[str, Any] = {}
     else:
+        if latency_clock != _BAG_LATENCY_CLOCK:
+            raise ContractError(
+                'rosbag latency clock must be exactly "bag_receive_time"; '
+                "bag extraction uses the SequentialReader receive timestamp"
+            )
+        clock = _BAG_LATENCY_CLOCK
         arrays, extracted_time_bases, calibration_constants = _load_rosbag(
             source, spec, profile
         )
@@ -299,9 +297,16 @@ def import_real_trace(
     details.setdefault("git_sha", None)
     details.setdefault("asset_sha256", None)
     details.setdefault("config_sha256", None)
+    caller_constants = dict(details.get("calibration_constants", {}))
+    collisions = set(caller_constants).intersection(calibration_constants)
+    if collisions:
+        raise ContractError(
+            "metadata.calibration_constants conflicts with extracted constants: "
+            + ", ".join(sorted(collisions))
+        )
     details["calibration_constants"] = {
+        **caller_constants,
         **calibration_constants,
-        **dict(details.get("calibration_constants", {})),
     }
     merged_time_bases = {**extracted_time_bases, **dict(time_bases or {})}
     return write_trace(

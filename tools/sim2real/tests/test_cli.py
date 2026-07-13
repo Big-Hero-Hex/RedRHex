@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 from tools.sim2real.cli import build_parser, main
-from tools.sim2real.contracts import CalibrationProfileV1
+from tools.sim2real.contracts import CalibrationProfileV1, ContractError
 from tools.sim2real.dataset import import_real_dataset
-from tools.sim2real.import_real import import_real_trace
+from tools.sim2real.import_real import import_real_trace, validate_latency_clock
 
 
 def _profile_file(path: Path) -> Path:
@@ -40,6 +40,39 @@ def _npz(path: Path) -> Path:
         position=position,
     )
     return path
+
+
+def _stub_rosbag_extraction(monkeypatch) -> dict[str, object]:
+    import tools.sim2real.import_real as importer
+
+    constants: dict[str, object] = {
+        "calibration_source": "provisional_repository_defaults",
+        "encoder_counts_per_rev": 54984.83,
+        "encoder_zero_count": 0.0,
+        "encoder_sign": 1.0,
+        "pwm_scale": 0.002,
+        "pwm_cap": 1.0,
+        "selected_leg": "r1",
+        "positive_direction_bit": False,
+    }
+    arrays = {
+        "command_time_s": np.array([0.0, 0.1]),
+        "command": np.array([0.25, -0.25]),
+        "position_time_s": np.array([0.01, 0.11]),
+        "position": np.array([0.0, np.pi / 2.0]),
+    }
+    monkeypatch.setattr(
+        importer,
+        "_load_rosbag",
+        lambda path, scenario, profile: (arrays, {}, constants),
+    )
+    return constants
+
+
+@pytest.mark.parametrize("clock", ["", " ", "\t\n"])
+def test_latency_clock_rejects_empty_or_whitespace_only_names(clock: str) -> None:
+    with pytest.raises(ContractError, match="non-empty"):
+        validate_latency_clock(clock)
 
 
 def test_parser_exposes_the_five_pure_python_commands() -> None:
@@ -181,31 +214,92 @@ def test_import_real_numeric_trace_and_compare_cli(tmp_path: Path, capsys) -> No
     assert set(result["subsystems"]) == {"main_drive"}
 
 
-def test_import_rejects_feedback_header_as_latency_clock_before_writing(
-    tmp_path: Path, capsys
+@pytest.mark.parametrize(
+    "clock",
+    [
+        "synchronized_encoder_clock",
+        "BAG_RECEIVE_TIME",
+        " bag_receive_time ",
+        "/motor_feedback.header",
+        "motor_feedback.header",
+        "/motor_feedback/header",
+        "motor_feedback/header",
+        "/motor_feedback.header.stamp",
+        "motor_feedback.header.stamp",
+        "/motor_feedback/header/stamp",
+        "motor_feedback/header/stamp",
+        "motor_feedback_header_stamp",
+    ],
+)
+def test_rosbag_rejects_every_clock_other_than_bag_receive_time(
+    tmp_path: Path, monkeypatch, clock: str
 ) -> None:
+    bag = tmp_path / "bag"
+    bag.mkdir()
+    _stub_rosbag_extraction(monkeypatch)
+
+    with pytest.raises(ContractError, match="bag.receive.time"):
+        import_real_trace(
+            bag,
+            tmp_path / "episode",
+            scenario="main-step",
+            latency_clock=clock,
+        )
+
+    assert not (tmp_path / "episode").exists()
+
+
+def test_numeric_npz_records_its_declared_clock(tmp_path: Path) -> None:
     source = _npz(tmp_path / "raw.npz")
 
-    code = main(
-        [
-            "import-real",
-            str(source),
-            "--scenario",
-            "main-step",
-            "--output",
-            str(tmp_path),
-            "--latency-clock",
-            "/motor_feedback.header",
-            "--dataset-id",
-            "bad-clock",
-            "--episode-id",
-            "episode",
-        ]
+    manifest = import_real_trace(
+        source,
+        tmp_path / "episode",
+        scenario="main-step",
+        latency_clock="synchronized_encoder_clock",
     )
 
-    assert code == 2
-    assert "latency clock" in capsys.readouterr().err
-    assert not (tmp_path / "datasets" / "sim2real" / "bad-clock").exists()
+    assert manifest.metadata["clock"]["source"] == "synchronized_encoder_clock"
+
+
+def test_rosbag_rejects_caller_metadata_that_conflicts_with_used_constants(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bag = tmp_path / "bag"
+    bag.mkdir()
+    _stub_rosbag_extraction(monkeypatch)
+
+    with pytest.raises(ContractError, match="calibration_constants.*pwm_scale"):
+        import_real_trace(
+            bag,
+            tmp_path / "episode",
+            scenario="main-step",
+            metadata={"calibration_constants": {"pwm_scale": 99.0}},
+        )
+
+    assert not (tmp_path / "episode").exists()
+
+
+def test_rosbag_records_the_clock_and_constants_used_during_extraction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bag = tmp_path / "bag"
+    bag.mkdir()
+    expected_constants = _stub_rosbag_extraction(monkeypatch)
+
+    manifest = import_real_trace(
+        bag,
+        tmp_path / "episode",
+        scenario="main-step",
+        latency_clock="bag_receive_time",
+        metadata={"calibration_constants": {"operator_note": "bench-a"}},
+    )
+
+    assert manifest.metadata["clock"]["source"] == "bag_receive_time"
+    assert manifest.metadata["calibration_constants"] == {
+        "operator_note": "bench-a",
+        **expected_constants,
+    }
 
 
 def test_rosbag_dependency_is_imported_only_when_a_bag_is_read(
@@ -309,6 +403,8 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
 
     trace = load_trace(tmp_path / "episode")
 
+    np.testing.assert_allclose(trace.arrays["command_time_s"], [0.0, 0.1])
+    np.testing.assert_allclose(trace.arrays["position_time_s"], [0.01, 0.11])
     np.testing.assert_allclose(trace.arrays["command"], [0.25, -0.25])
     np.testing.assert_allclose(trace.arrays["position"], [0.0, np.pi / 2.0])
     np.testing.assert_allclose(
@@ -320,6 +416,7 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     assert trace.manifest.metadata["calibration_constants"][
         "calibration_source"
     ] == "provisional_repository_defaults"
+    assert trace.manifest.metadata["clock"]["source"] == "bag_receive_time"
     assert manifest.time_bases["imu_acceleration"] == "imu_time_s"
     assert manifest.time_bases["power_voltage"] == "power_time_s"
 
@@ -350,6 +447,8 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     assert calibrated.manifest.metadata["calibration_constants"][
         "calibration_source"
     ] == "profile:bag-calibration"
+    assert calibrated.manifest.metadata["calibration_constants"]["pwm_scale"] == 0.01
+    assert calibrated.manifest.metadata["calibration_constants"]["pwm_cap"] == 0.5
     assert "profile_sha256" in calibrated.manifest.provenance
 
 

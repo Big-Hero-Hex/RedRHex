@@ -196,6 +196,37 @@ def test_profile_models_hardware_timing_friction_and_passive_spring() -> None:
     assert profile.simulation_physics["passive_spring"]["damper_0"]["stiffness"] == 12.0
 
 
+@pytest.mark.parametrize("pwm_cap", [1e-12, 0.5, 1.0])
+def test_profile_accepts_normalized_pwm_cap_through_one(pwm_cap: float) -> None:
+    profile = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "valid-cap",
+            "hardware_mapping": {"pwm_cap": {"main_0": pwm_cap}},
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+
+    assert profile.hardware_mapping["pwm_cap"]["main_0"] == pwm_cap
+
+
+@pytest.mark.parametrize("pwm_cap", [0.0, -0.1, 1.000001, 2.0])
+def test_profile_rejects_normalized_pwm_cap_outside_open_closed_unit_interval(
+    pwm_cap: float,
+) -> None:
+    with pytest.raises(ContractError, match="pwm_cap"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "invalid-cap",
+                "hardware_mapping": {"pwm_cap": {"main_0": pwm_cap}},
+                "sensor_timing": {},
+                "simulation_physics": {},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [

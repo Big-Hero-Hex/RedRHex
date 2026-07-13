@@ -481,8 +481,13 @@ class CalibrationProfileV1:
                     if value not in {-1, 1} or isinstance(value, bool):
                         raise ContractError(f"{path} must be -1 or 1")
                     clean[joint] = int(value)
-                elif key in {"gear_ratio", "pwm_scale", "pwm_cap"}:
+                elif key in {"gear_ratio", "pwm_scale"}:
                     clean[joint] = _positive(value, path)
+                elif key == "pwm_cap":
+                    cap = _positive(value, path)
+                    if cap > 1.0:
+                        raise ContractError(f"{path} must be at most 1")
+                    clean[joint] = cap
                 elif key == "actuator_id":
                     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                         raise ContractError(f"{path} must be a non-negative integer")
