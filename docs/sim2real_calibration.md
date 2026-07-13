@@ -60,7 +60,7 @@ Preview the bounded probe before starting ROS output:
 ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --dry-run
 ```
 
-The probe has a fixed 60 Hz, three-repeat, low-energy sequence. Its only selectable physical output is main-drive index `0..5`; amplitude, rate, durations, waveform, and safety checks are not CLI parameters. Actual output requires both `--enable` and `--confirm-risk`.
+The probe has a fixed 60 Hz, three-repeat, low-energy sequence. Its only selectable physical output is main-drive index `0..5`; amplitude, rate, durations, waveform, and safety checks are not CLI parameters. Actual output requires both `--enable` and `--confirm-risk`. Every tick requires the probe to be the sole `/redrhex/motor_commands` publisher, and a scheduler delay beyond one 60 Hz period aborts instead of replaying stale commands in a burst.
 
 Only after every prerequisite above has been physically verified, start the reviewed sequence with:
 
