@@ -10,7 +10,7 @@ import pytest
 from tools.sim2real.contracts import ContractError
 from tools.sim2real.dataset import import_real_dataset
 from tools.sim2real.scenarios import load_scenario
-from tools.sim2real.traces import load_trace, sha256_path, write_trace
+from tools.sim2real.traces import load_trace, sha256_file, sha256_path, write_trace
 
 
 def _valid_arrays() -> dict[str, np.ndarray]:
@@ -113,12 +113,46 @@ def test_trace_loader_rejects_hash_mismatch(tmp_path: Path) -> None:
 
 def test_dataset_episode_manifest_links_its_authoritative_raw_copy(tmp_path: Path) -> None:
     imported = _imported_dataset(tmp_path)
-    loaded = load_trace(imported.episode)
+    loaded = load_trace(imported.episode, require_managed_dataset=True)
 
     assert imported.manifest["episodes"][0]["raw_path"] == imported.manifest["raw"][0][
         "path"
     ]
     assert loaded.manifest.scenario_id == "main-step"
+    assert loaded.metadata_sha256 == sha256_file(imported.episode / "metadata.json")
+    assert loaded.dataset is not None
+    assert loaded.dataset.dataset_id == "integrity"
+    assert loaded.dataset.episode_id == "run-1"
+    assert loaded.dataset.metadata_sha256 == loaded.metadata_sha256
+    assert loaded.dataset.raw_sha256 == imported.manifest["raw"][0]["sha256"]
+
+
+def test_required_managed_dataset_rejects_standalone_real_trace(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.bin"
+    raw.write_bytes(b"not a managed dataset")
+    episode = tmp_path / "standalone"
+    write_trace(
+        episode,
+        _valid_arrays(),
+        scenario="main-step",
+        source="real",
+        source_path=raw,
+    )
+
+    with pytest.raises(ContractError, match="managed dataset"):
+        load_trace(episode, require_managed_dataset=True)
+
+
+def test_expected_metadata_hash_rejects_standalone_metadata_edit(tmp_path: Path) -> None:
+    episode = tmp_path / "sim"
+    write_trace(episode, _valid_arrays(), scenario="main-step", source="sim")
+    expected = sha256_file(episode / "metadata.json")
+    payload = json.loads((episode / "metadata.json").read_text(encoding="utf-8"))
+    payload["metadata"]["frames"]["position"] = "tampered-frame"
+    (episode / "metadata.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="metadata hash mismatch"):
+        load_trace(episode, expected_metadata_sha256=expected)
 
 
 def test_dataset_trace_loader_rejects_mutated_copied_raw_source(tmp_path: Path) -> None:

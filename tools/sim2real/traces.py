@@ -25,11 +25,24 @@ class LoadedTrace:
     manifest: TraceManifestV1
     arrays: dict[str, np.ndarray]
     directory: Path
+    metadata_sha256: str
+    dataset: "DatasetIdentity | None" = None
+
+
+@dataclass(frozen=True)
+class DatasetIdentity:
+    dataset_id: str
+    episode_id: str
+    metadata_sha256: str
+    raw_path: str
+    raw_sha256: str
+    root: Path
 
 
 @dataclass(frozen=True)
 class _DatasetLink:
     root: Path
+    dataset_id: str
     episode: Mapping[str, Any]
     raw_entries: tuple[Mapping[str, Any], ...]
 
@@ -86,6 +99,9 @@ def _dataset_link(directory: Path) -> _DatasetLink | None:
         raise ContractError(f"dataset manifest is invalid: {exc}") from exc
     if not isinstance(payload, Mapping) or payload.get("schema_version") != 1:
         raise ContractError("dataset manifest has an invalid schema version")
+    dataset_id = payload.get("dataset_id")
+    if not isinstance(dataset_id, str) or not dataset_id:
+        raise ContractError("dataset manifest has an invalid dataset identity")
     episodes = payload.get("episodes")
     raw_entries = payload.get("raw")
     if not isinstance(episodes, list) or not isinstance(raw_entries, list):
@@ -100,7 +116,7 @@ def _dataset_link(directory: Path) -> _DatasetLink | None:
         raise ContractError("dataset manifest must link the episode exactly once")
     if not all(isinstance(item, Mapping) for item in raw_entries):
         raise ContractError("dataset manifest raw entries must be objects")
-    return _DatasetLink(root, matches[0], tuple(raw_entries))
+    return _DatasetLink(root, dataset_id, matches[0], tuple(raw_entries))
 
 
 def _dataset_sha(record: Mapping[str, Any], field: str) -> str:
@@ -135,7 +151,9 @@ def _verify_dataset_metadata(link: _DatasetLink, metadata_path: Path) -> None:
         raise ContractError("dataset metadata hash mismatch")
 
 
-def _verify_dataset_sources(link: _DatasetLink, manifest: TraceManifestV1) -> None:
+def _verify_dataset_sources(
+    link: _DatasetLink, manifest: TraceManifestV1
+) -> tuple[str, str]:
     episode = link.episode
     if episode.get("episode_id") != link.root.joinpath(episode["path"]).name:
         raise ContractError("dataset episode identity/path mismatch")
@@ -172,6 +190,7 @@ def _verify_dataset_sources(link: _DatasetLink, manifest: TraceManifestV1) -> No
         raise ContractError("dataset raw source is missing or invalid") from exc
     if actual_raw_hash != expected_raw_hash:
         raise ContractError("dataset raw source hash mismatch")
+    return str(raw_path), expected_raw_hash
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -402,20 +421,43 @@ def load_trace(
     scenario: ScenarioSpecV1 | str | Path | None = None,
     profile: CalibrationProfileV1 | None = None,
     verify_hashes: bool = True,
+    require_managed_dataset: bool = False,
+    expected_metadata_sha256: str | None = None,
     expected_units: Mapping[str, str] | None = None,
     expected_frames: Mapping[str, str] | None = None,
 ) -> LoadedTrace:
     path = Path(value)
     directory = path if path.is_dir() or path.suffix != ".npz" else path.parent
     dataset_link = _dataset_link(directory) if verify_hashes else None
+    if require_managed_dataset and dataset_link is None:
+        raise ContractError("trace must be linked through a verified managed dataset")
     metadata_path = directory / "metadata.json"
     if dataset_link is not None:
         _verify_dataset_metadata(dataset_link, metadata_path)
     if not metadata_path.exists():
         metadata_path = directory / "manifest.json"
+    metadata_sha256 = sha256_file(metadata_path)
+    if expected_metadata_sha256 is not None:
+        if (
+            not isinstance(expected_metadata_sha256, str)
+            or len(expected_metadata_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_metadata_sha256)
+        ):
+            raise ContractError("expected metadata SHA-256 digest is invalid")
+        if metadata_sha256 != expected_metadata_sha256:
+            raise ContractError("metadata hash mismatch")
     manifest = load_manifest(metadata_path)
+    dataset_identity = None
     if dataset_link is not None:
-        _verify_dataset_sources(dataset_link, manifest)
+        raw_path, raw_sha256 = _verify_dataset_sources(dataset_link, manifest)
+        dataset_identity = DatasetIdentity(
+            dataset_id=dataset_link.dataset_id,
+            episode_id=str(dataset_link.episode["episode_id"]),
+            metadata_sha256=metadata_sha256,
+            raw_path=raw_path,
+            raw_sha256=raw_sha256,
+            root=dataset_link.root,
+        )
     trace_path = directory / manifest.trace_file
     if verify_hashes and sha256_file(trace_path) != manifest.provenance["trace_sha256"]:
         raise ContractError("trace hash mismatch")
@@ -455,4 +497,10 @@ def load_trace(
                 raise ContractError(
                     f"expected {label} {value!r} for {channel}, got {actual.get(channel)!r}"
                 )
-    return LoadedTrace(manifest=manifest, arrays=arrays, directory=directory)
+    return LoadedTrace(
+        manifest=manifest,
+        arrays=arrays,
+        directory=directory,
+        metadata_sha256=metadata_sha256,
+        dataset=dataset_identity,
+    )
