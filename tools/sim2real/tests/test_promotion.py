@@ -336,6 +336,95 @@ def _audit_evidence(
     scenario = load_scenario("audit")
     run = root / "runtime-audit-run"
     time_s = np.array([0.0, 0.05, 0.1])
+    runtime_joint_names = [
+        "Revolute_15",
+        "Revolute_7",
+        "Revolute_12",
+        "Revolute_18",
+        "Revolute_23",
+        "Revolute_24",
+        "Revolute_14",
+        "Revolute_6",
+        "Revolute_11",
+        "Revolute_17",
+        "Revolute_22",
+        "Revolute_21",
+        "Revolute_5",
+        "Revolute_8",
+        "Revolute_13",
+        "Revolute_25",
+        "Revolute_26",
+        "Revolute_27",
+    ]
+    canonical_joint_names = [
+        *(f"main_{index}" for index in range(6)),
+        *(f"abad_{index}" for index in range(6)),
+        *(f"damper_{index}" for index in range(6)),
+    ]
+    collision_body_names = [
+        "base_link",
+        "left_feet_1",
+        "left_feet_2",
+        "left_feet_3",
+        "right_feet_1",
+        "right_feet_2",
+        "right_feet_3",
+    ]
+    runtime_audit = {
+        "schema_version": 2,
+        "mode": "contact",
+        "physics_dt_s": 1.0 / 120.0,
+        "num_envs": 1,
+        "joint_names": runtime_joint_names,
+        "body_names": collision_body_names,
+        "body_properties": {
+            "mass_kg": [[4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]],
+            "total_mass_kg": 10.0,
+            "inertia_kg_m2_matrix": [
+                [[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]] * 7
+            ],
+            "com_pose_xyz_xyzw": [
+                [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]] * 7
+            ],
+            "aggregate_com_body_m": [0.1, -0.05, 0.0],
+        },
+        "joint_geometry": [
+            {
+                "canonical_joint": canonical,
+                "runtime_joint": runtime,
+                "articulation_index": index,
+                "axis": "Z",
+                "range_kind": "continuous",
+                "lower_limit_rad": None,
+                "upper_limit_rad": None,
+            }
+            for index, (canonical, runtime) in enumerate(
+                zip(canonical_joint_names, runtime_joint_names, strict=True)
+            )
+        ],
+        "collision_geometry": [
+            {
+                "prim_path": f"/World/envs/env_0/Robot/test_7/{name}/collisions",
+                "type_name": "Xform",
+                "has_collision_api": True,
+                "is_geometry": False,
+            }
+            for name in collision_body_names
+        ],
+        "contact_sensors": {
+            "foot": {
+                "body_names": [
+                    "left_feet_1",
+                    "left_feet_2",
+                    "left_feet_3",
+                    "right_feet_1",
+                    "right_feet_2",
+                    "right_feet_3",
+                ],
+                "body_count": 6,
+            }
+        },
+    }
     write_trace(
         run,
         {
@@ -356,34 +445,17 @@ def _audit_evidence(
         metadata={
             "units": {"audit_value": "kg", "contact_force_n": "N"},
             "frames": {"audit_value": "scalar", "contact_force_n": "world"},
+            "calibration_constants": {
+                "runtime_audit_sha256": sha256_json(runtime_audit),
+            },
         },
     )
-    runtime_audit = {
-        "schema_version": 1,
-        "mode": "contact",
-        "physics_dt_s": 1.0 / 120.0,
-        "num_envs": 1,
-        "body_properties": {"total_mass_kg": 10.0},
-        "contact_sensors": {
-            "foot": {
-                "body_names": [
-                    "left_feet_1",
-                    "left_feet_2",
-                    "left_feet_3",
-                    "right_feet_1",
-                    "right_feet_2",
-                    "right_feet_3",
-                ],
-                "body_count": 6,
-            }
-        },
-    }
     runtime_audit_hash = _write_json(run / "runtime_audit.json", runtime_audit)
     physical_path = root / "physical-audit.json"
     physical_hash = _write_json(
         physical_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "units": {
                 "encoder_position": "rad",
                 "main_command": "rad/s",
@@ -396,16 +468,43 @@ def _audit_evidence(
                 "imu_gravity": "imu_mount",
                 "contact_force": "world",
             },
-            "joint_sign_observations": [
+            "joint_geometry": [
+                {
+                    "canonical_joint": canonical,
+                    "runtime_joint": runtime,
+                    "expected_axis": "Z",
+                    "range_kind": "continuous",
+                    "mechanical_min_rad": None,
+                    "mechanical_max_rad": None,
+                    "range_uncertainty_rad": 0.01,
+                }
+                for canonical, runtime in zip(
+                    canonical_joint_names, runtime_joint_names, strict=True
+                )
+            ],
+            "encoder_observations": [
                 {
                     "joint": f"main_{index}",
-                    "encoder_delta_rad": 0.1,
-                    "physical_delta_rad": 0.1,
+                    "raw_start_count": 0.0,
+                    "raw_end_count": 54984.83 / 4.0,
+                    "physical_delta_rad": np.pi / 2.0,
+                    "observed_counts_per_rev": 54984.83,
+                    "counts_per_rev_uncertainty": 1.0,
+                    "observed_zero_count": 0.0,
+                    "zero_count_uncertainty": 1.0,
+                    "angle_uncertainty_rad": 0.01,
                 }
                 for index in range(6)
             ],
             "mass_measurements_kg": [9.9, 10.0, 10.1],
             "mass_instrument_uncertainty_kg": 0.25,
+            "planar_com_measurements_m": [
+                [0.1, -0.05],
+                [0.101, -0.049],
+                [0.099, -0.051],
+            ],
+            "com_instrument_uncertainty_m": 0.005,
+            "collision_body_names": collision_body_names,
             "imu_rest_orientations": [
                 {
                     "label": "upright",
@@ -666,6 +765,104 @@ def test_promotion_resolves_artifacts_and_derives_repetitions_metrics_and_fitted
     assert metric["absolute_error"] <= metric["tolerance"]
     assert "score" not in str(result).lower()
     assert result["evidence_sha256"] == sha256_json(evidence)
+    assert result["audit"]["checks"] == {
+        "units_pass": True,
+        "frames_pass": True,
+        "joint_order_pass": True,
+        "joint_axis_pass": True,
+        "encoder_scale_zero_pass": True,
+        "joint_sign_pass": True,
+        "mechanical_range_pass": True,
+        "mass_pass": True,
+        "inertia_com_pass": True,
+        "planar_com_pass": True,
+        "collision_geometry_pass": True,
+        "imu_mount_pass": True,
+        "contact_sensor_pass": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutate", "failed_check"),
+    [
+        (lambda audit: audit["joint_geometry"].reverse(), "joint_order_pass"),
+        (
+            lambda audit: audit["joint_geometry"][0].__setitem__(
+                "expected_axis", "X"
+            ),
+            "joint_axis_pass",
+        ),
+        (
+            lambda audit: audit["encoder_observations"][0].__setitem__(
+                "observed_counts_per_rev", 50000.0
+            ),
+            "encoder_scale_zero_pass",
+        ),
+        (
+            lambda audit: audit["encoder_observations"][0].__setitem__(
+                "raw_end_count", -54984.83 / 4.0
+            ),
+            "joint_sign_pass",
+        ),
+        (
+            lambda audit: audit["joint_geometry"][0].update(
+                {
+                    "range_kind": "limited",
+                    "mechanical_min_rad": -1.0,
+                    "mechanical_max_rad": 1.0,
+                }
+            ),
+            "mechanical_range_pass",
+        ),
+        (
+            lambda audit: audit.__setitem__(
+                "planar_com_measurements_m", [[1.0, 1.0]] * 3
+            ),
+            "planar_com_pass",
+        ),
+        (
+            lambda audit: audit.__setitem__(
+                "collision_body_names", audit["collision_body_names"][:-1]
+            ),
+            "collision_geometry_pass",
+        ),
+    ],
+    ids=(
+        "joint-order",
+        "joint-axis",
+        "encoder-scale-zero",
+        "encoder-sign",
+        "mechanical-range",
+        "planar-com",
+        "collision-geometry",
+    ),
+)
+def test_geometry_audit_derives_explicit_failures_from_measurements(
+    tmp_path: Path, mutate, failed_check: str
+) -> None:
+    profile, evidence = _fixture(tmp_path)
+    physical_binding = evidence["audit_artifact"]["physical_measurements"]
+    physical_path = tmp_path / physical_binding["path"]
+    physical = json.loads(physical_path.read_text())
+    mutate(physical)
+    physical_binding["sha256"] = _write_json(physical_path, physical)
+
+    result = evaluate_promotion(profile, evidence, artifact_root=tmp_path)
+
+    assert result["audit"]["checks"][failed_check] is False
+    assert any(f"audit.{failed_check}" in item for item in result["failures"])
+
+
+def test_runtime_audit_json_must_be_content_bound_to_its_trace(tmp_path: Path) -> None:
+    profile, evidence = _fixture(tmp_path)
+    runtime_binding = evidence["audit_artifact"]["runtime_audit"]
+    runtime_path = tmp_path / runtime_binding["path"]
+    runtime = json.loads(runtime_path.read_text())
+    runtime["body_properties"]["total_mass_kg"] = 11.0
+    runtime_binding["sha256"] = _write_json(runtime_path, runtime)
+
+    with pytest.raises(ContractError, match="not bound to its audit trace"):
+        evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
 
 def test_promotion_rejects_real_trace_outside_managed_dataset(tmp_path: Path) -> None:
@@ -944,11 +1141,18 @@ def test_validate_promotion_cli_resolves_paths_relative_to_evidence(
 def _direct_measurement_fixture(
     root: Path, *, subsystem: str
 ) -> tuple[CalibrationProfileV1, dict[str, object]]:
+    main_joints = [f"main_{index}" for index in range(6)]
     baseline = CalibrationProfileV1.from_dict(
         {
             "schema_version": 1,
             "profile_id": "baseline",
-            "hardware_mapping": {},
+            "hardware_mapping": {
+                "encoder_counts_per_rev": {
+                    joint: 54984.83 for joint in main_joints
+                },
+                "encoder_zero_count": {joint: 0.0 for joint in main_joints},
+                "encoder_sign": {joint: 1 for joint in main_joints},
+            },
             "sensor_timing": {},
             "simulation_physics": {
                 "ground": {"static_friction": 0.5, "dynamic_friction": 0.3}

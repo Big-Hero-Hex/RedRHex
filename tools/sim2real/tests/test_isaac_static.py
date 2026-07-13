@@ -90,6 +90,11 @@ def test_characterization_runner_is_finite_one_env_and_direct_targeted() -> None
     assert "root_physx_view.get_masses()" in source
     assert "root_physx_view.get_inertias()" in source
     assert "root_physx_view.get_coms()" in source
+    assert "body_com_pos_w" in source
+    assert '"aggregate_com_body_m"' in source
+    assert '"joint_geometry"' in source
+    assert "UsdPhysics.RevoluteJoint" in source
+    assert '"runtime_audit_sha256"' in source
     assert "UsdGeom.Gprim" in source
     assert "Usd.TraverseInstanceProxies()" in source
     assert "joint_effort_estimate" in source

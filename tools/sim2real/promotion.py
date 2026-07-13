@@ -24,8 +24,15 @@ _METRIC_PATH = re.compile(r"[a-z][a-z0-9_.-]*")
 _AUDIT_FIELDS = {
     "units_pass",
     "frames_pass",
+    "joint_order_pass",
+    "joint_axis_pass",
+    "encoder_scale_zero_pass",
     "joint_sign_pass",
+    "mechanical_range_pass",
     "mass_pass",
+    "inertia_com_pass",
+    "planar_com_pass",
+    "collision_geometry_pass",
     "imu_mount_pass",
     "contact_sensor_pass",
 }
@@ -42,6 +49,12 @@ _EXPECTED_AUDIT_FRAMES = {
     "contact_force": "world",
 }
 _HELD_OUT_DIMENSIONS = {"leg", "direction", "command_level", "load"}
+_CANONICAL_JOINTS = tuple(
+    [*(f"main_{index}" for index in range(6))]
+    + [*(f"abad_{index}" for index in range(6))]
+    + [*(f"damper_{index}" for index in range(6))]
+)
+_MAIN_JOINTS = tuple(f"main_{index}" for index in range(6))
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -481,6 +494,54 @@ def _numeric_vector(value: Any, name: str, *, length: int) -> np.ndarray:
     return result
 
 
+def _numeric_array(value: Any, name: str) -> np.ndarray:
+    def clean(raw: Any, path: str) -> Any:
+        if isinstance(raw, list):
+            return [clean(item, f"{path}[{index}]") for index, item in enumerate(raw)]
+        return _number(raw, path)
+
+    if not isinstance(value, list):
+        raise ContractError(f"{name} must be a numeric array")
+    try:
+        result = np.asarray(clean(value, name), dtype=float)
+    except ValueError as exc:
+        raise ContractError(f"{name} must be a rectangular numeric array") from exc
+    return result
+
+
+def _string_array(value: Any, name: str) -> list[str]:
+    if not isinstance(value, list) or not value or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise ContractError(f"{name} must be a non-empty array of strings")
+    if len(set(value)) != len(value):
+        raise ContractError(f"{name} must contain unique values")
+    return list(value)
+
+
+def _range(
+    record: Mapping[str, Any],
+    *,
+    name: str,
+    lower_field: str,
+    upper_field: str,
+) -> tuple[str, float | None, float | None]:
+    kind = record.get("range_kind")
+    if kind not in {"continuous", "limited"}:
+        raise ContractError(f"{name} range_kind must be continuous or limited")
+    lower_raw = record.get(lower_field)
+    upper_raw = record.get(upper_field)
+    if kind == "continuous":
+        if lower_raw is not None or upper_raw is not None:
+            raise ContractError(f"{name} continuous range must use null limits")
+        return kind, None, None
+    lower = _number(lower_raw, f"{name} {lower_field}")
+    upper = _number(upper_raw, f"{name} {upper_field}")
+    if lower >= upper:
+        raise ContractError(f"{name} lower limit must be smaller than its upper limit")
+    return kind, lower, upper
+
+
 def _derive_audit(
     root: Path,
     value: Any,
@@ -507,17 +568,164 @@ def _derive_audit(
     if runtime_path != runtime_trace.directory / "runtime_audit.json":
         raise ContractError("runtime audit must be the bound runtime_trace sibling")
     runtime = _json(runtime_path, "runtime audit")
-    if runtime.get("schema_version") != 1 or isinstance(runtime.get("schema_version"), bool):
-        raise ContractError("runtime audit schema_version must be 1")
+    if runtime.get("schema_version") != 2 or isinstance(runtime.get("schema_version"), bool):
+        raise ContractError("runtime audit schema_version must be 2")
+    trace_constants = _mapping(
+        runtime_trace.manifest.metadata.get("calibration_constants"),
+        "audit trace calibration_constants",
+    )
+    trace_runtime_hash = _sha(
+        trace_constants.get("runtime_audit_sha256"),
+        "audit trace runtime_audit_sha256",
+    )
+    if trace_runtime_hash != sha256_json(runtime):
+        raise ContractError("runtime audit JSON is not bound to its audit trace")
     if runtime.get("num_envs") != 1 or isinstance(runtime.get("num_envs"), bool):
         raise ContractError("runtime audit must describe one environment")
     physics_dt = _number(runtime.get("physics_dt_s"), "runtime audit physics_dt_s")
     if not math.isclose(physics_dt, PHYSICS_DT, rel_tol=0.0, abs_tol=1.0e-12):
         raise ContractError("runtime audit physics_dt_s must be 1/120 s")
+
+    runtime_joint_names = _string_array(
+        runtime.get("joint_names"), "runtime audit joint_names"
+    )
+    runtime_geometry_raw = runtime.get("joint_geometry")
+    if not isinstance(runtime_geometry_raw, list) or len(runtime_geometry_raw) != len(
+        _CANONICAL_JOINTS
+    ):
+        raise ContractError("runtime audit joint_geometry must contain all 18 joints")
+    runtime_geometry: list[dict[str, Any]] = []
+    for index, raw in enumerate(runtime_geometry_raw):
+        record = _mapping(raw, f"runtime joint_geometry[{index}]")
+        _exact_fields(
+            record,
+            name="runtime joint geometry",
+            required={
+                "canonical_joint",
+                "runtime_joint",
+                "articulation_index",
+                "axis",
+                "range_kind",
+                "lower_limit_rad",
+                "upper_limit_rad",
+            },
+        )
+        canonical = _identifier(
+            record["canonical_joint"], "runtime joint canonical_joint"
+        )
+        runtime_name = record["runtime_joint"]
+        if not isinstance(runtime_name, str) or not runtime_name:
+            raise ContractError("runtime joint runtime_joint must be a non-empty string")
+        articulation_index = record["articulation_index"]
+        if (
+            isinstance(articulation_index, bool)
+            or not isinstance(articulation_index, int)
+            or not 0 <= articulation_index < len(runtime_joint_names)
+        ):
+            raise ContractError("runtime joint articulation_index is invalid")
+        axis = record["axis"]
+        if axis not in {"X", "Y", "Z"}:
+            raise ContractError("runtime joint axis must be X, Y, or Z")
+        kind, lower, upper = _range(
+            record,
+            name=f"runtime joint {canonical}",
+            lower_field="lower_limit_rad",
+            upper_field="upper_limit_rad",
+        )
+        runtime_geometry.append(
+            {
+                "canonical_joint": canonical,
+                "runtime_joint": runtime_name,
+                "articulation_index": articulation_index,
+                "axis": axis,
+                "range_kind": kind,
+                "lower_limit_rad": lower,
+                "upper_limit_rad": upper,
+            }
+        )
+    runtime_mapping_valid = (
+        tuple(record["canonical_joint"] for record in runtime_geometry)
+        == _CANONICAL_JOINTS
+        and len({record["runtime_joint"] for record in runtime_geometry})
+        == len(_CANONICAL_JOINTS)
+        and len({record["articulation_index"] for record in runtime_geometry})
+        == len(_CANONICAL_JOINTS)
+        and all(
+            runtime_joint_names[record["articulation_index"]]
+            == record["runtime_joint"]
+            for record in runtime_geometry
+        )
+    )
+
+    body_names = _string_array(runtime.get("body_names"), "runtime audit body_names")
     bodies = _mapping(runtime.get("body_properties"), "runtime audit body_properties")
     runtime_mass = _number(bodies.get("total_mass_kg"), "runtime audit total_mass_kg")
     if runtime_mass <= 0.0:
         raise ContractError("runtime audit total_mass_kg must be positive")
+    masses = _numeric_array(bodies.get("mass_kg"), "runtime audit mass_kg")
+    inertias = _numeric_array(
+        bodies.get("inertia_kg_m2_matrix"), "runtime audit inertia_kg_m2_matrix"
+    )
+    com_poses = _numeric_array(
+        bodies.get("com_pose_xyz_xyzw"), "runtime audit com_pose_xyz_xyzw"
+    )
+    aggregate_com = _numeric_vector(
+        bodies.get("aggregate_com_body_m"),
+        "runtime audit aggregate_com_body_m",
+        length=3,
+    )
+    body_count = len(body_names)
+    inertia_com_pass = (
+        masses.shape == (1, body_count)
+        and inertias.shape == (1, body_count, 9)
+        and com_poses.shape == (1, body_count, 7)
+    )
+    if inertia_com_pass:
+        inertia_matrices = inertias[0].reshape(body_count, 3, 3)
+        symmetric = np.allclose(
+            inertia_matrices,
+            np.swapaxes(inertia_matrices, 1, 2),
+            rtol=0.0,
+            atol=1.0e-9,
+        )
+        positive_semidefinite = all(
+            float(np.min(np.linalg.eigvalsh(matrix))) >= -1.0e-9
+            for matrix in inertia_matrices
+        )
+        quaternion_norms = np.linalg.norm(com_poses[0, :, 3:7], axis=1)
+        inertia_com_pass = bool(
+            np.all(masses > 0.0)
+            and math.isclose(
+                float(np.sum(masses)), runtime_mass, rel_tol=0.0, abs_tol=1.0e-6
+            )
+            and symmetric
+            and positive_semidefinite
+            and np.all(quaternion_norms > 0.0)
+        )
+
+    audit_value = runtime_trace.arrays.get("audit_value")
+    if (
+        audit_value is None
+        or audit_value.size == 0
+        or not np.allclose(audit_value, runtime_mass, rtol=0.0, atol=1.0e-6)
+    ):
+        raise ContractError("audit trace audit_value does not match runtime total mass")
+
+    collision_raw = runtime.get("collision_geometry")
+    if not isinstance(collision_raw, list) or not collision_raw:
+        raise ContractError("runtime audit collision_geometry must be non-empty")
+    collision_paths: list[str] = []
+    for index, raw in enumerate(collision_raw):
+        collision = _mapping(raw, f"runtime collision_geometry[{index}]")
+        path = collision.get("prim_path")
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ContractError("runtime collision prim_path must be absolute")
+        has_api = collision.get("has_collision_api")
+        if not isinstance(has_api, bool):
+            raise ContractError("runtime collision has_collision_api must be boolean")
+        if has_api:
+            collision_paths.append(path)
+
     sensors = _mapping(runtime.get("contact_sensors"), "runtime audit contact_sensors")
     foot_sensor = _mapping(sensors.get("foot"), "runtime audit foot contact sensor")
     foot_names = foot_sensor.get("body_names")
@@ -538,48 +746,203 @@ def _derive_audit(
             "schema_version",
             "units",
             "frames",
-            "joint_sign_observations",
+            "joint_geometry",
+            "encoder_observations",
             "mass_measurements_kg",
             "mass_instrument_uncertainty_kg",
+            "planar_com_measurements_m",
+            "com_instrument_uncertainty_m",
+            "collision_body_names",
             "imu_rest_orientations",
         },
     )
-    if physical["schema_version"] != 1 or isinstance(physical["schema_version"], bool):
-        raise ContractError("physical audit schema_version must be 1")
+    if physical["schema_version"] != 2 or isinstance(physical["schema_version"], bool):
+        raise ContractError("physical audit schema_version must be 2")
     units = _mapping(physical["units"], "physical audit units")
     frames = _mapping(physical["frames"], "physical audit frames")
     units_pass = units == _EXPECTED_AUDIT_UNITS
     frames_pass = frames == _EXPECTED_AUDIT_FRAMES
 
-    raw_signs = physical["joint_sign_observations"]
-    if not isinstance(raw_signs, list):
-        raise ContractError("joint_sign_observations must be an array")
-    observed_signs: dict[str, bool] = {}
-    for index, raw in enumerate(raw_signs):
-        observation = _mapping(raw, f"joint_sign_observations[{index}]")
+    physical_geometry_raw = physical["joint_geometry"]
+    if not isinstance(physical_geometry_raw, list) or len(physical_geometry_raw) != len(
+        _CANONICAL_JOINTS
+    ):
+        raise ContractError("physical joint_geometry must contain all 18 joints")
+    physical_geometry: list[dict[str, Any]] = []
+    for index, raw in enumerate(physical_geometry_raw):
+        record = _mapping(raw, f"physical joint_geometry[{index}]")
+        _exact_fields(
+            record,
+            name="physical joint geometry",
+            required={
+                "canonical_joint",
+                "runtime_joint",
+                "expected_axis",
+                "range_kind",
+                "mechanical_min_rad",
+                "mechanical_max_rad",
+                "range_uncertainty_rad",
+            },
+        )
+        canonical = _identifier(
+            record["canonical_joint"], "physical joint canonical_joint"
+        )
+        runtime_name = record["runtime_joint"]
+        if not isinstance(runtime_name, str) or not runtime_name:
+            raise ContractError("physical joint runtime_joint must be a non-empty string")
+        axis = record["expected_axis"]
+        if axis not in {"X", "Y", "Z"}:
+            raise ContractError("physical joint expected_axis must be X, Y, or Z")
+        kind, lower, upper = _range(
+            record,
+            name=f"physical joint {canonical}",
+            lower_field="mechanical_min_rad",
+            upper_field="mechanical_max_rad",
+        )
+        physical_geometry.append(
+            {
+                "canonical_joint": canonical,
+                "runtime_joint": runtime_name,
+                "expected_axis": axis,
+                "range_kind": kind,
+                "mechanical_min_rad": lower,
+                "mechanical_max_rad": upper,
+                "range_uncertainty_rad": _number(
+                    record["range_uncertainty_rad"],
+                    f"physical joint {canonical} range_uncertainty_rad",
+                    nonnegative=True,
+                ),
+            }
+        )
+    physical_order_valid = (
+        tuple(record["canonical_joint"] for record in physical_geometry)
+        == _CANONICAL_JOINTS
+        and len({record["runtime_joint"] for record in physical_geometry})
+        == len(_CANONICAL_JOINTS)
+    )
+    joint_order_pass = runtime_mapping_valid and physical_order_valid and all(
+        physical_record["runtime_joint"] == runtime_record["runtime_joint"]
+        for physical_record, runtime_record in zip(
+            physical_geometry, runtime_geometry, strict=True
+        )
+    )
+    joint_axis_pass = joint_order_pass and all(
+        physical_record["expected_axis"] == runtime_record["axis"]
+        for physical_record, runtime_record in zip(
+            physical_geometry, runtime_geometry, strict=True
+        )
+    )
+    range_results: list[bool] = []
+    for physical_record, runtime_record in zip(
+        physical_geometry, runtime_geometry, strict=True
+    ):
+        same_kind = physical_record["range_kind"] == runtime_record["range_kind"]
+        if not same_kind:
+            range_results.append(False)
+        elif physical_record["range_kind"] == "continuous":
+            range_results.append(True)
+        else:
+            tolerance = physical_record["range_uncertainty_rad"]
+            range_results.append(
+                abs(
+                    physical_record["mechanical_min_rad"]
+                    - runtime_record["lower_limit_rad"]
+                )
+                <= tolerance
+                and abs(
+                    physical_record["mechanical_max_rad"]
+                    - runtime_record["upper_limit_rad"]
+                )
+                <= tolerance
+            )
+    mechanical_range_pass = joint_order_pass and all(range_results)
+
+    raw_encoders = physical["encoder_observations"]
+    if not isinstance(raw_encoders, list) or len(raw_encoders) != len(_MAIN_JOINTS):
+        raise ContractError("encoder_observations must contain all six main joints")
+    counts_mapping = candidate.hardware_mapping.get("encoder_counts_per_rev", {})
+    zero_mapping = candidate.hardware_mapping.get("encoder_zero_count", {})
+    sign_mapping = candidate.hardware_mapping.get("encoder_sign", {})
+    mapping_complete = all(
+        isinstance(mapping, Mapping) and set(mapping) == set(_MAIN_JOINTS)
+        for mapping in (counts_mapping, zero_mapping, sign_mapping)
+    )
+    encoder_scale_zero_results: list[bool] = []
+    joint_sign_results: list[bool] = []
+    observed_encoder_order: list[str] = []
+    for index, raw in enumerate(raw_encoders):
+        observation = _mapping(raw, f"encoder_observations[{index}]")
         _exact_fields(
             observation,
-            name="joint sign observation",
-            required={"joint", "encoder_delta_rad", "physical_delta_rad"},
+            name="encoder observation",
+            required={
+                "joint",
+                "raw_start_count",
+                "raw_end_count",
+                "physical_delta_rad",
+                "observed_counts_per_rev",
+                "counts_per_rev_uncertainty",
+                "observed_zero_count",
+                "zero_count_uncertainty",
+                "angle_uncertainty_rad",
+            },
         )
-        joint = _identifier(observation["joint"], "joint sign observation joint")
-        if joint in observed_signs:
-            raise ContractError("joint_sign_observations joints must be unique")
-        encoder_delta = _number(
-            observation["encoder_delta_rad"], "joint sign encoder_delta_rad"
-        )
+        joint = _identifier(observation["joint"], "encoder observation joint")
+        observed_encoder_order.append(joint)
+        raw_start = _number(observation["raw_start_count"], "raw_start_count")
+        raw_end = _number(observation["raw_end_count"], "raw_end_count")
         physical_delta = _number(
-            observation["physical_delta_rad"], "joint sign physical_delta_rad"
+            observation["physical_delta_rad"], "physical_delta_rad"
         )
-        observed_signs[joint] = (
-            encoder_delta != 0.0
-            and physical_delta != 0.0
-            and encoder_delta * physical_delta > 0.0
+        observed_counts = _number(
+            observation["observed_counts_per_rev"],
+            "observed_counts_per_rev",
         )
-    expected_main_joints = {f"main_{index}" for index in range(6)}
-    joint_sign_pass = set(observed_signs) == expected_main_joints and all(
-        observed_signs.values()
+        if observed_counts <= 0.0:
+            raise ContractError("observed_counts_per_rev must be positive")
+        counts_uncertainty = _number(
+            observation["counts_per_rev_uncertainty"],
+            "counts_per_rev_uncertainty",
+            nonnegative=True,
+        )
+        observed_zero = _number(
+            observation["observed_zero_count"], "observed_zero_count"
+        )
+        zero_uncertainty = _number(
+            observation["zero_count_uncertainty"],
+            "zero_count_uncertainty",
+            nonnegative=True,
+        )
+        angle_uncertainty = _number(
+            observation["angle_uncertainty_rad"],
+            "angle_uncertainty_rad",
+            nonnegative=True,
+        )
+        if mapping_complete and joint in _MAIN_JOINTS:
+            candidate_counts = float(counts_mapping[joint])
+            candidate_zero = float(zero_mapping[joint])
+            candidate_sign = int(sign_mapping[joint])
+            mapped_magnitude = (
+                abs(raw_end - raw_start) * 2.0 * math.pi / candidate_counts
+            )
+            encoder_scale_zero_results.append(
+                abs(candidate_counts - observed_counts) <= counts_uncertainty
+                and abs(candidate_zero - observed_zero) <= zero_uncertainty
+                and abs(mapped_magnitude - abs(physical_delta)) <= angle_uncertainty
+            )
+            joint_sign_results.append(
+                raw_end != raw_start
+                and physical_delta != 0.0
+                and (raw_end - raw_start) * candidate_sign * physical_delta > 0.0
+            )
+        else:
+            encoder_scale_zero_results.append(False)
+            joint_sign_results.append(False)
+    encoder_order_valid = tuple(observed_encoder_order) == _MAIN_JOINTS
+    encoder_scale_zero_pass = (
+        mapping_complete and encoder_order_valid and all(encoder_scale_zero_results)
     )
+    joint_sign_pass = mapping_complete and encoder_order_valid and all(joint_sign_results)
 
     raw_masses = physical["mass_measurements_kg"]
     if not isinstance(raw_masses, list) or len(raw_masses) < 3:
@@ -599,6 +962,37 @@ def _derive_audit(
     mass_tolerance = max(mass_uncertainty, 2.0 * mass_std)
     mass_error = abs(runtime_mass - mass_mean)
     mass_pass = mass_error <= mass_tolerance
+
+    planar_com = _numeric_array(
+        physical["planar_com_measurements_m"], "planar_com_measurements_m"
+    )
+    if planar_com.ndim != 2 or planar_com.shape[0] < 3 or planar_com.shape[1] != 2:
+        raise ContractError(
+            "planar_com_measurements_m requires at least three [x, y] measurements"
+        )
+    com_uncertainty = _number(
+        physical["com_instrument_uncertainty_m"],
+        "com_instrument_uncertainty_m",
+        nonnegative=True,
+    )
+    com_mean = np.mean(planar_com, axis=0)
+    com_std = np.std(planar_com, axis=0)
+    com_tolerance = np.maximum(com_uncertainty, 2.0 * com_std)
+    com_error = np.abs(aggregate_com[:2] - com_mean)
+    planar_com_pass = bool(np.all(com_error <= com_tolerance))
+
+    expected_collision_bodies = _string_array(
+        physical["collision_body_names"], "collision_body_names"
+    )
+    mandatory_collision_bodies = {"base_link", *EXPECTED_FOOT_BODY_NAMES}
+    collision_geometry_pass = (
+        set(expected_collision_bodies) == mandatory_collision_bodies
+        and set(expected_collision_bodies).issubset(body_names)
+        and all(
+            any(body_name in PurePosixPath(path).parts for path in collision_paths)
+            for body_name in expected_collision_bodies
+        )
+    )
 
     orientations = physical["imu_rest_orientations"]
     if not isinstance(orientations, list) or len(orientations) < 2:
@@ -642,8 +1036,15 @@ def _derive_audit(
     checks = {
         "units_pass": units_pass,
         "frames_pass": frames_pass,
+        "joint_order_pass": joint_order_pass,
+        "joint_axis_pass": joint_axis_pass,
+        "encoder_scale_zero_pass": encoder_scale_zero_pass,
         "joint_sign_pass": joint_sign_pass,
+        "mechanical_range_pass": mechanical_range_pass,
         "mass_pass": mass_pass,
+        "inertia_com_pass": inertia_com_pass,
+        "planar_com_pass": planar_com_pass,
+        "collision_geometry_pass": collision_geometry_pass,
         "imu_mount_pass": imu_mount_pass,
         "contact_sensor_pass": contact_sensor_pass,
     }
@@ -652,7 +1053,17 @@ def _derive_audit(
         "runtime_trace_sha256": runtime_trace.manifest.provenance["trace_sha256"],
         "runtime_metadata_sha256": runtime_trace.metadata_sha256,
         "runtime_audit_sha256": runtime_binding["sha256"],
+        "runtime_audit_payload_sha256": trace_runtime_hash,
         "physical_measurements_sha256": physical_binding["sha256"],
+        "joint_geometry": {
+            "canonical_order": list(_CANONICAL_JOINTS),
+            "runtime_joint_order": [
+                record["runtime_joint"] for record in runtime_geometry
+            ],
+        },
+        "encoder_mapping": {
+            "observed_joint_order": observed_encoder_order,
+        },
         "mass": {
             "runtime_kg": runtime_mass,
             "real_mean_kg": mass_mean,
@@ -660,6 +1071,14 @@ def _derive_audit(
             "instrument_uncertainty_kg": mass_uncertainty,
             "tolerance_kg": mass_tolerance,
             "absolute_error_kg": mass_error,
+        },
+        "planar_com": {
+            "runtime_xy_m": aggregate_com[:2].tolist(),
+            "real_mean_xy_m": com_mean.tolist(),
+            "real_std_xy_m": com_std.tolist(),
+            "instrument_uncertainty_m": com_uncertainty,
+            "tolerance_xy_m": com_tolerance.tolist(),
+            "absolute_error_xy_m": com_error.tolist(),
         },
         "imu_max_error_deg": max(imu_errors),
         "contact_max_force_n": max_contact_force,

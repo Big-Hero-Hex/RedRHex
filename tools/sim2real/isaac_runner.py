@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from isaaclab.assets import AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.math import quat_apply_inverse
 from pxr import Usd, UsdGeom, UsdPhysics
 
 from RedRhex.tasks.direct.redrhex.redrhex_env_cfg import REDRHEX_CFG, RedrhexEnvCfg
@@ -44,7 +46,7 @@ from .physics_profile import (
 )
 from .runtime_provenance import production_runtime_provenance
 from .scenarios import load_scenario
-from .traces import write_trace
+from .traces import sha256_json, write_trace
 
 
 @configclass
@@ -140,6 +142,71 @@ def _collision_geometry(scene: InteractiveScene) -> list[dict[str, Any]]:
     return sorted(geometries, key=lambda item: item["prim_path"])
 
 
+def _runtime_joint_geometry(
+    robot: Any,
+    scene: InteractiveScene,
+    env_cfg: RedrhexEnvCfg,
+) -> list[dict[str, Any]]:
+    prefix = "/World/envs/env_0/Robot"
+    axes: dict[str, str] = {}
+    root = scene.stage.GetPrimAtPath(prefix)
+    pending = [root] if root.IsValid() else []
+    while pending:
+        prim = pending.pop()
+        pending.extend(prim.GetFilteredChildren(Usd.TraverseInstanceProxies()))
+        if not prim.IsA(UsdPhysics.RevoluteJoint):
+            continue
+        name = prim.GetName()
+        axis = str(UsdPhysics.RevoluteJoint(prim).GetAxisAttr().Get()).upper()
+        if name in axes and axes[name] != axis:
+            raise ContractError(f"runtime joint {name} has conflicting USD axes")
+        axes[name] = axis
+
+    runtime_names = list(robot.joint_names)
+    groups = (
+        ("main", list(env_cfg.main_drive_joint_names)),
+        ("abad", list(env_cfg.abad_joint_names)),
+        ("damper", list(env_cfg.damper_joint_names)),
+    )
+    if any(len(names) != 6 or len(set(names)) != 6 for _, names in groups):
+        raise ContractError("production joint groups must each contain six unique names")
+    limits = robot.data.joint_pos_limits[0]
+    records: list[dict[str, Any]] = []
+    for group, names in groups:
+        for canonical_index, runtime_name in enumerate(names):
+            try:
+                articulation_index = runtime_names.index(runtime_name)
+            except ValueError as exc:
+                raise ContractError(
+                    f"configured joint {runtime_name} is absent from the articulation"
+                ) from exc
+            axis = axes.get(runtime_name)
+            if axis not in {"X", "Y", "Z"}:
+                raise ContractError(
+                    f"runtime joint {runtime_name} does not expose a resolved USD axis"
+                )
+            lower = float(limits[articulation_index, 0].item())
+            upper = float(limits[articulation_index, 1].item())
+            continuous = (
+                not math.isfinite(lower)
+                or not math.isfinite(upper)
+                or lower <= -1.0e20
+                or upper >= 1.0e20
+            )
+            records.append(
+                {
+                    "canonical_joint": f"{group}_{canonical_index}",
+                    "runtime_joint": runtime_name,
+                    "articulation_index": articulation_index,
+                    "axis": axis,
+                    "range_kind": "continuous" if continuous else "limited",
+                    "lower_limit_rad": None if continuous else lower,
+                    "upper_limit_rad": None if continuous else upper,
+                }
+            )
+    return records
+
+
 def _runtime_audit(
     robot: Any,
     foot_contact_sensor: Any,
@@ -152,6 +219,14 @@ def _runtime_audit(
     masses = robot.root_physx_view.get_masses()
     inertias = robot.root_physx_view.get_inertias()
     coms = robot.root_physx_view.get_coms()
+    total_mass = masses[0].sum()
+    aggregate_com_world = (
+        robot.data.body_com_pos_w[0] * masses[0].unsqueeze(-1)
+    ).sum(dim=0) / total_mass
+    aggregate_com_body = quat_apply_inverse(
+        robot.data.root_quat_w[0].unsqueeze(0),
+        (aggregate_com_world - robot.data.root_pos_w[0]).unsqueeze(0),
+    )[0]
     actuator_audit: dict[str, Any] = {}
     for name, actuator in robot.actuators.items():
         actuator_audit[name] = {
@@ -182,7 +257,7 @@ def _runtime_audit(
     }
     ground = env_cfg.terrain.physics_material
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": mode,
         "physics_dt_s": PHYSICS_DT,
         "num_envs": 1,
@@ -191,10 +266,12 @@ def _runtime_audit(
         "body_names": list(robot.body_names),
         "body_properties": {
             "mass_kg": _to_list(masses),
-            "total_mass_kg": float(masses[0].sum().item()),
+            "total_mass_kg": float(total_mass.item()),
             "inertia_kg_m2_matrix": _to_list(inertias),
             "com_pose_xyz_xyzw": _to_list(coms),
+            "aggregate_com_body_m": _to_list(aggregate_com_body),
         },
+        "joint_geometry": _runtime_joint_geometry(robot, scene, env_cfg),
         "joint_properties": joint_properties,
         "effort_trace_semantics": (
             "Isaac Lab implicit-PD estimate, not a measured PhysX joint effort; "
@@ -320,6 +397,7 @@ def _trace_metadata(
         "runtime_bundle_sha256": runtime_provenance["runtime_bundle_sha256"],
         "calibration_constants": {
             "profile_id": profile.profile_id if profile is not None else None,
+            "runtime_audit_sha256": sha256_json(audit),
             "sensor_timing": (
                 profile_application["sensor_timing"]
                 if profile_application is not None
@@ -612,6 +690,7 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         "replay_initial_state_sha256": replay_initial_state_sha256,
         "contact_validation": contact_validation,
         "runtime_audit": "runtime_audit.json",
+        "runtime_audit_sha256": sha256_json(audit),
     }
     _atomic_json(output / "results.json", result)
     sim._app_control_on_stop_handle = None
