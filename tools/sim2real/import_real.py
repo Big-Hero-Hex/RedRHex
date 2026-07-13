@@ -384,6 +384,7 @@ def _load_rosbag(
         "command": [],
         "position": [],
         "motor_command_pwm_raw": [],
+        "motor_command_canonical": [],
         "motor_state_encoder_raw": [],
         "imu_acceleration": [],
         "imu_angular_velocity": [],
@@ -432,10 +433,12 @@ def _load_rosbag(
             times["motor_command_time_s"].append(timestamp_s)
             values["motor_command_pwm_raw"].append(signed_pwm)
             selected_index = _LEG_ORDER.index(selected_leg)
+            scaled = signed_pwm[selected_index] * pwm_scale * joint_direction
+            mapped_command = max(-pwm_cap, min(pwm_cap, scaled))
+            values["motor_command_canonical"].append(mapped_command)
             if not is_bound_probe:
                 times["command_time_s"].append(timestamp_s)
-                scaled = signed_pwm[selected_index] * pwm_scale * joint_direction
-                values["command"].append(max(-pwm_cap, min(pwm_cap, scaled)))
+                values["command"].append(mapped_command)
         elif topic == "/motor/state":
             legs = [
                 _leg(message, name, ("position",), topic) for name in _LEG_ORDER
@@ -505,6 +508,7 @@ def _load_rosbag(
     extra_time_bases: dict[str, str] = {}
     for channel, time_name in (
         ("motor_command_pwm_raw", "motor_command_time_s"),
+        ("motor_command_canonical", "motor_command_time_s"),
         ("motor_state_encoder_raw", "position_time_s"),
         ("imu_acceleration", "imu_time_s"),
         ("imu_angular_velocity", "imu_time_s"),
@@ -530,6 +534,11 @@ def _load_rosbag(
         "joint_direction": joint_direction,
         "pwm_scale": pwm_scale,
         "pwm_cap": pwm_cap,
+        "motor_command_conversion_unit": (
+            "rad/s"
+            if all((has_joint_direction, has_pwm_scale, has_pwm_cap))
+            else "normalized"
+        ),
         "selected_leg": selected_leg,
         "raw_enabled_leg_binding_verified": bool(is_main_drive_experiment),
         "positive_direction_bit": _POSITIVE_DIRECTION.get(selected_leg),
@@ -569,6 +578,15 @@ def import_real_trace(
     details = dict(metadata or {})
     details["units"] = dict(units or {name: "unspecified" for name in spec.required_channels})
     details["frames"] = dict(frames or {name: "unspecified" for name in spec.required_channels})
+    if "motor_command_pwm_raw" in arrays:
+        details["units"].setdefault("motor_command_pwm_raw", "raw_pwm")
+        details["frames"].setdefault("motor_command_pwm_raw", "rinbo_leg_order")
+    if "motor_command_canonical" in arrays:
+        details["units"].setdefault(
+            "motor_command_canonical",
+            str(calibration_constants["motor_command_conversion_unit"]),
+        )
+        details["frames"].setdefault("motor_command_canonical", spec.joint)
     details.setdefault("joint_order", [] if spec.joint in {"all", "root"} else [spec.joint])
     details["clock"] = {
         "source": clock,

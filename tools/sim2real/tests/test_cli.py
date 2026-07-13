@@ -641,6 +641,9 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
         trace.arrays["motor_command_pwm_raw"][:, 3], [125.0, -125.0]
     )
     np.testing.assert_allclose(
+        trace.arrays["motor_command_canonical"], [0.25, -0.25]
+    )
+    np.testing.assert_allclose(
         trace.arrays["motor_state_encoder_raw"][:, 3], [0.0, 54984.83 / 4.0]
     )
     assert trace.manifest.metadata["calibration_constants"][
@@ -652,6 +655,7 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     assert trace.manifest.metadata["clock"]["source"] == "bag_receive_time"
     assert manifest.time_bases["imu_acceleration"] == "imu_time_s"
     assert manifest.time_bases["power_voltage"] == "power_time_s"
+    assert manifest.time_bases["motor_command_canonical"] == "motor_command_time_s"
 
     calibrated_profile = CalibrationProfileV1.from_dict(
         {
@@ -678,6 +682,9 @@ def test_rosbag_reader_extracts_signed_main_leg_and_optional_sensor_clocks(
     )
     calibrated = load_trace(tmp_path / "calibrated-episode")
     np.testing.assert_allclose(calibrated.arrays["command"], [-0.5, 0.5])
+    np.testing.assert_allclose(
+        calibrated.arrays["motor_command_canonical"], [-0.5, 0.5]
+    )
     assert calibrated.manifest.metadata["calibration_constants"][
         "calibration_source"
     ] == "profile:bag-calibration"
@@ -863,6 +870,7 @@ def test_bound_probe_import_uses_event_start_as_derived_neutral_baseline(
     np.testing.assert_allclose(
         trace.arrays["motor_command_pwm_raw"][:, 3], [125.0, 0.0]
     )
+    np.testing.assert_allclose(trace.arrays["motor_command_canonical"], [0.25, 0.0])
     np.testing.assert_allclose(
         trace.arrays["motor_command_time_s"], [1.0, 1.1], atol=1.0e-9
     )

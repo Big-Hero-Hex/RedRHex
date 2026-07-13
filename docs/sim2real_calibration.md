@@ -86,7 +86,7 @@ ros2 bag record -o datasets/raw/main-leg0-run1 \
   /power/state
 ```
 
-Do not use `/motor_feedback.header.stamp` for latency. The importer uses each rosbag record's `SequentialReader` receive timestamp and preserves independent command, motor-state, IMU, and power time vectors. Never edit or overwrite the raw bag.
+Do not use `/motor_feedback.header.stamp` for latency. The importer uses each rosbag record's `SequentialReader` receive timestamp and preserves independent event-command, raw-motor-command, motor-state, IMU, and power time vectors. The event topic is mandatory for the six bound step/coast probes: import requires the matching scenario ID/schema/hash, fixed 60 Hz segment order, three repetitions, ABAD disabled, one `complete`, and no `abort`. Never edit or overwrite the raw bag.
 
 ## Import an immutable real episode
 
@@ -103,9 +103,9 @@ python -m tools.sim2real import-real datasets/raw/main-leg0-run1 \
   --profile profiles/candidate-v1.json
 ```
 
-For another leg, select its matching built-in scenario and frames. The importer checks the raw BioRoLa enable bits and rejects bags that enable a different main drive, enable multiple main drives, or never enable the scenario joint.
+For another leg, select its matching built-in scenario and frames. The importer checks the raw BioRoLa enable bits and rejects bags that enable a different main drive, enable multiple main drives, or never enable the scenario joint. The authenticated segment events form the requested `command` timeline; `motor_command_pwm_raw` remains unchanged on its independent clock for mapping work. This preserves the initial disabled neutral even though the bridge intentionally suppresses repeated disabled raw packets.
 
-Within a reviewed hardware profile, `pwm_scale.main_N` is the inverse command conversion in `(rad/s)/raw-PWM`; for example, a bridge setting of `120 PWM/(rad/s)` starts at `1/120`. It is a recorded command mapping, not an actuator-physics fit. Imports using repository fallbacks are marked provisional; do not label a provisional normalized-PWM command as `rad/s` or compare it to an Isaac velocity target.
+Within a reviewed hardware profile, `pwm_scale.main_N` is the inverse command conversion in `(rad/s)/raw-PWM`; for example, a bridge setting of `120 PWM/(rad/s)` starts at `1/120`. `joint_direction.main_N` maps the raw bridge direction to the canonical simulator direction. Count/revolution, zero, encoder sign, command direction, PWM scale, and PWM cap must all be present before the mapping is considered complete. Imports using any fallback are marked provisional and are rejected by physics comparison.
 
 The resulting layout is:
 
@@ -118,7 +118,7 @@ datasets/sim2real/<dataset-id>/
     metadata.json
 ```
 
-`trace.npz` contains numeric arrays only. Metadata records units, frames, joint order, clock semantics, scenario/profile versions, Git and asset/config hashes, calibration constants, and raw-data hashes.
+`trace.npz` contains numeric arrays only. Metadata records units, frames, joint order, clock semantics, scenario/profile versions, Git and asset/config hashes, calibration constants, and raw-data hashes. Loading a managed dataset rechecks the detached metadata hash, trace hash, copied raw artifact hash, and dataset linkage; editing any of them fails closed.
 
 ## Run the matching Isaac scenario
 
@@ -150,6 +150,20 @@ $ISAACLAB_ROOT/isaaclab.sh -p -m tools.sim2real run-sim \
 
 Only the six terminal-foot sensor can satisfy contact validation. Body/chassis contacts are logged separately.
 
+Replay a verified real episode's independent command timeline with the same scenario and profile:
+
+```bash
+$ISAACLAB_ROOT/isaaclab.sh -p -m tools.sim2real run-sim \
+  --scenario suspended-main-0-step-coast \
+  --mode fixed-base \
+  --replay-trace datasets/sim2real/main-drive-bench-v1/episodes/leg0-run1 \
+  --physics-profile profiles/candidate-v1.json \
+  --output outputs/sim2real/main-0-replay-candidate-v1 \
+  --headless
+```
+
+`sensor_timing.aggregate_command_delay_s` is quantized to the 120 Hz physics clock and applied to requested versus applied targets in characterization, training, and playback. Other timing/filter fields are measurement metadata only and are rejected by simulation profile application instead of being silently treated as active physics.
+
 ## Compare and generate bounded candidates
 
 Compare one real episode with one matching simulator trace:
@@ -162,17 +176,19 @@ python -m tools.sim2real compare \
   --output outputs/sim2real/main-0-step-coast-comparison.json
 ```
 
-Generate a one-factor sensitivity set first:
+Execute a one-factor sensitivity set first. Each uncached candidate starts in a fresh deterministic Isaac process; interrupted runs resume from independently verified artifacts:
 
 ```bash
 python -m tools.sim2real sweep profiles/candidate-v1.json \
   --scenario suspended-main-0-step-coast \
   --mode one-factor \
   --space-json '{"simulation_physics.main_drive.damping":[0.8,1.0,1.2]}' \
+  --seed 0 \
+  --headless \
   --output outputs/sim2real/main-drive-damping-sweep
 ```
 
-Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Candidate cache keys bind the scenario and full profile. Run each candidate in a fresh Isaac process. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
+The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind scenario, profile, seed, mode, device, runner provenance, and relevant runtime settings. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
 
 ## Profile validation and explicit use
 
@@ -209,3 +225,14 @@ A candidate remains experimental until all of the following are reviewed:
 - a reviewed configuration change explicitly promotes the profile.
 
 If the implicit actuator cannot enter the held-out response envelope, stop tuning mass or friction and open a separate DC/PWM or learned-actuator follow-up.
+
+Encode those checks in a version-1 evidence JSON and evaluate it against the exact candidate hash:
+
+```bash
+python -m tools.sim2real validate-promotion \
+  profiles/candidate-v1.json \
+  outputs/sim2real/candidate-v1-validation-evidence.json \
+  --output outputs/sim2real/candidate-v1-promotion-report.json
+```
+
+The evidence binds each real episode and simulator trace by SHA-256, declares calibration versus holdout conditions and what was held out, records instrument uncertainty, and reports whether bounded actuator candidates entered the real envelope. The command returns nonzero when any audit, repetition, holdout, metric, or actuator-model check fails. A passing report says only `eligible_for_review`; it never edits training defaults or promotes a profile automatically.
