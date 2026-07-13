@@ -184,3 +184,17 @@ def test_training_environment_delays_final_actuator_targets_only_when_configured
     assert "_requested_target_drive_vel" in env_source
     assert "_requested_target_abad_pos" in env_source
     assert env_source.count("self._apply_sim2real_command_delay(") >= 2
+
+
+def test_train_play_and_characterization_apply_measured_abad_target_mapping_at_boundary() -> None:
+    cfg_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py")
+    env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")
+    runner_source = _source("tools/sim2real/isaac_runner.py")
+
+    assert "sim2real_abad_target_scale" in cfg_source
+    assert "sim2real_abad_target_offset_rad" in cfg_source
+    delay_call = env_source.index("advance_target_delay(")
+    mapping_call = env_source.index("mapped_abad = map_abad_targets(", delay_call)
+    assert delay_call < mapping_call
+    assert "apply_abad_target_mapping(" in runner_source
+    assert "measurement_annotations(requested_schedule" in runner_source

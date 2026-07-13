@@ -72,6 +72,7 @@ from isaaclab.markers.config import GREEN_ARROW_X_MARKER_CFG, RED_ARROW_X_MARKER
 
 # 從同目錄匯入配置檔案（定義了機器人的各種參數）
 from .redrhex_env_cfg import RedrhexEnvCfg
+from .abad_target_mapping import map_abad_targets
 from .target_delay import advance_target_delay
 
 
@@ -336,6 +337,24 @@ class RedrhexEnv(DirectRLEnv):
             float(getattr(self.cfg, "abad_pos_scale", self._abad_pos_limit_rad)),
             self._abad_pos_limit_rad,
         )
+        abad_scale = tuple(getattr(self.cfg, "sim2real_abad_target_scale", (1.0,) * self.num_abad_joints))
+        abad_offset = tuple(
+            getattr(self.cfg, "sim2real_abad_target_offset_rad", (0.0,) * self.num_abad_joints)
+        )
+        if len(abad_scale) != self.num_abad_joints or len(abad_offset) != self.num_abad_joints:
+            raise ValueError("ABAD target mapping length must match abad_joint_names")
+        self._sim2real_abad_target_scale = torch.tensor(
+            abad_scale, device=self.device, dtype=self._abad_rest_pos.dtype
+        ).unsqueeze(0).expand(self.num_envs, -1)
+        self._sim2real_abad_target_offset = torch.tensor(
+            abad_offset, device=self.device, dtype=self._abad_rest_pos.dtype
+        ).unsqueeze(0).expand(self.num_envs, -1)
+        if not torch.isfinite(self._sim2real_abad_target_scale).all() or torch.any(
+            self._sim2real_abad_target_scale <= 0.0
+        ):
+            raise ValueError("ABAD target mapping scale must be positive and finite")
+        if not torch.isfinite(self._sim2real_abad_target_offset).all():
+            raise ValueError("ABAD target mapping offset must be finite")
         print(f"[ABAD休止角度] {[f'{a*180/3.14159:.1f}°' for a in abad_init_angles]}")
         print(f"[ABAD限制] ±{self._abad_pos_limit_rad:.3f} rad, action scale={self._abad_action_scale:.3f} rad")
 
@@ -2038,8 +2057,13 @@ class RedrhexEnv(DirectRLEnv):
         else:
             applied_drive = requested_drive
             applied_abad = requested_abad
+        mapped_abad = map_abad_targets(
+            applied_abad,
+            scale=self._sim2real_abad_target_scale,
+            offset=self._sim2real_abad_target_offset,
+        )
         self._target_drive_vel = applied_drive.clone()
-        self._target_abad_pos = applied_abad.clone()
+        self._target_abad_pos = mapped_abad.clone()
         self.robot.set_joint_velocity_target(
             self._target_drive_vel, joint_ids=self._main_drive_indices
         )

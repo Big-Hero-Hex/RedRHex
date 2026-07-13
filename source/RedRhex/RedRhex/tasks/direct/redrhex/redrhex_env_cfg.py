@@ -303,6 +303,10 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # Explicit calibration profiles may set a deterministic actuator-target
     # delay in 120 Hz physics steps. The production default remains immediate.
     sim2real_command_delay_steps = 0
+    # Measured ABAD relation in canonical leg order:
+    # actual_target = scale * requested_target + offset.
+    sim2real_abad_target_scale = (1.0,) * 6
+    sim2real_abad_target_offset_rad = (0.0,) * 6
     
     # 每個訓練回合（episode）持續 60 秒
     # 越長的回合讓機器人有更多時間學習和探索

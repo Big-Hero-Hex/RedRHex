@@ -296,6 +296,8 @@ class TraceManifestV1:
 
 
 _HARDWARE_FIELDS = {
+    "abad_target_offset_rad",
+    "abad_target_scale",
     "joint_direction",
     "joint_offset_rad",
     "gear_ratio",
@@ -452,6 +454,7 @@ class CalibrationProfileV1:
     sensor_timing: dict[str, float]
     simulation_physics: dict[str, Any]
     description: str = ""
+    measurement_sources: dict[str, str] = field(default_factory=dict)
     schema_version: int = field(default=SCHEMA_VERSION, init=False)
 
     @classmethod
@@ -467,7 +470,7 @@ class CalibrationProfileV1:
                 "sensor_timing",
                 "simulation_physics",
             },
-            optional={"description"},
+            optional={"description", "measurement_sources"},
         )
         profile_id = _identifier(data["profile_id"], "profile_id")
         hardware = _clean_profile_section(data["hardware_mapping"], "hardware_mapping", _HARDWARE_FIELDS)
@@ -481,7 +484,7 @@ class CalibrationProfileV1:
                     if value not in {-1, 1} or isinstance(value, bool):
                         raise ContractError(f"{path} must be -1 or 1")
                     clean[joint] = int(value)
-                elif key in {"gear_ratio", "pwm_scale"}:
+                elif key in {"gear_ratio", "pwm_scale", "abad_target_scale"}:
                     clean[joint] = _positive(value, path)
                 elif key == "pwm_cap":
                     cap = _positive(value, path)
@@ -626,7 +629,24 @@ class CalibrationProfileV1:
         description = data.get("description", "")
         if not isinstance(description, str):
             raise ContractError("description must be a string")
-        return cls(profile_id, clean_hardware, clean_timing, clean_physics, description)
+        raw_sources = _string_map(
+            data.get("measurement_sources", {}), "measurement_sources"
+        )
+        measurement_sources: dict[str, str] = {}
+        for name, digest in raw_sources.items():
+            if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+                raise ContractError(
+                    f"measurement_sources.{name} must be a lowercase SHA-256 digest"
+                )
+            measurement_sources[name] = digest
+        return cls(
+            profile_id,
+            clean_hardware,
+            clean_timing,
+            clean_physics,
+            description,
+            measurement_sources,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -636,6 +656,7 @@ class CalibrationProfileV1:
             "hardware_mapping": copy.deepcopy(self.hardware_mapping),
             "sensor_timing": dict(self.sensor_timing),
             "simulation_physics": copy.deepcopy(self.simulation_physics),
+            "measurement_sources": dict(self.measurement_sources),
         }
 
     def validate(self) -> "CalibrationProfileV1":

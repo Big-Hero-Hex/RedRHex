@@ -79,6 +79,8 @@ def characterization_channel_metadata(
         "command": command_unit,
         "position": "rad",
         "audit_value": "kg",
+        "repeat_index": "1",
+        "settled": "1",
         "body_contact_force_w": "N",
         "body_contact_force_n": "N",
     }
@@ -89,6 +91,9 @@ def characterization_channel_metadata(
     for name in ("command", "position"):
         if name in frames:
             frames[name] = scenario.joint
+    for name in ("repeat_index", "settled"):
+        if name in frames:
+            frames[name] = "scalar"
     if "audit_value" in frames:
         frames["audit_value"] = "scalar"
     return units, frames
@@ -224,6 +229,39 @@ def scenario_schedule(
             )
         )
     return tuple(result)
+
+
+def measurement_annotations(
+    schedule: tuple[ScheduledCommand, ...],
+    *,
+    settled_fraction: float = 0.25,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Annotate repeat identity and the settled tail of each command segment."""
+
+    fraction = float(settled_fraction)
+    if not schedule:
+        raise ContractError("measurement annotation schedule must not be empty")
+    if not math.isfinite(fraction) or fraction <= 0.0 or fraction > 1.0:
+        raise ContractError("settled_fraction must lie in (0, 1]")
+    repeats = np.asarray([item.repeat_index for item in schedule], dtype=np.float64)
+    settled = np.zeros(len(schedule), dtype=np.float64)
+    start = 0
+    while start < len(schedule):
+        current = schedule[start]
+        end = start + 1
+        while end < len(schedule):
+            item = schedule[end]
+            if (
+                item.repeat_index != current.repeat_index
+                or item.label != current.label
+                or item.value != current.value
+            ):
+                break
+            end += 1
+        tail = max(1, int(math.ceil((end - start) * fraction)))
+        settled[end - tail : end] = 1.0
+        start = end
+    return repeats, settled
 
 
 def apply_schedule_delay(

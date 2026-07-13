@@ -111,10 +111,43 @@ def test_characterization_trace_metadata_uses_physical_units_and_selected_joint_
     assert frames["root_position"] == "world"
 
     abad_units, abad_frames = characterization_channel_metadata(
-        load_scenario("abad-static"), {"command", "position"}
+        load_scenario("abad-static"),
+        {"command", "position", "repeat_index", "settled"},
     )
-    assert abad_units == {"command": "rad", "position": "rad"}
-    assert abad_frames == {"command": "abad_0", "position": "abad_0"}
+    assert abad_units == {
+        "command": "rad",
+        "position": "rad",
+        "repeat_index": "1",
+        "settled": "1",
+    }
+    assert abad_frames == {
+        "command": "abad_0",
+        "position": "abad_0",
+        "repeat_index": "scalar",
+        "settled": "scalar",
+    }
+
+
+def test_abad_measurement_annotations_mark_settled_tail_of_every_pose_and_repeat() -> None:
+    from tools.sim2real.characterization import (
+        measurement_annotations,
+        scenario_schedule,
+        scenario_step_count,
+    )
+
+    scenario = load_scenario("abad-static")
+    schedule = scenario_schedule(
+        scenario, scenario_step_count(scenario, 1.0 / 120.0), 1.0 / 120.0
+    )
+    repeat_index, settled = measurement_annotations(schedule, settled_fraction=0.25)
+
+    assert repeat_index.shape == settled.shape == (540,)
+    assert set(np.unique(repeat_index)) == {0.0, 1.0, 2.0}
+    assert int(np.count_nonzero(settled)) == 3 * 3 * 15
+    assert not np.any(settled[:45])
+    assert np.all(settled[45:60])
+    assert not np.any(settled[60:105])
+    assert np.all(settled[105:120])
 
 
 def test_contact_probe_requires_resolved_bodies_and_measurable_force() -> None:
@@ -168,10 +201,9 @@ def test_contact_requirement_rejects_fixed_base_mode() -> None:
         )
 
 
-def test_friction_scenario_always_requires_a_valid_contact_probe() -> None:
+def test_contact_probe_requirement_remains_explicit_for_simulated_audits() -> None:
     from tools.sim2real.characterization import requires_contact_probe
 
-    assert requires_contact_probe(load_scenario("friction"), mode="free-root", explicit=False)
     assert requires_contact_probe(load_scenario("audit"), mode="contact", explicit=False)
     assert requires_contact_probe(load_scenario("audit"), mode="free-root", explicit=True)
     assert not requires_contact_probe(load_scenario("audit"), mode="free-root", explicit=False)
@@ -179,7 +211,7 @@ def test_friction_scenario_always_requires_a_valid_contact_probe() -> None:
 
 @pytest.mark.parametrize(
     ("scenario_id", "mode"),
-    [("main-step", "fixed-base"), ("friction", "free-root"), ("friction", "contact")],
+    [("main-step", "fixed-base")],
 )
 def test_scenario_mode_accepts_only_scientifically_compatible_modes(
     scenario_id: str, mode: str
@@ -191,12 +223,18 @@ def test_scenario_mode_accepts_only_scientifically_compatible_modes(
 
 @pytest.mark.parametrize(
     ("scenario_id", "mode"),
-    [("main-step", "free-root"), ("main-step", "contact"), ("friction", "fixed-base")],
+    [
+        ("main-step", "free-root"),
+        ("main-step", "contact"),
+        ("friction", "fixed-base"),
+        ("friction", "free-root"),
+        ("friction", "contact"),
+    ],
 )
 def test_scenario_mode_rejects_incompatible_modes(scenario_id: str, mode: str) -> None:
     from tools.sim2real.characterization import validate_scenario_mode
 
-    with pytest.raises(ContractError, match="requires"):
+    with pytest.raises(ContractError, match="requires|manual scenario"):
         validate_scenario_mode(load_scenario(scenario_id), mode)
 
 

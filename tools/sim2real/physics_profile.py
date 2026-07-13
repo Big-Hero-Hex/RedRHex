@@ -72,6 +72,49 @@ def _apply_sensor_timing(
     }
 
 
+def apply_abad_target_mapping(
+    requested_rad: float,
+    profile: CalibrationProfileV1 | None,
+    *,
+    joint: str,
+) -> float:
+    """Apply the measured relation ``actual = scale * requested + offset``."""
+
+    if profile is None:
+        return float(requested_rad)
+    hardware = profile.validate().hardware_mapping
+    scale = float(hardware.get("abad_target_scale", {}).get(joint, 1.0))
+    offset = float(hardware.get("abad_target_offset_rad", {}).get(joint, 0.0))
+    return scale * float(requested_rad) + offset
+
+
+def _apply_abad_mapping_config(
+    env_cfg: object,
+    hardware: Mapping[str, Any],
+) -> None:
+    joint_names = getattr(env_cfg, "abad_joint_names", None)
+    if not isinstance(joint_names, (list, tuple)) or not joint_names:
+        raise ContractError("environment configuration has no ordered ABAD joint names")
+    if not hasattr(env_cfg, "sim2real_abad_target_scale") or not hasattr(
+        env_cfg, "sim2real_abad_target_offset_rad"
+    ):
+        raise ContractError("environment configuration does not support ABAD target mapping")
+    aliases = tuple(f"abad_{index}" for index in range(len(joint_names)))
+    scale_values = hardware.get("abad_target_scale", {})
+    offset_values = hardware.get("abad_target_offset_rad", {})
+    unknown = (set(scale_values) | set(offset_values)) - set(aliases)
+    if unknown:
+        raise ContractError(
+            "ABAD target mapping uses non-canonical joints: " + ", ".join(sorted(unknown))
+        )
+    env_cfg.sim2real_abad_target_scale = tuple(
+        float(scale_values.get(alias, 1.0)) for alias in aliases
+    )
+    env_cfg.sim2real_abad_target_offset_rad = tuple(
+        float(offset_values.get(alias, 0.0)) for alias in aliases
+    )
+
+
 def apply_profile_to_config(
     env_cfg: object,
     profile: CalibrationProfileV1 | None,
@@ -86,6 +129,7 @@ def apply_profile_to_config(
         return None
     profile = profile.validate()
     timing_summary = _apply_sensor_timing(env_cfg, profile.sensor_timing)
+    _apply_abad_mapping_config(env_cfg, profile.hardware_mapping)
     physics = profile.simulation_physics
     robot = _robot_cfg(env_cfg)
 

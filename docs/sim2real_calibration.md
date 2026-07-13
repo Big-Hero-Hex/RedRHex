@@ -190,6 +190,43 @@ python -m tools.sim2real sweep profiles/candidate-v1.json \
 
 The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind scenario, profile, seed, mode, device, runner provenance, and relevant runtime settings. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
 
+## Enter ABAD and friction measurements
+
+`abad-static` identifies only the static measured relation
+`actual_angle = target_scale * requested_angle + target_offset_rad`; it does not claim a dynamic gain. Record at least three distinct settled poses in each of the three repeats. The `repeat_index` and `settled` numeric annotations use the position clock; only samples with `settled=1` enter the fit. Results include the aggregate fit plus per-repeat scale, offset, residual, mean, standard deviation, and count.
+
+`friction` is a manual scenario and cannot run in Isaac. Enter exactly one `breakaway_force` and positive `static_normal_load` for every `static_repeat_index`. Dynamic samples use their own `dynamic_time_s` clock and include `dynamic_pull_force`, `dynamic_normal_load`, `dynamic_speed`, and `dynamic_repeat_index`. Each repeat must contain at least two nonzero, slow, constant-speed samples. The report keeps static and dynamic coefficients separate and includes dimensionless units, the foot/ground frame, and repeat variation.
+
+Apply verified measurement results without manually transcribing field names:
+
+```python
+from pathlib import Path
+import json
+
+from tools.sim2real.contracts import load_profile
+from tools.sim2real.metrics import compute_subsystem_metrics
+from tools.sim2real.profile_measurements import apply_measurements_to_profile
+from tools.sim2real.scenarios import load_scenario
+from tools.sim2real.traces import load_trace
+
+abad_trace = load_trace("datasets/sim2real/abad/episodes/abad-0")
+friction_trace = load_trace("datasets/sim2real/contact/episodes/friction")
+candidate = apply_measurements_to_profile(
+    load_profile("profiles/candidate-v1.json"),
+    profile_id="candidate-v2",
+    abad_metrics=compute_subsystem_metrics(load_scenario("abad-static"), abad_trace),
+    abad_trace_sha256=abad_trace.manifest.provenance["trace_sha256"],
+    friction_metrics=compute_subsystem_metrics(load_scenario("friction"), friction_trace),
+    friction_trace_sha256=friction_trace.manifest.provenance["trace_sha256"],
+)
+Path("profiles/candidate-v2.json").write_text(
+    json.dumps(candidate.to_dict(), indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+```
+
+The helper preserves unrelated profile values, maps ABAD results to `hardware_mapping.abad_target_scale` and `abad_target_offset_rad`, maps friction to `simulation_physics.ground`, and records both source trace hashes in `measurement_sources`. Characterization, training, and playback apply the ABAD relation at the final target boundary. With no measured fields, scale `1` and offset `0` preserve existing behavior.
+
 ## Profile validation and explicit use
 
 Validate JSON fields and physical ranges:

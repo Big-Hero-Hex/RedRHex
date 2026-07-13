@@ -73,30 +73,68 @@ def test_static_measurement_metrics() -> None:
         support_force=np.array([[60.0, 40.0], [60.0, 40.0]]),
         support_position=np.array([0.0, 1.0]),
     )
-    friction = friction_metrics(
-        pull_force=np.array([19.0, 20.0, 21.0]),
-        normal_load=np.array([100.0, 100.0, 100.0]),
-    )
 
     assert stiffness["stiffness_n_per_m"] == pytest.approx(1000.0)
     assert torque["torque_saturation_nm"] == pytest.approx(3.0)
     assert mass_com == {"mass_kg": pytest.approx(10.0), "com_m": pytest.approx(0.4)}
-    assert friction["static_friction_coefficient"] == pytest.approx(0.2)
-    assert friction_metrics(incline_angle_rad=np.array([np.arctan(0.5)]))[
-        "static_friction_coefficient"
-    ] == pytest.approx(0.5)
 
 
-def test_abad_static_metrics_identify_target_scale_and_offset() -> None:
-    command = np.array([-0.2, -0.1, 0.0, 0.1, 0.2])
-    measured = 1.25 * command - 0.03
+def test_abad_static_metrics_fit_only_settled_samples_and_report_repeat_variation() -> None:
+    command = np.tile(np.array([-0.2, 0.0, 0.2, 0.1]), 3)
+    repeat_index = np.repeat(np.arange(3), 4)
+    settled = np.tile(np.array([1.0, 1.0, 1.0, 0.0]), 3)
+    repeat_scales = np.repeat(np.array([1.2, 1.25, 1.3]), 4)
+    measured = repeat_scales * command - 0.03
+    measured[settled == 0.0] = 99.0
 
-    result = abad_static_mapping_metrics(command, measured)
+    result = abad_static_mapping_metrics(
+        command,
+        measured,
+        repeat_index=repeat_index,
+        settled=settled,
+        expected_repeats=3,
+        frame="abad_0",
+    )
 
-    assert result["target_scale"] == pytest.approx(1.25)
-    assert result["target_offset_rad"] == pytest.approx(-0.03)
-    assert result["fit_rmse_rad"] == pytest.approx(0.0, abs=1.0e-12)
-    assert result["sample_count"] == 5
+    assert result["schema_version"] == 1
+    assert result["metric_kind"] == "abad_static_mapping"
+    assert result["frame"] == "abad_0"
+    assert result["units"] == {
+        "target_scale": "1",
+        "target_offset_rad": "rad",
+        "fit_rmse_rad": "rad",
+    }
+    assert result["aggregate"]["target_scale"] == pytest.approx(1.25)
+    assert result["aggregate"]["target_offset_rad"] == pytest.approx(-0.03)
+    assert result["aggregate"]["pose_count"] == 3
+    assert result["repeat_variation"]["target_scale_mean"] == pytest.approx(1.25)
+    assert result["repeat_variation"]["target_scale_std"] == pytest.approx(
+        np.std([1.2, 1.25, 1.3])
+    )
+    assert result["repeat_variation"]["target_scale_count"] == 3
+    assert [item["repeat_index"] for item in result["repeats"]] == [0, 1, 2]
+
+
+def test_abad_static_metrics_reject_unsettled_or_two_pose_repeats() -> None:
+    with pytest.raises(ContractError, match="settled"):
+        abad_static_mapping_metrics(
+            [-0.2, 0.0, 0.2] * 3,
+            [-0.2, 0.0, 0.2] * 3,
+            repeat_index=np.repeat(np.arange(3), 3),
+            settled=np.zeros(9),
+            expected_repeats=3,
+            frame="abad_0",
+        )
+
+    with pytest.raises(ContractError, match="three distinct"):
+        abad_static_mapping_metrics(
+            [-0.2, -0.2, 0.2] * 3,
+            [-0.2, -0.2, 0.2] * 3,
+            repeat_index=np.repeat(np.arange(3), 3),
+            settled=np.ones(9),
+            expected_repeats=3,
+            frame="abad_0",
+        )
 
 
 def _write_drive_trace(
@@ -390,23 +428,17 @@ def test_combined_step_coast_scenario_reports_metric_families_separately(
     assert set(metrics["coast"]) == {"positive", "negative"}
 
 
-def test_torsional_spring_dynamic_friction_and_variation_metrics() -> None:
+def test_torsional_spring_and_variation_metrics() -> None:
     spring = torsional_spring_metrics(
         angle_rad=np.array([0.0, 0.1, 0.2]),
         load_force=np.array([0.0, 10.0, 20.0]),
         lever_arm_m=np.array([0.1, 0.1, 0.1]),
-    )
-    friction = friction_metrics(
-        pull_force=np.array([20.0, 20.0]),
-        normal_load=np.array([100.0, 100.0]),
-        dynamic_pull_force=np.array([15.0, 16.0]),
     )
     variation = variation_metrics(
         np.array([1.0, 2.0, 3.0]), metric_name="steady_speed_rad_s"
     )
 
     assert spring["stiffness_nm_per_rad"] == pytest.approx(10.0)
-    assert friction["dynamic_friction_coefficient"] == pytest.approx(0.155)
     assert variation == {
         "steady_speed_rad_s_mean": pytest.approx(2.0),
         "steady_speed_rad_s_std": pytest.approx(np.std([1.0, 2.0, 3.0])),
@@ -414,18 +446,85 @@ def test_torsional_spring_dynamic_friction_and_variation_metrics() -> None:
     }
 
 
+def test_friction_metrics_report_breakaway_and_constant_speed_repeat_variation() -> None:
+    dynamic_repeat = np.repeat(np.arange(3), 3)
+    result = friction_metrics(
+        breakaway_force=np.array([20.0, 22.0, 18.0]),
+        static_normal_load=np.full(3, 100.0),
+        static_repeat_index=np.arange(3),
+        dynamic_pull_force=np.repeat(np.array([15.0, 16.0, 14.0]), 3),
+        dynamic_normal_load=np.full(9, 100.0),
+        dynamic_speed=np.tile(np.array([0.049, 0.05, 0.051]), 3),
+        dynamic_repeat_index=dynamic_repeat,
+        expected_repeats=3,
+        frame="foot_0/ground",
+        max_dynamic_speed_m_s=0.1,
+    )
+
+    assert result["schema_version"] == 1
+    assert result["metric_kind"] == "ground_friction"
+    assert result["frame"] == "foot_0/ground"
+    assert result["units"] == {
+        "coefficient": "1",
+        "force": "N",
+        "speed": "m/s",
+    }
+    assert result["static"]["coefficient_mean"] == pytest.approx(0.2)
+    assert result["static"]["coefficient_std"] == pytest.approx(np.std([0.2, 0.22, 0.18]))
+    assert result["static"]["coefficient_count"] == 3
+    assert result["dynamic"]["coefficient_mean"] == pytest.approx(0.15)
+    assert result["dynamic"]["coefficient_std"] == pytest.approx(np.std([0.15, 0.16, 0.14]))
+    assert result["dynamic"]["coefficient_count"] == 3
+    assert [item["repeat_index"] for item in result["dynamic"]["repeats"]] == [0, 1, 2]
+
+
+def test_friction_metrics_reject_ambiguous_thresholds_and_nonconstant_speed() -> None:
+    common = {
+        "static_normal_load": np.full(3, 100.0),
+        "static_repeat_index": np.arange(3),
+        "dynamic_pull_force": np.full(9, 15.0),
+        "dynamic_normal_load": np.full(9, 100.0),
+        "dynamic_repeat_index": np.repeat(np.arange(3), 3),
+        "expected_repeats": 3,
+        "frame": "foot_0/ground",
+        "max_dynamic_speed_m_s": 0.1,
+    }
+    with pytest.raises(ContractError, match="one breakaway threshold"):
+        friction_metrics(
+            breakaway_force=np.array([10.0, 20.0, 22.0, 18.0]),
+            static_normal_load=np.full(4, 100.0),
+            static_repeat_index=np.array([0, 0, 1, 2]),
+            dynamic_speed=np.full(9, 0.05),
+            **{
+                key: value
+                for key, value in common.items()
+                if key not in {"static_normal_load", "static_repeat_index"}
+            },
+        )
+
+    with pytest.raises(ContractError, match="constant speed"):
+        friction_metrics(
+            breakaway_force=np.array([20.0, 22.0, 18.0]),
+            dynamic_speed=np.tile(np.array([0.02, 0.05, 0.08]), 3),
+            **common,
+        )
+
+
 def test_scenario_metrics_include_abad_mapping_and_dynamic_friction(
     tmp_path: Path,
 ) -> None:
     abad = load_scenario("abad-static")
-    command = np.array([-0.15, 0.0, 0.15])
+    command = np.tile(np.array([-0.15, 0.0, 0.15]), 3)
+    sample_time = np.arange(command.size, dtype=float)
     write_trace(
         tmp_path / "abad",
         {
-            "command_time_s": np.array([0.0, 1.0, 2.0]),
+            "command_time_s": sample_time,
             "command": command,
-            "position_time_s": np.array([0.0, 1.0, 2.0]),
+            "position_time_s": sample_time,
             "position": 0.8 * command + 0.02,
+            "repeat_index": np.repeat(np.arange(3), 3),
+            "settled": np.ones(command.size),
         },
         scenario=abad,
         source="sim",
@@ -434,12 +533,15 @@ def test_scenario_metrics_include_abad_mapping_and_dynamic_friction(
     write_trace(
         tmp_path / "friction",
         {
-            "pull_force_time_s": np.array([0.0, 1.0, 2.0]),
-            "pull_force": np.array([20.0, 21.0, 19.0]),
-            "dynamic_pull_force_time_s": np.array([0.0, 1.0, 2.0]),
-            "dynamic_pull_force": np.array([15.0, 16.0, 14.0]),
-            "normal_load_time_s": np.array([0.0, 1.0, 2.0]),
-            "normal_load": np.array([100.0, 100.0, 100.0]),
+            "static_time_s": np.array([0.0, 1.0, 2.0]),
+            "breakaway_force": np.array([20.0, 21.0, 19.0]),
+            "static_normal_load": np.array([100.0, 100.0, 100.0]),
+            "static_repeat_index": np.arange(3),
+            "dynamic_time_s": np.arange(9, dtype=float),
+            "dynamic_pull_force": np.repeat(np.array([15.0, 16.0, 14.0]), 3),
+            "dynamic_normal_load": np.full(9, 100.0),
+            "dynamic_speed": np.full(9, 0.05),
+            "dynamic_repeat_index": np.repeat(np.arange(3), 3),
         },
         scenario=friction,
         source="sim",
@@ -450,10 +552,11 @@ def test_scenario_metrics_include_abad_mapping_and_dynamic_friction(
         friction, load_trace(tmp_path / "friction")
     )
 
-    assert abad_result["target_scale"] == pytest.approx(0.8)
-    assert abad_result["target_offset_rad"] == pytest.approx(0.02)
-    assert friction_result["static_friction_coefficient"] == pytest.approx(0.2)
-    assert friction_result["dynamic_friction_coefficient"] == pytest.approx(0.15)
+    assert abad_result["aggregate"]["target_scale"] == pytest.approx(0.8)
+    assert abad_result["aggregate"]["target_offset_rad"] == pytest.approx(0.02)
+    assert abad_result["repeat_variation"]["target_scale_count"] == 3
+    assert friction_result["static"]["coefficient_mean"] == pytest.approx(0.2)
+    assert friction_result["dynamic"]["coefficient_mean"] == pytest.approx(0.15)
 
 
 @pytest.mark.parametrize(

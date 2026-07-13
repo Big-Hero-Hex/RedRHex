@@ -28,6 +28,7 @@ from .characterization import (
     apply_schedule_delay,
     characterization_channel_metadata,
     load_replay_schedule,
+    measurement_annotations,
     requires_contact_probe,
     resolve_scenario_steps,
     scenario_schedule,
@@ -38,7 +39,11 @@ from .characterization import (
 )
 from .contracts import CalibrationProfileV1, ContractError
 from .isaac_profile import apply_profile_to_runtime_env
-from .physics_profile import apply_profile_to_config, load_optional_profile
+from .physics_profile import (
+    apply_abad_target_mapping,
+    apply_profile_to_config,
+    load_optional_profile,
+)
 from .scenarios import load_scenario
 from .traces import sha256_file, write_trace
 
@@ -256,13 +261,17 @@ def _required_aliases(
     *,
     selected_joint: int | None,
     total_mass_kg: float,
+    requested_schedule: tuple[Any, ...],
 ) -> None:
     steps = traces["sim_time_s"].shape[0]
     sim_time = traces["sim_time_s"]
     selected = selected_joint if selected_joint is not None else 0
+    repeat_index, settled = measurement_annotations(requested_schedule)
     aliases: dict[str, np.ndarray] = {
         "command": traces["requested_command"][:, selected],
         "position": traces["joint_position"][:, selected],
+        "repeat_index": repeat_index,
+        "settled": settled,
         "audit_value": np.full(steps, total_mass_kg, dtype=np.float64),
     }
     for channel in scenario.required_channels:
@@ -287,6 +296,8 @@ def _trace_metadata(
     *,
     mode: str,
     replay_trace_sha256: str | None,
+    replay_initial_state: Mapping[str, Any] | None,
+    replay_initial_state_sha256: str | None,
 ) -> dict[str, Any]:
     units, frames = characterization_channel_metadata(scenario, set(time_bases))
 
@@ -317,6 +328,8 @@ def _trace_metadata(
             "mode": mode,
             "fixed_base": bool(audit["is_fixed_base"]),
             "replay_trace_sha256": replay_trace_sha256,
+            "replay_initial_state": replay_initial_state,
+            "replay_initial_state_sha256": replay_initial_state_sha256,
         },
         "raw_data_sha256": None,
     }
@@ -349,7 +362,10 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     env_cfg.robot_cfg.spawn.articulation_props.fix_root_link = request.mode == "fixed-base"
 
     requested_schedule = scenario_schedule(scenario, request.steps, physics_dt)
+    replay = None
     replay_trace_sha256 = None
+    replay_initial_state = None
+    replay_initial_state_sha256 = None
     if replay_trace is not None:
         replay = load_replay_schedule(
             replay_trace,
@@ -359,6 +375,8 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         )
         requested_schedule = replay.schedule
         replay_trace_sha256 = replay.trace_sha256
+        replay_initial_state = replay.initial_state.to_dict()
+        replay_initial_state_sha256 = replay.initial_state_sha256
     delay_steps = (
         int(profile_application["sensor_timing"]["command_delay_steps"])
         if profile_application is not None
@@ -384,12 +402,18 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     robot = scene["robot"]
     foot_contact_sensor = scene["foot_contact_sensor"]
     body_contact_sensor = scene["body_contact_sensor"]
+    selected_joint = _resolve_selected_joint(scenario, env_cfg, robot)
     root_state = robot.data.default_root_state.clone()
     root_state[:, :3] += scene.env_origins
     robot.write_root_pose_to_sim(root_state[:, :7])
     robot.write_root_velocity_to_sim(root_state[:, 7:])
+    initial_joint_position = robot.data.default_joint_pos.clone()
+    if replay is not None:
+        if selected_joint is None:
+            raise ContractError("replay initial state requires one selected joint")
+        initial_joint_position[:, selected_joint] = replay.initial_state.position_rad
     robot.write_joint_state_to_sim(
-        robot.data.default_joint_pos.clone(), robot.data.default_joint_vel.clone()
+        initial_joint_position, robot.data.default_joint_vel.clone()
     )
     scene.reset()
     apply_profile_to_runtime_env(SimpleNamespace(robot=robot), profile)
@@ -404,8 +428,7 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         mode=request.mode,
     )
 
-    selected_joint = _resolve_selected_joint(scenario, env_cfg, robot)
-    default_position = robot.data.default_joint_pos.clone()
+    default_position = initial_joint_position.clone()
     zero_velocity = torch.zeros_like(robot.data.default_joint_vel)
     original_selected_damping = (
         float(robot.data.joint_damping[0, selected_joint].item())
@@ -440,7 +463,11 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         if selected_joint is not None:
             requested[:, selected_joint] = requested_scheduled.value
             if scenario.experiment_kind == "abad_static":
-                position_target[:, selected_joint] = applied_scheduled.value
+                position_target[:, selected_joint] = apply_abad_target_mapping(
+                    applied_scheduled.value,
+                    profile,
+                    joint=scenario.joint,
+                )
             else:
                 velocity_target[:, selected_joint] = applied_scheduled.value
             if applied_scheduled.actuator_enabled != was_enabled:
@@ -511,6 +538,7 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         time_bases,
         selected_joint=selected_joint,
         total_mass_kg=float(audit["body_properties"]["total_mass_kg"]),
+        requested_schedule=requested_schedule,
     )
     contact_required = requires_contact_probe(
         scenario, mode=request.mode, explicit=bool(args.require_contact)
@@ -533,6 +561,8 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         audit,
         mode=request.mode,
         replay_trace_sha256=replay_trace_sha256,
+        replay_initial_state=replay_initial_state,
+        replay_initial_state_sha256=replay_initial_state_sha256,
     )
     manifest = write_trace(
         output,
@@ -555,6 +585,8 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         "command_delay_steps": delay_steps,
         "effective_command_delay_s": delay_steps * physics_dt,
         "replay_trace_sha256": replay_trace_sha256,
+        "replay_initial_state": replay_initial_state,
+        "replay_initial_state_sha256": replay_initial_state_sha256,
         "contact_validation": contact_validation,
         "runtime_audit": "runtime_audit.json",
     }

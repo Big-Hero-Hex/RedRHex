@@ -208,6 +208,60 @@ def test_profile_models_hardware_timing_friction_and_passive_spring() -> None:
     assert profile.simulation_physics["passive_spring"]["damper_0"]["stiffness"] == 12.0
 
 
+def test_profile_models_measured_abad_target_mapping_and_source_hashes() -> None:
+    profile = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "abad-measured",
+            "hardware_mapping": {
+                "abad_target_scale": {"abad_0": 1.1},
+                "abad_target_offset_rad": {"abad_0": -0.02},
+            },
+            "sensor_timing": {},
+            "simulation_physics": {},
+            "measurement_sources": {
+                "abad_target:abad_0": "a" * 64,
+                "ground_friction": "b" * 64,
+            },
+        }
+    )
+
+    assert profile.hardware_mapping["abad_target_scale"]["abad_0"] == 1.1
+    assert profile.hardware_mapping["abad_target_offset_rad"]["abad_0"] == -0.02
+    assert profile.measurement_sources == {
+        "abad_target:abad_0": "a" * 64,
+        "ground_friction": "b" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "hardware_mapping": {"abad_target_scale": {"abad_0": 0.0}},
+            "measurement_sources": {},
+        },
+        {
+            "hardware_mapping": {},
+            "measurement_sources": {"abad_target:abad_0": "not-a-hash"},
+        },
+    ],
+    ids=("nonpositive-abad-scale", "invalid-source-hash"),
+)
+def test_profile_rejects_invalid_abad_mapping_or_measurement_source(payload) -> None:
+    with pytest.raises(ContractError):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "bad-measurement",
+                "hardware_mapping": payload["hardware_mapping"],
+                "sensor_timing": {},
+                "simulation_physics": {},
+                "measurement_sources": payload["measurement_sources"],
+            }
+        )
+
+
 @pytest.mark.parametrize("pwm_cap", [1e-12, 0.5, 1.0])
 def test_profile_accepts_normalized_pwm_cap_through_one(pwm_cap: float) -> None:
     profile = CalibrationProfileV1.from_dict(
@@ -280,7 +334,12 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
     ]
     assert main.repeats == 3
 
-    assert "torque" not in load_scenario("abad-static").required_channels
+    assert set(load_scenario("abad-static").required_channels) == {
+        "command",
+        "position",
+        "repeat_index",
+        "settled",
+    }
     assert set(load_scenario("mass-com").required_channels) == {
         "scale_mass",
         "support_force",
@@ -293,10 +352,15 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
         "direction",
     }
     assert set(load_scenario("friction").required_channels) == {
-        "pull_force",
+        "breakaway_force",
+        "static_normal_load",
+        "static_repeat_index",
         "dynamic_pull_force",
-        "normal_load",
+        "dynamic_normal_load",
+        "dynamic_speed",
+        "dynamic_repeat_index",
     }
+    assert load_scenario("friction").scene_mode == "manual"
     assert set(load_scenario("spring").required_channels) == {
         "load_force",
         "lever_arm",

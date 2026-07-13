@@ -15,7 +15,11 @@ def _profile() -> CalibrationProfileV1:
         {
             "schema_version": 1,
             "profile_id": "candidate-a",
-            "hardware_mapping": {"pwm_scale": {"Revolute_15": 0.2}},
+            "hardware_mapping": {
+                "pwm_scale": {"Revolute_15": 0.2},
+                "abad_target_scale": {"abad_0": 1.2, "abad_5": 0.9},
+                "abad_target_offset_rad": {"abad_0": -0.03, "abad_5": 0.04},
+            },
             "sensor_timing": {
                 "aggregate_command_delay_s": 0.025,
             },
@@ -76,6 +80,9 @@ def _fake_env_cfg() -> SimpleNamespace:
         damper_stiffness=200.0,
         damper_damping=20.0,
         sim2real_command_delay_steps=0,
+        sim2real_abad_target_scale=(1.0,) * 6,
+        sim2real_abad_target_offset_rad=(0.0,) * 6,
+        abad_joint_names=[f"Revolute_{index}" for index in range(6)],
     )
 
 
@@ -103,6 +110,18 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert summary["sensor_timing"]["command_delay_steps"] == 3
     assert summary["sensor_timing"]["effective_command_delay_s"] == pytest.approx(0.025)
     assert candidate.sim2real_command_delay_steps == 3
+    assert candidate.sim2real_abad_target_scale == (1.2, 1.0, 1.0, 1.0, 1.0, 0.9)
+    assert candidate.sim2real_abad_target_offset_rad == (-0.03, 0.0, 0.0, 0.0, 0.0, 0.04)
+
+
+def test_scalar_abad_mapping_uses_actual_equals_scale_times_requested_plus_offset() -> None:
+    from tools.sim2real.physics_profile import apply_abad_target_mapping
+
+    profile = _profile()
+
+    assert apply_abad_target_mapping(0.2, profile, joint="abad_0") == pytest.approx(0.21)
+    assert apply_abad_target_mapping(0.2, profile, joint="abad_1") == pytest.approx(0.2)
+    assert apply_abad_target_mapping(0.2, None, joint="abad_0") == pytest.approx(0.2)
 
 
 def test_none_profile_is_a_noop() -> None:

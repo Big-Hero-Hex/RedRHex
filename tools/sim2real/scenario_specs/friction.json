@@ -2,19 +2,31 @@
   "schema_version": 1,
   "scenario_id": "friction",
   "name": "Ground friction measurement",
-  "description": "Estimate static friction from pull-force threshold and dynamic friction from a slow constant-speed pull under measured normal load.",
+  "description": "Enter one breakaway threshold per static repeat and native-clock force, load, and speed samples for each slow constant-speed dynamic pull.",
   "subsystem": "friction",
   "experiment_kind": "friction",
   "joint": "foot_0",
   "command_segments": [{"duration_s": 1.0, "value": 0.1, "label": "slide"}],
   "repeats": 3,
-  "required_channels": ["pull_force", "dynamic_pull_force", "normal_load"],
+  "required_channels": [
+    "breakaway_force",
+    "static_normal_load",
+    "static_repeat_index",
+    "dynamic_pull_force",
+    "dynamic_normal_load",
+    "dynamic_speed",
+    "dynamic_repeat_index"
+  ],
   "time_bases": {
-    "pull_force": "pull_force_time_s",
-    "dynamic_pull_force": "dynamic_pull_force_time_s",
-    "normal_load": "normal_load_time_s"
+    "breakaway_force": "static_time_s",
+    "static_normal_load": "static_time_s",
+    "static_repeat_index": "static_time_s",
+    "dynamic_pull_force": "dynamic_time_s",
+    "dynamic_normal_load": "dynamic_time_s",
+    "dynamic_speed": "dynamic_time_s",
+    "dynamic_repeat_index": "dynamic_time_s"
   },
   "split": "holdout",
-  "scene_mode": "free_root",
+  "scene_mode": "manual",
   "safety_class": "contact"
 }
