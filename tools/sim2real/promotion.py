@@ -1945,6 +1945,24 @@ def _verify_sweep_for_holdout(
             if sim.manifest.metadata.get(field) != provenance[field]:
                 raise ContractError(f"candidate runtime provenance {field} mismatch")
         run_results = _json(run_output / "results.json", "candidate results")
+        replay_constants = sim.manifest.metadata.get("calibration_constants", {})
+        if not isinstance(replay_constants, Mapping):
+            raise ContractError(
+                "candidate trace calibration_constants must be an object"
+            )
+        for field, digest, label in (
+            ("replay_trace_sha256", replay.trace_sha256, "replay trace"),
+            (
+                "replay_initial_state_sha256",
+                replay.initial_state_sha256,
+                "replay initial-state",
+            ),
+        ):
+            if (
+                replay_constants.get(field) != digest
+                or run_results.get(field) != digest
+            ):
+                raise ContractError(f"candidate {label} provenance mismatch")
         expected_run = {
             "schema_version": 1,
             "scenario_id": scenario.scenario_id,

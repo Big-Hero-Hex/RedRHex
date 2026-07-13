@@ -60,6 +60,7 @@ def _response_trace(
     load_coordinate: str | None = None,
     runtime_provenance: dict[str, str] | None = None,
     replay_ready: bool = False,
+    replay_bindings: dict[str, str] | None = None,
 ) -> None:
     scenario = load_scenario(scenario_id)
     scenario_hash = sha256_json(scenario.to_dict())
@@ -120,6 +121,7 @@ def _response_trace(
                 if load_coordinate is not None
                 else {}
             ),
+            **dict(replay_bindings or {}),
         },
     }
     source_path = None
@@ -724,9 +726,23 @@ def _sweep_evidence(
         return command[command.index(flag) + 1]
 
     def run_process(command, **_kwargs):
+        from tools.sim2real.characterization import (
+            load_replay_schedule,
+            scenario_step_count,
+        )
+
         command = list(command)
         output = Path(argument(command, "--output"))
         profile = load_profile(argument(command, "--physics-profile"))
+        replay = load_replay_schedule(
+            Path(argument(command, "--replay-trace")),
+            scenario,
+            steps=scenario_step_count(scenario),
+        )
+        replay_bindings = {
+            "replay_trace_sha256": replay.trace_sha256,
+            "replay_initial_state_sha256": replay.initial_state_sha256,
+        }
         _response_trace(
             output,
             scenario_id=scenario.scenario_id,
@@ -735,6 +751,7 @@ def _sweep_evidence(
             profile=profile,
             load_coordinate="holdout-load",
             runtime_provenance=runtime,
+            replay_bindings=replay_bindings,
         )
         trace = load_trace(output)
         _write_json(output / "runtime_audit.json", {})
@@ -749,6 +766,7 @@ def _sweep_evidence(
                 "trace_sha256": trace.manifest.provenance["trace_sha256"],
                 "profile_id": profile.profile_id,
                 "runtime_audit": "runtime_audit.json",
+                **replay_bindings,
             },
         )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -1234,6 +1252,76 @@ def test_promotion_recomputes_sweep_comparison_and_scenario(tmp_path: Path) -> N
 
     with pytest.raises(ContractError, match="scenario snapshot"):
         evaluate_promotion(profile, evidence, artifact_root=tmp_path / "scenario-case")
+
+
+@pytest.mark.parametrize(
+    ("field", "mutation"),
+    [
+        (field, mutation)
+        for field in ("replay_trace_sha256", "replay_initial_state_sha256")
+        for mutation in ("missing", "mismatch")
+    ],
+)
+def test_promotion_rejects_candidate_results_without_matching_replay_binding(
+    tmp_path: Path, field: str, mutation: str
+) -> None:
+    profile, evidence = _fixture(tmp_path)
+    sweep_root = tmp_path / evidence["actuator_sweeps"]["main_drive"][0]["path"]
+    sweep_results = json.loads((sweep_root / "results.json").read_text())
+    run_output = sweep_root / sweep_results["candidates"][0]["run_output"]
+    run_results_path = run_output / "results.json"
+    run_results = json.loads(run_results_path.read_text())
+    if mutation == "missing":
+        run_results.pop(field)
+    else:
+        run_results[field] = "f" * 64
+    _write_json(run_results_path, run_results)
+
+    label = "replay trace" if field == "replay_trace_sha256" else "replay initial-state"
+    with pytest.raises(ContractError, match=f"{label} provenance mismatch"):
+        evaluate_promotion(profile, evidence, artifact_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field", ("replay_trace_sha256", "replay_initial_state_sha256")
+)
+def test_promotion_rejects_candidate_trace_without_matching_replay_binding(
+    tmp_path: Path, field: str
+) -> None:
+    profile, evidence = _fixture(tmp_path)
+    sweep_binding = evidence["actuator_sweeps"]["main_drive"][0]
+    sweep_root = tmp_path / sweep_binding["path"]
+    sweep_results_path = sweep_root / "results.json"
+    sweep_results = json.loads(sweep_results_path.read_text())
+    candidate = sweep_results["candidates"][0]
+    run_output = sweep_root / candidate["run_output"]
+
+    metadata_path = run_output / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["metadata"]["calibration_constants"][field] = "f" * 64
+    metadata_sha256 = _write_json(metadata_path, metadata)
+    candidate["metadata_sha256"] = metadata_sha256
+
+    status_path = sweep_root / candidate["status_file"]
+    status = json.loads(status_path.read_text())
+    status["metadata_sha256"] = metadata_sha256
+    _write_json(status_path, status)
+    index = dict(sweep_results)
+    index.pop("counts")
+    _write_json(sweep_root / "index.json", index)
+    sweep_binding["results_sha256"] = _write_json(
+        sweep_results_path, sweep_results
+    )
+    holdout = next(
+        condition
+        for condition in evidence["conditions"]
+        if condition["role"] == "holdout"
+    )
+    holdout["sim_artifact"]["metadata_sha256"] = metadata_sha256
+
+    label = "replay trace" if field == "replay_trace_sha256" else "replay initial-state"
+    with pytest.raises(ContractError, match=f"{label} provenance mismatch"):
+        evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
 
 @pytest.mark.parametrize(

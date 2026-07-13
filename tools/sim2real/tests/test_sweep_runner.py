@@ -15,6 +15,7 @@ from tools.sim2real.contracts import (
     ScenarioSpecV1,
     load_profile,
 )
+from tools.sim2real.characterization import load_replay_schedule, scenario_step_count
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.sweep import generate_one_factor_candidates
 from tools.sim2real.traces import (
@@ -391,18 +392,43 @@ def _write_known_load_reference(
 
 
 def _write_sim_artifact(
-    command: list[str], *, profile_override=None, metadata_override=None
+    command: list[str],
+    *,
+    profile_override=None,
+    metadata_override=None,
+    replay_mutation: tuple[str, str, str] | None = None,
 ) -> None:
     scenario = load_scenario(_argument(command, "--scenario"))
     profile = profile_override or load_profile(_argument(command, "--physics-profile"))
     output = Path(_argument(command, "--output"))
+    replay_trace = Path(_argument(command, "--replay-trace"))
+    replay = load_replay_schedule(
+        replay_trace,
+        scenario,
+        steps=scenario_step_count(scenario),
+    )
+    replay_bindings = {
+        "replay_trace_sha256": replay.trace_sha256,
+        "replay_initial_state_sha256": replay.initial_state_sha256,
+    }
+    trace_bindings = dict(replay_bindings)
+    result_bindings = dict(replay_bindings)
+    if replay_mutation is not None:
+        target, field, mutation = replay_mutation
+        selected = trace_bindings if target == "metadata" else result_bindings
+        if mutation == "missing":
+            selected.pop(field)
+        else:
+            selected[field] = "f" * 64
+    metadata = metadata_override or _trace_metadata(scenario)
+    metadata["calibration_constants"].update(trace_bindings)
     manifest = write_trace(
         output,
         _response_arrays(scale=0.8),
         scenario=scenario,
         source="sim",
         profile=profile,
-        metadata=metadata_override or _trace_metadata(scenario),
+        metadata=metadata,
     )
     (output / "runtime_audit.json").write_text("{}\n", encoding="utf-8")
     (output / "results.json").write_text(
@@ -417,11 +443,41 @@ def _write_sim_artifact(
                 "profile_id": profile.profile_id,
                 "contact_validation": None,
                 "runtime_audit": "runtime_audit.json",
+                **result_bindings,
             }
         )
         + "\n",
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "mutation"),
+    [
+        (target, field, mutation)
+        for target in ("metadata", "results")
+        for field in ("replay_trace_sha256", "replay_initial_state_sha256")
+        for mutation in ("missing", "mismatch")
+    ],
+)
+def test_execution_rejects_candidate_without_matching_replay_bindings(
+    tmp_path: Path, target: str, field: str, mutation: str
+) -> None:
+    def run_process(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(
+            command,
+            replay_mutation=(target, field, mutation),
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    label = "replay trace" if field == "replay_trace_sha256" else "replay initial-state"
+    with pytest.raises(ContractError, match=f"{label} provenance mismatch"):
+        _execute(
+            tmp_path / "sweep",
+            candidates=_candidates(1),
+            run_process=run_process,
+        )
 
 
 def _execute(

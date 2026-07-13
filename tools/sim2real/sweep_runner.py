@@ -317,6 +317,29 @@ def _verify_result_fields(
     _json_object(audit_path, "runtime audit")
 
 
+def _verify_replay_bindings(
+    result: Mapping[str, Any],
+    loaded: LoadedTrace,
+    provenance: Mapping[str, Any],
+) -> None:
+    """Prove that the candidate artifact applied the sweep's real replay."""
+
+    constants = loaded.manifest.metadata.get("calibration_constants", {})
+    if not isinstance(constants, Mapping):
+        raise ContractError("candidate trace calibration_constants must be an object")
+    expected = (
+        ("replay_trace_sha256", provenance.get("real_trace_sha256"), "replay trace"),
+        (
+            "replay_initial_state_sha256",
+            provenance.get("replay_initial_state_sha256"),
+            "replay initial-state",
+        ),
+    )
+    for field, digest, label in expected:
+        if constants.get(field) != digest or result.get(field) != digest:
+            raise ContractError(f"candidate {label} provenance mismatch")
+
+
 def _verify_artifact(
     output: Path,
     *,
@@ -357,6 +380,7 @@ def _verify_artifact(
                 f"got {loaded.manifest.metadata.get(field)!r}"
             )
     trace_sha256 = loaded.manifest.provenance["trace_sha256"]
+    _verify_replay_bindings(result, loaded, provenance)
     _verify_result_fields(
         result,
         scenario=scenario,
