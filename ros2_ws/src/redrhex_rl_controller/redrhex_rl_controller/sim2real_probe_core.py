@@ -12,6 +12,8 @@ from typing import Any
 
 RATE_HZ = 60.0
 MAX_TICK_LATENESS_S = 1.0 / RATE_HZ
+# Comparison-only epsilon: prevents exact-period misses from rounding below the cap.
+DEADLINE_COMPARISON_EPSILON_S = 1.0e-9
 REPEATS = 3
 COMMAND_SPEED_RAD_S = 0.25
 NEUTRAL_DURATION_S = 0.5
@@ -185,6 +187,7 @@ def build_preview(main_index: object) -> dict[str, Any]:
         "duration_s": len(schedule) / RATE_HZ,
         "command_speed_cap_rad_s": COMMAND_SPEED_RAD_S,
         "max_tick_lateness_s": MAX_TICK_LATENESS_S,
+        "deadline_comparison_epsilon_s": DEADLINE_COMPARISON_EPSILON_S,
         "terminal_disable_packets": TERMINAL_DISABLE_PACKETS,
         "segments": [dict(segment) for segment in scenario_spec(selected)["command_segments"]],
         "safety": {
@@ -301,7 +304,7 @@ class ProbeRunner:
             reason = f"scheduler overrun during {phase}: wait returned before its deadline"
             self.request_abort(reason, immediate=True)
             raise ProbeAbort(reason)
-        if lateness >= MAX_TICK_LATENESS_S:
+        if lateness >= MAX_TICK_LATENESS_S - DEADLINE_COMPARISON_EPSILON_S:
             reason = (
                 f"scheduler overrun during {phase}: {lateness:.6f} s late reaches "
                 f"{MAX_TICK_LATENESS_S:.6f} s"

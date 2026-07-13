@@ -192,6 +192,7 @@ def test_preview_is_machine_readable_and_reports_exact_caps() -> None:
     assert decoded["duration_s"] == 16.5
     assert decoded["command_speed_cap_rad_s"] == 0.25
     assert decoded["max_tick_lateness_s"] == pytest.approx(1.0 / 60.0)
+    assert decoded["deadline_comparison_epsilon_s"] == pytest.approx(1.0e-9)
     assert decoded["terminal_disable_packets"] >= 5
 
 
@@ -372,6 +373,44 @@ def test_scheduler_overrun_aborts_before_an_overdue_enabled_tick_is_published() 
 
     assert commands
     assert all(not command.enable for command in commands)
+    assert [event["event"] for event in events].count("abort") == 1
+
+
+def test_exact_one_period_overrun_at_nonzero_phase_fails_closed() -> None:
+    core = _load_core()
+    clock = FakeClock()
+    commands = []
+    events = []
+    overrun_tick = 89
+    overrun_deadline = overrun_tick / core.RATE_HZ
+    delayed = False
+
+    def wait_until(deadline: float) -> None:
+        nonlocal delayed
+        clock.wait_until(deadline)
+        if not delayed and deadline == overrun_deadline:
+            clock.now += 1.0 / core.RATE_HZ
+            delayed = True
+
+    runner = core.ProbeRunner(
+        publish_command=lambda command: commands.append((clock.now, command)),
+        publish_event=events.append,
+        safety_snapshot=lambda: _fresh_snapshot(core, clock),
+        monotonic=clock.monotonic,
+        wait_until=wait_until,
+        poll=lambda: None,
+        terminal_pause=lambda: None,
+    )
+
+    with pytest.raises(core.ProbeAbort, match="overrun"):
+        runner.run(0)
+
+    scenario_commands = commands[:overrun_tick]
+    terminal_commands = commands[overrun_tick:]
+    assert len(scenario_commands) == overrun_tick
+    assert all(timestamp < 1.5 for timestamp, _command in scenario_commands)
+    assert len(terminal_commands) == 2 * core.TERMINAL_DISABLE_PACKETS
+    assert all(not command.enable for _timestamp, command in terminal_commands)
     assert [event["event"] for event in events].count("abort") == 1
 
 
