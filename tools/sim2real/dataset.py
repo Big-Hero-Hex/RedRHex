@@ -108,8 +108,9 @@ def import_real_dataset(
         raw_committed = True
         os.replace(episode_stage, episode_final)
         episode_committed = True
+        raw_relative = raw_final.relative_to(final).as_posix()
         manifest["raw"].append(
-            {"path": raw_final.relative_to(final).as_posix(), "sha256": raw_hash}
+            {"path": raw_relative, "sha256": raw_hash}
         )
         manifest["episodes"].append(
             {
@@ -118,6 +119,7 @@ def import_real_dataset(
                 "path": episode_final.relative_to(final).as_posix(),
                 "trace_sha256": trace_manifest.provenance["trace_sha256"],
                 "metadata_sha256": metadata_hash,
+                "raw_path": raw_relative,
             }
         )
         _atomic_json(final / "manifest.json", manifest)

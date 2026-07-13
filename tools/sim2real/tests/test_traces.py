@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from tools.sim2real.contracts import ContractError
+from tools.sim2real.dataset import import_real_dataset
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.traces import load_trace, sha256_path, write_trace
 
@@ -19,6 +20,19 @@ def _valid_arrays() -> dict[str, np.ndarray]:
         "position_time_s": np.array([0.0, 0.25, 0.5, 0.75, 1.0]),
         "position": np.array([0.0, 0.01, 0.04, 0.09, 0.16]),
     }
+
+
+def _imported_dataset(tmp_path: Path):
+    source = tmp_path / "source.npz"
+    np.savez(source, **_valid_arrays())
+    return import_real_dataset(
+        source,
+        tmp_path / "output",
+        dataset_id="integrity",
+        episode_id="run-1",
+        scenario="main-step",
+        latency_clock="sensor_clock",
+    )
 
 
 def test_trace_round_trip_preserves_independent_time_bases_and_hashes(tmp_path: Path) -> None:
@@ -95,6 +109,58 @@ def test_trace_loader_rejects_hash_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ContractError, match="hash mismatch"):
         load_trace(episode)
+
+
+def test_dataset_episode_manifest_links_its_authoritative_raw_copy(tmp_path: Path) -> None:
+    imported = _imported_dataset(tmp_path)
+    loaded = load_trace(imported.episode)
+
+    assert imported.manifest["episodes"][0]["raw_path"] == imported.manifest["raw"][0][
+        "path"
+    ]
+    assert loaded.manifest.scenario_id == "main-step"
+
+
+def test_dataset_trace_loader_rejects_mutated_copied_raw_source(tmp_path: Path) -> None:
+    imported = _imported_dataset(tmp_path)
+    raw_path = imported.dataset / imported.manifest["raw"][0]["path"]
+    raw_path.write_bytes(b"mutated copied raw source")
+
+    with pytest.raises(ContractError, match="dataset raw source hash mismatch"):
+        load_trace(imported.episode)
+
+
+def test_dataset_trace_loader_rejects_mutated_episode_metadata(tmp_path: Path) -> None:
+    imported = _imported_dataset(tmp_path)
+    metadata_path = imported.episode / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["metadata"]["git_sha"] = "mutated-but-contract-valid"
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="dataset metadata hash mismatch"):
+        load_trace(imported.episode)
+
+
+def test_standalone_trace_loading_does_not_require_dataset_linkage(tmp_path: Path) -> None:
+    source = tmp_path / "standalone-source.npz"
+    np.savez(source, **_valid_arrays())
+    episode = tmp_path / "standalone" / "episodes" / "standalone-episode"
+    write_trace(
+        episode,
+        _valid_arrays(),
+        scenario="main-step",
+        source="real",
+        source_path=source,
+    )
+    source.write_bytes(b"source moved or changed outside a managed dataset")
+    metadata_path = episode / "metadata.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["metadata"]["git_sha"] = "standalone-edit"
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_trace(episode)
+
+    assert loaded.manifest.metadata["git_sha"] == "standalone-edit"
 
 
 def test_loader_rejects_object_array_even_with_a_matching_manifest(tmp_path: Path) -> None:

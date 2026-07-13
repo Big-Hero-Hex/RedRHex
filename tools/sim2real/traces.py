@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 import numpy as np
@@ -25,6 +25,13 @@ class LoadedTrace:
     manifest: TraceManifestV1
     arrays: dict[str, np.ndarray]
     directory: Path
+
+
+@dataclass(frozen=True)
+class _DatasetLink:
+    root: Path
+    episode: Mapping[str, Any]
+    raw_entries: tuple[Mapping[str, Any], ...]
 
 
 def sha256_file(path: str | Path) -> str:
@@ -64,6 +71,107 @@ def sha256_json(value: Mapping[str, Any]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _dataset_link(directory: Path) -> _DatasetLink | None:
+    if directory.parent.name != "episodes":
+        return None
+    root = directory.parent.parent
+    dataset_manifest = root / "manifest.json"
+    if not dataset_manifest.is_file():
+        return None
+    try:
+        payload = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContractError(f"dataset manifest is invalid: {exc}") from exc
+    if not isinstance(payload, Mapping) or payload.get("schema_version") != 1:
+        raise ContractError("dataset manifest has an invalid schema version")
+    episodes = payload.get("episodes")
+    raw_entries = payload.get("raw")
+    if not isinstance(episodes, list) or not isinstance(raw_entries, list):
+        raise ContractError("dataset manifest raw/episodes must be arrays")
+    relative = directory.relative_to(root).as_posix()
+    matches = [
+        item
+        for item in episodes
+        if isinstance(item, Mapping) and item.get("path") == relative
+    ]
+    if len(matches) != 1:
+        raise ContractError("dataset manifest must link the episode exactly once")
+    if not all(isinstance(item, Mapping) for item in raw_entries):
+        raise ContractError("dataset manifest raw entries must be objects")
+    return _DatasetLink(root, matches[0], tuple(raw_entries))
+
+
+def _dataset_sha(record: Mapping[str, Any], field: str) -> str:
+    value = record.get(field)
+    if not isinstance(value, str) or len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ContractError(f"dataset manifest {field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _dataset_path(root: Path, value: Any, *, prefix: str) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"dataset manifest {prefix} path must be a non-empty string")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != value
+        or not relative.parts
+        or relative.parts[0] != prefix
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise ContractError(f"dataset manifest {prefix} path is unsafe")
+    return root.joinpath(*relative.parts)
+
+
+def _verify_dataset_metadata(link: _DatasetLink, metadata_path: Path) -> None:
+    if metadata_path.name != "metadata.json" or not metadata_path.is_file():
+        raise ContractError("dataset episode metadata.json is missing")
+    expected = _dataset_sha(link.episode, "metadata_sha256")
+    if sha256_file(metadata_path) != expected:
+        raise ContractError("dataset metadata hash mismatch")
+
+
+def _verify_dataset_sources(link: _DatasetLink, manifest: TraceManifestV1) -> None:
+    episode = link.episode
+    if episode.get("episode_id") != link.root.joinpath(episode["path"]).name:
+        raise ContractError("dataset episode identity/path mismatch")
+    if episode.get("scenario_id") != manifest.scenario_id:
+        raise ContractError("dataset episode scenario linkage mismatch")
+    trace_hash = _dataset_sha(episode, "trace_sha256")
+    if trace_hash != manifest.provenance["trace_sha256"]:
+        raise ContractError("dataset trace hash linkage mismatch")
+    source_hash = manifest.provenance.get("source_sha256")
+    raw_path = episode.get("raw_path")
+    if raw_path is None:
+        matches = [
+            item
+            for item in link.raw_entries
+            if _dataset_sha(item, "sha256") == source_hash
+        ]
+        if len(matches) != 1:
+            raise ContractError("dataset raw source linkage is missing or ambiguous")
+        raw_entry = matches[0]
+        raw_path = raw_entry.get("path")
+    else:
+        _dataset_path(link.root, raw_path, prefix="raw")
+        matches = [item for item in link.raw_entries if item.get("path") == raw_path]
+        if len(matches) != 1:
+            raise ContractError("dataset raw source linkage must resolve exactly once")
+        raw_entry = matches[0]
+    raw_file = _dataset_path(link.root, raw_path, prefix="raw")
+    expected_raw_hash = _dataset_sha(raw_entry, "sha256")
+    if expected_raw_hash != source_hash:
+        raise ContractError("dataset raw source linkage hash mismatch")
+    try:
+        actual_raw_hash = sha256_path(raw_file)
+    except ContractError as exc:
+        raise ContractError("dataset raw source is missing or invalid") from exc
+    if actual_raw_hash != expected_raw_hash:
+        raise ContractError("dataset raw source hash mismatch")
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -299,10 +407,15 @@ def load_trace(
 ) -> LoadedTrace:
     path = Path(value)
     directory = path if path.is_dir() or path.suffix != ".npz" else path.parent
+    dataset_link = _dataset_link(directory) if verify_hashes else None
     metadata_path = directory / "metadata.json"
+    if dataset_link is not None:
+        _verify_dataset_metadata(dataset_link, metadata_path)
     if not metadata_path.exists():
         metadata_path = directory / "manifest.json"
     manifest = load_manifest(metadata_path)
+    if dataset_link is not None:
+        _verify_dataset_sources(dataset_link, manifest)
     trace_path = directory / manifest.trace_file
     if verify_hashes and sha256_file(trace_path) != manifest.provenance["trace_sha256"]:
         raise ContractError("trace hash mismatch")
