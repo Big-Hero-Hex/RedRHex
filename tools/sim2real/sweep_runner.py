@@ -12,6 +12,8 @@ from typing import Any
 
 from .compare import compare_traces
 from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1, load_profile
+from .metrics import compute_subsystem_metrics
+from .provenance import validate_real_trace_provenance
 from .runtime_provenance import production_runtime_provenance
 from .scenarios import load_scenario
 from .sweep import candidate_cache_key
@@ -27,8 +29,19 @@ _RUNTIME_PROVENANCE_FIELDS = {
     "config_sha256",
     "characterization_runner_sha256",
     "sweep_runner_sha256",
+    "runtime_bundle_sha256",
 }
-_DERIVED_PROVENANCE_FIELDS = _RUNTIME_PROVENANCE_FIELDS | {"real_trace_sha256"}
+_DERIVED_PROVENANCE_FIELDS = _RUNTIME_PROVENANCE_FIELDS | {
+    "real_trace_sha256",
+    "real_metadata_sha256",
+    "known_load_trace_sha256",
+    "known_load_metadata_sha256",
+}
+
+
+def _main_effort_limit(profile: CalibrationProfileV1) -> Any:
+    section = profile.simulation_physics.get("main_drive", {})
+    return section.get("effort_limit") if isinstance(section, Mapping) else None
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -263,10 +276,16 @@ def _verify_artifact(
     profile: CalibrationProfileV1,
     scene_mode: str,
     provenance: Mapping[str, Any],
+    expected_metadata_sha256: str | None = None,
 ) -> dict[str, Any]:
     result = _json_object(output / "results.json", "results.json")
     try:
-        loaded = load_trace(output, scenario=scenario, profile=profile)
+        loaded = load_trace(
+            output,
+            scenario=scenario,
+            profile=profile,
+            expected_metadata_sha256=expected_metadata_sha256,
+        )
     except (OSError, ValueError) as exc:
         if isinstance(exc, ContractError):
             raise
@@ -278,6 +297,7 @@ def _verify_artifact(
         "asset_sha256",
         "config_sha256",
         "characterization_runner_sha256",
+        "runtime_bundle_sha256",
     ):
         if loaded.manifest.metadata.get(field) != provenance[field]:
             raise ContractError(
@@ -295,6 +315,7 @@ def _verify_artifact(
     )
     return {
         "trace_sha256": trace_sha256,
+        "metadata_sha256": loaded.metadata_sha256,
         "steps": result["steps"],
         "physics_dt_s": float(result["physics_dt_s"]),
     }
@@ -337,6 +358,7 @@ def _verify_candidate(
     provenance: Mapping[str, Any],
     real_trace: LoadedTrace,
     require_comparison: bool,
+    expected_metadata_sha256: str | None = None,
 ) -> dict[str, Any]:
     verified = _verify_artifact(
         output,
@@ -344,6 +366,7 @@ def _verify_candidate(
         profile=profile,
         scene_mode=scene_mode,
         provenance=provenance,
+        expected_metadata_sha256=expected_metadata_sha256,
     )
     return {
         **verified,
@@ -372,7 +395,7 @@ def _status_entry(status: Mapping[str, Any]) -> dict[str, Any]:
         result["trace_sha256"] = status["trace_sha256"]
     if "error" in status:
         result["error"] = status["error"]
-    for field in ("comparison", "comparison_sha256", "metrics"):
+    for field in ("metadata_sha256", "comparison", "comparison_sha256", "metrics"):
         if field in status:
             result[field] = status[field]
     return result
@@ -478,6 +501,7 @@ def execute_sweep(
     *,
     output: str | Path,
     scenario: ScenarioSpecV1,
+    base_profile: CalibrationProfileV1,
     candidates: Sequence[CalibrationProfileV1],
     sweep_mode: str,
     scene_mode: str,
@@ -489,6 +513,7 @@ def execute_sweep(
     command_prefix: Sequence[str] | None = None,
     generate_only: bool = False,
     real_trace: str | Path | None = None,
+    known_load_trace: str | Path | None = None,
     run_process: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     """Generate, execute, verify, and resume a bounded characterization sweep."""
@@ -504,17 +529,50 @@ def execute_sweep(
         raise ContractError("device must be a non-empty string")
     if not isinstance(scenario, ScenarioSpecV1):
         raise ContractError("scenario must be a ScenarioSpecV1")
+    if not isinstance(base_profile, CalibrationProfileV1):
+        raise ContractError("base_profile must be a CalibrationProfileV1")
     reference: LoadedTrace | None = None
     if real_trace is None:
         if not generate_only:
             raise ContractError("real_trace is required when sweep execution is enabled")
     else:
-        reference = load_trace(real_trace, scenario=scenario)
-        if reference.manifest.source != "real":
-            raise ContractError("real_trace must have source='real'")
+        reference = load_trace(
+            real_trace,
+            scenario=scenario,
+            require_managed_dataset=True,
+        )
+        validate_real_trace_provenance(reference, scenario)
     clean_candidates = list(candidates)
     if not all(isinstance(candidate, CalibrationProfileV1) for candidate in clean_candidates):
         raise ContractError("candidates must contain CalibrationProfileV1 values")
+    effort_limit_changed = any(
+        _main_effort_limit(candidate) != _main_effort_limit(base_profile)
+        for candidate in clean_candidates
+    )
+    known_load: LoadedTrace | None = None
+    if effort_limit_changed and not generate_only and known_load_trace is None:
+        raise ContractError(
+            "managed known-load trace is required before sweeping main_drive.effort_limit"
+        )
+    if known_load_trace is not None:
+        known_load_scenario = load_scenario("manual-load")
+        known_load = load_trace(
+            known_load_trace,
+            scenario=known_load_scenario,
+            require_managed_dataset=True,
+        )
+        validate_real_trace_provenance(known_load, known_load_scenario)
+        known_load_metrics = compute_subsystem_metrics(
+            known_load_scenario, known_load
+        )
+        effort_nm = known_load_metrics.get("torque_saturation_nm")
+        if (
+            isinstance(effort_nm, bool)
+            or not isinstance(effort_nm, (int, float))
+            or not math.isfinite(float(effort_nm))
+            or float(effort_nm) <= 0.0
+        ):
+            raise ContractError("known-load trace does not identify positive effort saturation")
     prefix = None if generate_only else _command_prefix(command_prefix)
     effective_provenance = _execution_provenance(
         _bind_runtime_provenance(provenance, provenance_provider),
@@ -527,6 +585,17 @@ def execute_sweep(
         reference.manifest.provenance["trace_sha256"]
         if reference is not None
         else None
+    )
+    effective_provenance["real_metadata_sha256"] = (
+        reference.metadata_sha256 if reference is not None else None
+    )
+    effective_provenance["known_load_trace_sha256"] = (
+        known_load.manifest.provenance["trace_sha256"]
+        if known_load is not None
+        else None
+    )
+    effective_provenance["known_load_metadata_sha256"] = (
+        known_load.metadata_sha256 if known_load is not None else None
     )
     provenance_sha256 = sha256_json(effective_provenance)
 
@@ -623,6 +692,9 @@ def execute_sweep(
                 relative = _safe_relative(existing_run, "candidate status run_output")
                 if reference is None:
                     raise ContractError("cached execution requires a real trace")
+                expected_metadata_sha256 = status.get("metadata_sha256")
+                if not isinstance(expected_metadata_sha256, str):
+                    raise ContractError("cached candidate status is missing metadata_sha256")
                 verified = _verify_candidate(
                     root.joinpath(*PurePosixPath(relative).parts),
                     scenario=scenario,
@@ -631,6 +703,7 @@ def execute_sweep(
                     provenance=effective_provenance,
                     real_trace=reference,
                     require_comparison=True,
+                    expected_metadata_sha256=expected_metadata_sha256,
                 )
             except (OSError, ValueError) as exc:
                 failure = _candidate_status(

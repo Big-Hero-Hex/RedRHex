@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "scenario_id": "spring",
-  "name": "Damper spring measurement",
-  "description": "Estimate torsional spring stiffness from load force, lever arm, and joint angle.",
+  "scenario_id": "spring-holdout",
+  "name": "Damper spring holdout",
+  "description": "Reserve an operator-entered load/deflection range from spring fitting; this direct measurement remains manual until an Isaac comparison channel is implemented.",
   "subsystem": "spring",
   "experiment_kind": "spring",
   "joint": "damper_0",
-  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "manual_measurement"}],
+  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "held_out_load_range"}],
   "repeats": 3,
   "required_channels": ["load_force", "lever_arm", "angle", "repeat_index"],
   "time_bases": {
@@ -15,7 +15,7 @@
     "angle": "angle_time_s",
     "repeat_index": "angle_time_s"
   },
-  "split": "calibration",
+  "split": "holdout",
   "scene_mode": "manual",
   "safety_class": "manual_load"
 }

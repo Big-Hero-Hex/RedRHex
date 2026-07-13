@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "scenario_id": "manual-load",
-  "name": "Manual static load",
-  "description": "Identify torque saturation from operator force or known mass, lever arm, PWM command, and direction.",
+  "scenario_id": "manual-load-holdout",
+  "name": "Manual static load holdout",
+  "description": "Reserve an operator-reviewed load and lever-arm condition from effort-saturation fitting; this manual scenario is not Isaac-runnable.",
   "subsystem": "main_drive",
   "experiment_kind": "manual_load",
   "joint": "main_0",
-  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "manual_measurement"}],
+  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "held_out_manual_measurement"}],
   "repeats": 3,
   "required_channels": ["load_force", "lever_arm", "command", "direction", "repeat_index"],
   "time_bases": {
@@ -16,7 +16,7 @@
     "direction": "direction_time_s",
     "repeat_index": "load_force_time_s"
   },
-  "split": "calibration",
+  "split": "holdout",
   "scene_mode": "manual",
   "safety_class": "manual_load"
 }

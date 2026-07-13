@@ -151,6 +151,48 @@ def test_abad_measurement_annotations_mark_settled_tail_of_every_pose_and_repeat
     assert np.all(settled[105:120])
 
 
+def test_abad_and_contact_have_distinct_runnable_holdout_scenarios() -> None:
+    from tools.sim2real.characterization import (
+        scenario_step_count,
+        validate_scenario_mode,
+        validate_simulated_experiment,
+    )
+
+    abad_calibration = load_scenario("abad-static")
+    abad_holdout = load_scenario("abad-static-holdout")
+    contact_calibration = load_scenario("friction")
+    contact_holdout = load_scenario("contact-static-settle")
+
+    assert abad_calibration.split == "calibration"
+    assert abad_holdout.split == "holdout"
+    assert {
+        abs(float(segment["value"]))
+        for segment in abad_calibration.command_segments
+        if segment["value"]
+    }.isdisjoint(
+        {
+            abs(float(segment["value"]))
+            for segment in abad_holdout.command_segments
+            if segment["value"]
+        }
+    )
+    assert contact_calibration.split == "calibration"
+    assert contact_calibration.scene_mode == "manual"
+    assert contact_holdout.split == "holdout"
+    assert contact_holdout.scene_mode == "free_root"
+    assert set(contact_holdout.required_channels) == {
+        "root_position",
+        "contact_force_n",
+        "repeat_index",
+        "settled",
+    }
+    assert scenario_step_count(abad_holdout) > 0
+    assert scenario_step_count(contact_holdout) > 0
+    validate_scenario_mode(abad_holdout, "fixed-base")
+    validate_scenario_mode(contact_holdout, "contact")
+    validate_simulated_experiment(contact_holdout)
+
+
 def test_contact_probe_requires_resolved_bodies_and_measurable_force() -> None:
     from tools.sim2real.characterization import validate_contact_probe
 

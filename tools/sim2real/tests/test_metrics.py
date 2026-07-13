@@ -17,6 +17,7 @@ from tools.sim2real.metrics import (
     mass_com_metrics,
     position_derived_velocity,
     stiffness_metrics,
+    static_settle_metrics,
     torsional_spring_metrics,
     step_response_metrics,
     torque_saturation_metrics,
@@ -67,16 +68,23 @@ def test_static_measurement_metrics() -> None:
         lever_arm=np.array([0.1, 0.1, 0.1]),
         command=np.array([0.1, 0.2, 0.25]),
         direction=np.array([1.0, 1.0, -1.0]),
+        repeat_index=np.arange(3),
+        expected_repeats=3,
     )
     mass_com = mass_com_metrics(
         scale_mass=np.array([9.9, 10.0, 10.1]),
-        support_force=np.array([[60.0, 40.0], [60.0, 40.0]]),
+        support_force=np.array([[60.0, 40.0], [60.0, 40.0], [60.0, 40.0]]),
         support_position=np.array([0.0, 1.0]),
+        repeat_index=np.arange(3),
+        expected_repeats=3,
     )
 
     assert stiffness["stiffness_n_per_m"] == pytest.approx(1000.0)
     assert torque["torque_saturation_nm"] == pytest.approx(3.0)
-    assert mass_com == {"mass_kg": pytest.approx(10.0), "com_m": pytest.approx(0.4)}
+    assert torque["repeat_count"] == 3
+    assert mass_com["mass_kg"] == pytest.approx(10.0)
+    assert mass_com["com_m"] == pytest.approx(0.4)
+    assert mass_com["repeat_count"] == 3
 
 
 def test_abad_static_metrics_fit_only_settled_samples_and_report_repeat_variation() -> None:
@@ -98,6 +106,7 @@ def test_abad_static_metrics_fit_only_settled_samples_and_report_repeat_variatio
 
     assert result["schema_version"] == 1
     assert result["metric_kind"] == "abad_static_mapping"
+    assert result["repeat_count"] == 3
     assert result["frame"] == "abad_0"
     assert result["units"] == {
         "target_scale": "1",
@@ -454,16 +463,20 @@ def test_combined_step_coast_scenario_reports_metric_families_separately(
 
 
 def test_torsional_spring_and_variation_metrics() -> None:
+    angles = np.tile(np.array([0.0, 0.1, 0.2]), 3)
     spring = torsional_spring_metrics(
-        angle_rad=np.array([0.0, 0.1, 0.2]),
-        load_force=np.array([0.0, 10.0, 20.0]),
-        lever_arm_m=np.array([0.1, 0.1, 0.1]),
+        angle_rad=angles,
+        load_force=np.tile(np.array([0.0, 10.0, 20.0]), 3),
+        lever_arm_m=np.full(angles.size, 0.1),
+        repeat_index=np.repeat(np.arange(3), 3),
+        expected_repeats=3,
     )
     variation = variation_metrics(
         np.array([1.0, 2.0, 3.0]), metric_name="steady_speed_rad_s"
     )
 
     assert spring["stiffness_nm_per_rad"] == pytest.approx(10.0)
+    assert spring["repeat_count"] == 3
     assert variation == {
         "steady_speed_rad_s_mean": pytest.approx(2.0),
         "steady_speed_rad_s_std": pytest.approx(np.std([1.0, 2.0, 3.0])),
@@ -500,6 +513,7 @@ def test_friction_metrics_report_breakaway_and_constant_speed_repeat_variation()
     assert result["dynamic"]["coefficient_mean"] == pytest.approx(0.15)
     assert result["dynamic"]["coefficient_std"] == pytest.approx(np.std([0.15, 0.16, 0.14]))
     assert result["dynamic"]["coefficient_count"] == 3
+    assert result["repeat_count"] == 3
     assert [item["repeat_index"] for item in result["dynamic"]["repeats"]] == [0, 1, 2]
 
 
@@ -533,6 +547,65 @@ def test_friction_metrics_reject_ambiguous_thresholds_and_nonconstant_speed() ->
             dynamic_speed=np.tile(np.array([0.02, 0.05, 0.08]), 3),
             **common,
         )
+
+
+def test_static_settle_metrics_report_repeat_aware_height_and_compression() -> None:
+    repeat_index = np.repeat(np.arange(3), 4)
+    settled = np.tile(np.array([0.0, 0.0, 1.0, 1.0]), 3)
+    root_height = np.repeat(np.array([0.20, 0.21, 0.19]), 4)
+    root_position = np.column_stack(
+        (np.zeros(root_height.size), np.zeros(root_height.size), root_height)
+    )
+    foot_force = np.repeat(np.array([100.0, 105.0, 95.0]), 4)
+    contact_force = np.column_stack((foot_force * 0.5, foot_force * 0.5))
+
+    result = static_settle_metrics(
+        root_position,
+        contact_force,
+        repeat_index=repeat_index,
+        settled=settled,
+        expected_repeats=3,
+    )
+
+    assert result["schema_version"] == 1
+    assert result["metric_kind"] == "contact_static_settle"
+    assert result["repeat_count"] == 3
+    assert result["settled"]["root_height_m"] == pytest.approx(0.20)
+    assert result["settled"]["root_height_m_std"] == pytest.approx(
+        np.std([0.20, 0.21, 0.19])
+    )
+    assert result["settled"]["contact_force_n"] == pytest.approx(100.0)
+    assert result["settled"]["contact_force_n_std"] == pytest.approx(
+        np.std([100.0, 105.0, 95.0])
+    )
+    assert result["settled"]["repeat_count"] == 3
+
+
+def test_contact_static_settle_scenario_metrics_use_annotations(tmp_path: Path) -> None:
+    scenario = load_scenario("contact-static-settle")
+    time_s = np.arange(12, dtype=float)
+    repeat_index = np.repeat(np.arange(3), 4)
+    settled = np.tile(np.array([0.0, 0.0, 1.0, 1.0]), 3)
+    height = np.repeat(np.array([0.20, 0.21, 0.19]), 4)
+    write_trace(
+        tmp_path / "settle",
+        {
+            "sim_time_s": time_s,
+            "root_position": np.column_stack((np.zeros(12), np.zeros(12), height)),
+            "contact_force_n": np.column_stack((np.full(12, 50.0), np.full(12, 50.0))),
+            "repeat_index": repeat_index,
+            "settled": settled,
+        },
+        scenario=scenario,
+        source="sim",
+    )
+
+    result = compute_subsystem_metrics(
+        scenario, load_trace(tmp_path / "settle", scenario=scenario)
+    )
+
+    assert result["settled"]["root_height_m"] == pytest.approx(0.20)
+    assert result["settled"]["repeat_count"] == 3
 
 
 def test_scenario_metrics_include_abad_mapping_and_dynamic_friction(
@@ -610,6 +683,7 @@ def test_metrics_reject_interpolation_without_full_clock_coverage(
             "command": np.array([0.1, 0.2]),
             "direction_time_s": other_time_s,
             "direction": np.array([1.0, 1.0]),
+            "repeat_index": np.array([0.0, 1.0]),
         },
         scenario=scenario,
         source="sim",

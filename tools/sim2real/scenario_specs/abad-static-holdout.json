@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "scenario_id": "abad-static-holdout",
+  "name": "ABAD static response holdout",
+  "description": "Validate ABAD target mapping at a command level excluded from the static calibration fit.",
+  "subsystem": "abad",
+  "experiment_kind": "abad_static",
+  "joint": "abad_0",
+  "command_segments": [
+    {"duration_s": 0.5, "value": 0.0, "label": "neutral"},
+    {"duration_s": 0.5, "value": 0.1, "label": "positive"},
+    {"duration_s": 0.5, "value": -0.1, "label": "negative"}
+  ],
+  "repeats": 3,
+  "required_channels": ["command", "position", "repeat_index", "settled"],
+  "time_bases": {
+    "command": "command_time_s",
+    "position": "position_time_s",
+    "repeat_index": "position_time_s",
+    "settled": "position_time_s"
+  },
+  "split": "holdout",
+  "scene_mode": "fixed_base",
+  "safety_class": "low_energy"
+}

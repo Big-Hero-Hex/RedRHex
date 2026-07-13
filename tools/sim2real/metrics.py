@@ -238,7 +238,9 @@ def torsional_spring_metrics(
     angle_rad: Any,
     load_force: Any,
     lever_arm_m: Any,
-) -> dict[str, float]:
+    repeat_index: Any | None = None,
+    expected_repeats: int | None = None,
+) -> dict[str, Any]:
     angle = _series(angle_rad, "angle_rad")
     force = _series(load_force, "load_force")
     arm = _series(lever_arm_m, "lever_arm_m")
@@ -248,10 +250,40 @@ def torsional_spring_metrics(
         raise ContractError("spring lever arm must be non-negative and angle must vary")
     torque = force * arm
     slope, intercept = np.polyfit(angle, torque, 1)
-    return {
+    result: dict[str, Any] = {
         "stiffness_nm_per_rad": float(slope),
         "torque_intercept_nm": float(intercept),
     }
+    if repeat_index is not None or expected_repeats is not None:
+        repeat_ids, repeats = _validated_repeats(
+            repeat_index, angle.size, expected_repeats, "spring"
+        )
+        repeat_results: list[dict[str, Any]] = []
+        for repeat_id in repeat_ids:
+            selected = repeats == repeat_id
+            if np.count_nonzero(selected) < 2 or float(np.ptp(angle[selected])) <= 0.0:
+                raise ContractError("each spring repeat requires varying multi-sample angles")
+            repeat_slope, repeat_intercept = np.polyfit(
+                angle[selected], torque[selected], 1
+            )
+            repeat_results.append(
+                {
+                    "repeat_index": int(repeat_id),
+                    "stiffness_nm_per_rad": float(repeat_slope),
+                    "torque_intercept_nm": float(repeat_intercept),
+                }
+            )
+        stiffness = np.asarray(
+            [item["stiffness_nm_per_rad"] for item in repeat_results]
+        )
+        result.update(
+            {
+                "repeat_count": int(repeat_ids.size),
+                "stiffness_nm_per_rad_std": float(np.std(stiffness)),
+                "repeats": repeat_results,
+            }
+        )
+    return result
 
 
 def _integer_series(value: Any, name: str) -> np.ndarray:
@@ -260,6 +292,29 @@ def _integer_series(value: Any, name: str) -> np.ndarray:
     if np.any(series != rounded) or np.any(rounded < 0.0):
         raise ContractError(f"{name} must contain non-negative integers")
     return rounded.astype(np.int64)
+
+
+def _validated_repeats(
+    repeat_index: Any,
+    sample_count: int,
+    expected_repeats: int | None,
+    label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    if (
+        isinstance(expected_repeats, bool)
+        or not isinstance(expected_repeats, int)
+        or expected_repeats < 1
+    ):
+        raise ContractError(f"{label} expected_repeats must be a positive integer")
+    repeats = _integer_series(repeat_index, f"{label} repeat_index")
+    if repeats.size != sample_count:
+        raise ContractError(f"{label} repeat_index must align with its native samples")
+    repeat_ids = np.unique(repeats)
+    if repeat_ids.size != expected_repeats:
+        raise ContractError(
+            f"{label} trace requires exactly {expected_repeats} repeats"
+        )
+    return repeat_ids, repeats
 
 
 def _abad_fit(command: np.ndarray, measured: np.ndarray) -> dict[str, float | int]:
@@ -335,6 +390,7 @@ def abad_static_mapping_metrics(
     return {
         "schema_version": 1,
         "metric_kind": "abad_static_mapping",
+        "repeat_count": int(repeat_ids.size),
         "equation": "actual_rad = target_scale * requested_rad + target_offset_rad",
         "frame": frame,
         "units": {
@@ -364,7 +420,10 @@ def torque_saturation_metrics(
     lever_arm: Any,
     command: Any,
     direction: Any,
-) -> dict[str, float]:
+    *,
+    repeat_index: Any | None = None,
+    expected_repeats: int | None = None,
+) -> dict[str, Any]:
     force = _series(load_force, "load_force")
     arm = _series(lever_arm, "lever_arm")
     pwm = _series(command, "command")
@@ -382,6 +441,26 @@ def torque_saturation_metrics(
         selected = torque[sign == value]
         if selected.size:
             result[label] = float(np.max(selected))
+    if repeat_index is not None or expected_repeats is not None:
+        repeat_ids, repeats = _validated_repeats(
+            repeat_index, force.size, expected_repeats, "manual-load"
+        )
+        maxima = np.asarray(
+            [float(np.max(torque[repeats == repeat_id])) for repeat_id in repeat_ids]
+        )
+        result.update(
+            {
+                "repeat_count": int(repeat_ids.size),
+                "torque_saturation_nm_std": float(np.std(maxima)),
+                "repeats": [
+                    {
+                        "repeat_index": int(repeat_id),
+                        "torque_saturation_nm": float(maximum),
+                    }
+                    for repeat_id, maximum in zip(repeat_ids, maxima, strict=True)
+                ],
+            }
+        )
     return result
 
 
@@ -389,6 +468,9 @@ def mass_com_metrics(
     scale_mass: Any,
     support_force: Any,
     support_position: Any,
+    *,
+    repeat_index: Any | None = None,
+    expected_repeats: int | None = None,
 ) -> dict[str, Any]:
     masses = _series(scale_mass, "scale_mass")
     forces = np.asarray(support_force, dtype=float)
@@ -411,7 +493,34 @@ def mass_com_metrics(
         axis=0,
     ) / total_force
     clean_com: Any = float(com) if np.ndim(com) == 0 else np.asarray(com).tolist()
-    return {"mass_kg": float(np.median(masses)), "com_m": clean_com}
+    result = {"mass_kg": float(np.median(masses)), "com_m": clean_com}
+    if repeat_index is not None or expected_repeats is not None:
+        repeat_ids, repeats = _validated_repeats(
+            repeat_index, masses.size, expected_repeats, "mass-com"
+        )
+        if forces.ndim != 2 or forces.shape[0] != masses.size:
+            raise ContractError(
+                "repeat-aware mass-com support_force must contain one row per scale sample"
+            )
+        per_repeat_mass = np.asarray(
+            [float(np.median(masses[repeats == repeat_id])) for repeat_id in repeat_ids]
+        )
+        result.update(
+            {
+                "repeat_count": int(repeat_ids.size),
+                "mass_kg_std": float(np.std(per_repeat_mass)),
+                "repeats": [
+                    {
+                        "repeat_index": int(repeat_id),
+                        "mass_kg": float(mass),
+                    }
+                    for repeat_id, mass in zip(
+                        repeat_ids, per_repeat_mass, strict=True
+                    )
+                ],
+            }
+        )
+    return result
 
 
 def friction_metrics(
@@ -519,10 +628,81 @@ def friction_metrics(
     return {
         "schema_version": 1,
         "metric_kind": "ground_friction",
+        "repeat_count": int(static_ids.size),
         "frame": frame,
         "units": {"coefficient": "1", "force": "N", "speed": "m/s"},
         "static": summarize(static_results, "breakaway_force"),
         "dynamic": summarize(dynamic_results, "constant_speed_pull"),
+    }
+
+
+def static_settle_metrics(
+    root_position: Any,
+    contact_force_n: Any,
+    *,
+    repeat_index: Any,
+    settled: Any,
+    expected_repeats: int,
+) -> dict[str, Any]:
+    """Summarize settled root height and total foot force by repeat."""
+
+    position = np.asarray(root_position, dtype=float)
+    force = np.asarray(contact_force_n, dtype=float)
+    repeats = _integer_series(repeat_index, "repeat_index")
+    settled_values = _integer_series(settled, "settled")
+    if position.ndim != 2 or position.shape[1] < 3:
+        raise ContractError("root_position must contain xyz samples")
+    if force.ndim < 1 or force.shape[0] != position.shape[0]:
+        raise ContractError("contact_force_n must align with root_position")
+    if repeats.size != position.shape[0] or settled_values.size != position.shape[0]:
+        raise ContractError("static-settle annotations must align with root_position")
+    if not np.isfinite(position).all() or not np.isfinite(force).all():
+        raise ContractError("static-settle samples must be finite")
+    if np.any(force < 0.0):
+        raise ContractError("contact_force_n must be non-negative")
+    if np.any((settled_values != 0) & (settled_values != 1)):
+        raise ContractError("settled must contain only 0 or 1")
+    if (
+        isinstance(expected_repeats, bool)
+        or not isinstance(expected_repeats, int)
+        or expected_repeats < 1
+    ):
+        raise ContractError("expected_repeats must be a positive integer")
+    repeat_ids = np.unique(repeats)
+    if repeat_ids.size != expected_repeats:
+        raise ContractError(
+            f"static-settle trace requires exactly {expected_repeats} repeats"
+        )
+    total_force = force if force.ndim == 1 else np.sum(force, axis=tuple(range(1, force.ndim)))
+    repeat_results: list[dict[str, Any]] = []
+    for repeat_id in repeat_ids:
+        selected = (repeats == repeat_id) & (settled_values == 1)
+        if not np.any(selected):
+            raise ContractError("each static-settle repeat requires settled samples")
+        repeat_results.append(
+            {
+                "repeat_index": int(repeat_id),
+                "root_height_m": float(np.mean(position[selected, 2])),
+                "contact_force_n": float(np.mean(total_force[selected])),
+                "sample_count": int(np.count_nonzero(selected)),
+            }
+        )
+    heights = np.asarray([item["root_height_m"] for item in repeat_results])
+    forces = np.asarray([item["contact_force_n"] for item in repeat_results])
+    return {
+        "schema_version": 1,
+        "metric_kind": "contact_static_settle",
+        "repeat_count": int(repeat_ids.size),
+        "frames": {"root_height_m": "world", "contact_force_n": "feet/ground"},
+        "units": {"root_height_m": "m", "contact_force_n": "N"},
+        "settled": {
+            "root_height_m": float(np.mean(heights)),
+            "root_height_m_std": float(np.std(heights)),
+            "contact_force_n": float(np.mean(forces)),
+            "contact_force_n_std": float(np.std(forces)),
+            "repeat_count": int(repeat_ids.size),
+        },
+        "repeats": repeat_results,
     }
 
 
@@ -571,14 +751,28 @@ def compute_subsystem_metrics(
         }
     if kind == "manual_load":
         target = "load_force"
+        if time_bases["repeat_index"] != time_bases[target]:
+            raise ContractError(
+                "manual-load repeat_index must use the load-force clock"
+            )
         return torque_saturation_metrics(
             arrays[target],
             _interpolate(trace, "lever_arm", target),
             _interpolate(trace, "command", target),
             _interpolate(trace, "direction", target),
+            repeat_index=arrays["repeat_index"],
+            expected_repeats=scenario.repeats,
         )
     if kind == "mass_com":
-        return mass_com_metrics(arrays["scale_mass"], arrays["support_force"], arrays["support_position"])
+        if time_bases["repeat_index"] != time_bases["scale_mass"]:
+            raise ContractError("mass-com repeat_index must use the scale clock")
+        return mass_com_metrics(
+            arrays["scale_mass"],
+            arrays["support_force"],
+            arrays["support_position"],
+            repeat_index=arrays["repeat_index"],
+            expected_repeats=scenario.repeats,
+        )
     if kind == "abad_static":
         command = _interpolate(trace, "command", "position")
         position_clock = time_bases["position"]
@@ -593,10 +787,14 @@ def compute_subsystem_metrics(
             frame=scenario.joint,
         )
     if kind == "spring":
+        if time_bases["repeat_index"] != time_bases["angle"]:
+            raise ContractError("spring repeat_index must use the angle clock")
         return torsional_spring_metrics(
             angle_rad=arrays["angle"],
             load_force=_interpolate(trace, "load_force", "angle"),
             lever_arm_m=_interpolate(trace, "lever_arm", "angle"),
+            repeat_index=arrays["repeat_index"],
+            expected_repeats=scenario.repeats,
         )
     if kind == "friction":
         static_clock = time_bases["breakaway_force"]
@@ -624,6 +822,20 @@ def compute_subsystem_metrics(
             max_dynamic_speed_m_s=max(
                 abs(float(segment["value"])) for segment in scenario.command_segments
             ),
+        )
+    if kind == "static_settle":
+        clock = time_bases["root_position"]
+        if any(
+            time_bases[name] != clock
+            for name in ("contact_force_n", "repeat_index", "settled")
+        ):
+            raise ContractError("static-settle channels must use one native physics clock")
+        return static_settle_metrics(
+            arrays["root_position"],
+            arrays["contact_force_n"],
+            repeat_index=arrays["repeat_index"],
+            settled=arrays["settled"],
+            expected_repeats=scenario.repeats,
         )
     if kind == "audit":
         return {"sample_count": int(arrays[scenario.required_channels[0]].shape[0])}

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "scenario_id": "contact-static-settle",
+  "name": "Static contact settle holdout",
+  "description": "Validate measured ground parameters from repeat-aware root height and foot-force settling without a drop.",
+  "subsystem": "friction",
+  "experiment_kind": "static_settle",
+  "joint": "root",
+  "command_segments": [
+    {"duration_s": 0.5, "value": 0.0, "label": "settle"},
+    {"duration_s": 1.0, "value": 0.0, "label": "measure"}
+  ],
+  "repeats": 3,
+  "required_channels": ["root_position", "contact_force_n", "repeat_index", "settled"],
+  "time_bases": {
+    "root_position": "sim_time_s",
+    "contact_force_n": "sim_time_s",
+    "repeat_index": "sim_time_s",
+    "settled": "sim_time_s"
+  },
+  "split": "holdout",
+  "scene_mode": "free_root",
+  "safety_class": "contact"
+}

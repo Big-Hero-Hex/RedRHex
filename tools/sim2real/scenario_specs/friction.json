@@ -26,7 +26,7 @@
     "dynamic_speed": "dynamic_time_s",
     "dynamic_repeat_index": "dynamic_time_s"
   },
-  "split": "holdout",
+  "split": "calibration",
   "scene_mode": "manual",
   "safety_class": "contact"
 }

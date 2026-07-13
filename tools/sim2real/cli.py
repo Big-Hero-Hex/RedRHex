@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verified real reference episode required for sweep execution.",
     )
     sweep.add_argument(
+        "--known-load-trace",
+        type=Path,
+        default=None,
+        help="Managed manual-load episode required when effort_limit is swept.",
+    )
+    sweep.add_argument(
         "--generate-only",
         action="store_true",
         help="Write candidates and manifests without launching Isaac processes.",
@@ -212,6 +218,22 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             candidates = generate_coarse_grid_candidates(
                 profile, space, max_candidates=args.max_candidates
             )
+        baseline_effort = profile.simulation_physics.get("main_drive", {}).get(
+            "effort_limit"
+        )
+        effort_limit_changed = any(
+            candidate.simulation_physics.get("main_drive", {}).get("effort_limit")
+            != baseline_effort
+            for candidate in candidates
+        )
+        if (
+            effort_limit_changed
+            and not args.generate_only
+            and args.known_load_trace is None
+        ):
+            raise ValueError(
+                "--known-load-trace is required when sweeping main_drive.effort_limit"
+            )
         scene_mode = args.scene_mode or {
             "fixed_base": "fixed-base",
             "free_root": "free-root",
@@ -244,6 +266,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         return sweep_runner.execute_sweep(
             output=args.output,
             scenario=scenario,
+            base_profile=profile,
             candidates=candidates,
             sweep_mode=args.mode,
             scene_mode=scene_mode,
@@ -255,6 +278,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             command_prefix=command_prefix,
             generate_only=args.generate_only,
             real_trace=args.real_trace,
+            known_load_trace=args.known_load_trace,
         )
     if args.command == "run-sim":
         # Importing this bootstrap is the first point at which Isaac Lab is

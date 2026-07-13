@@ -8,9 +8,13 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .compare import compare_traces
 from .contracts import CalibrationProfileV1, ContractError, load_profile
+from .characterization import EXPECTED_FOOT_BODY_NAMES, PHYSICS_DT
 from .metrics import compute_subsystem_metrics
+from .provenance import validate_real_trace_provenance
 from .scenarios import load_scenario
+from .sweep import candidate_cache_key
 from .traces import LoadedTrace, load_trace, sha256_file, sha256_json
 
 
@@ -24,6 +28,18 @@ _AUDIT_FIELDS = {
     "mass_pass",
     "imu_mount_pass",
     "contact_sensor_pass",
+}
+_EXPECTED_AUDIT_UNITS = {
+    "encoder_position": "rad",
+    "main_command": "rad/s",
+    "imu_gyro": "rad/s",
+    "scale_mass": "kg",
+    "load_force": "N",
+}
+_EXPECTED_AUDIT_FRAMES = {
+    "encoder_position": "canonical_joint",
+    "imu_gravity": "imu_mount",
+    "contact_force": "world",
 }
 _HELD_OUT_DIMENSIONS = {"leg", "direction", "command_level", "load"}
 
@@ -140,17 +156,36 @@ def _trace_binding(
     profile: CalibrationProfileV1 | None = None,
 ) -> tuple[LoadedTrace, Mapping[str, Any]]:
     binding = _mapping(value, name)
-    required = {"path", "trace_sha256"}
-    optional = {"episode_id"}
+    required = {"path", "trace_sha256", "metadata_sha256"}
+    optional: set[str] = set()
+    if source == "real":
+        required.update({"dataset_id", "episode_id"})
     _exact_fields(binding, name=name, required=required, optional=optional)
     path = _artifact(root, binding["path"], name)
-    loaded = load_trace(path, scenario=scenario, profile=profile)
+    metadata_sha256 = _sha(binding["metadata_sha256"], f"{name} metadata_sha256")
+    loaded = load_trace(
+        path,
+        scenario=scenario,
+        profile=profile,
+        require_managed_dataset=source == "real",
+        expected_metadata_sha256=metadata_sha256,
+    )
     expected = _sha(binding["trace_sha256"], f"{name} trace_sha256")
     actual = loaded.manifest.provenance["trace_sha256"]
     if actual != expected:
         raise ContractError(f"{name} trace hash mismatch")
     if loaded.manifest.source != source:
         raise ContractError(f"{name} must have source={source!r}")
+    if source == "real":
+        assert loaded.dataset is not None
+        if loaded.dataset.dataset_id != _identifier(
+            binding["dataset_id"], f"{name} dataset_id"
+        ):
+            raise ContractError(f"{name} dataset identity mismatch")
+        if loaded.dataset.episode_id != _identifier(
+            binding["episode_id"], f"{name} episode_id"
+        ):
+            raise ContractError(f"{name} episode identity mismatch")
     return loaded, binding
 
 
@@ -220,6 +255,97 @@ def _scenario_supports(subsystem: str, scenario_subsystem: str) -> bool:
         "rigid_body": {"mass_com", "audit"},
     }
     return scenario_subsystem in supported.get(subsystem, {subsystem})
+
+
+def _required_measurement_source_keys(
+    baseline: CalibrationProfileV1,
+    candidate: CalibrationProfileV1,
+) -> set[str]:
+    """Return profile fields that must remain bound to direct real measurements."""
+
+    required: set[str] = set()
+    for field in ("abad_target_scale", "abad_target_offset_rad"):
+        before = baseline.hardware_mapping.get(field, {})
+        after = candidate.hardware_mapping.get(field, {})
+        if not isinstance(before, Mapping) or not isinstance(after, Mapping):
+            continue
+        for joint in set(before) | set(after):
+            if before.get(joint) != after.get(joint):
+                required.add(f"abad_target:{joint}")
+    before_ground = baseline.simulation_physics.get("ground", {})
+    after_ground = candidate.simulation_physics.get("ground", {})
+    if isinstance(before_ground, Mapping) and isinstance(after_ground, Mapping):
+        if any(
+            before_ground.get(field) != after_ground.get(field)
+            for field in ("static_friction", "dynamic_friction")
+        ):
+            required.add("ground_friction")
+    return required
+
+
+def _main_effort_limit_changed(
+    baseline: CalibrationProfileV1, candidate: CalibrationProfileV1
+) -> bool:
+    before = baseline.simulation_physics.get("main_drive", {})
+    after = candidate.simulation_physics.get("main_drive", {})
+    before_value = before.get("effort_limit") if isinstance(before, Mapping) else None
+    after_value = after.get("effort_limit") if isinstance(after, Mapping) else None
+    return before_value != after_value
+
+
+def _validate_measurement_sources(
+    baseline: CalibrationProfileV1,
+    candidate: CalibrationProfileV1,
+    conditions: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Cross-check candidate source records against calibration-role episodes."""
+
+    required = _required_measurement_source_keys(baseline, candidate)
+    bindings: dict[str, Any] = {}
+    for key in sorted(required):
+        raw_source = candidate.measurement_sources.get(key)
+        if not isinstance(raw_source, Mapping):
+            raise ContractError(
+                f"measurement source {key} is required for the fitted profile field"
+            )
+        matches: list[tuple[str, LoadedTrace]] = []
+        for condition_id, internal in conditions.items():
+            if internal["role"] != "calibration":
+                continue
+            scenario = internal["scenario"]
+            for trace in internal["real_traces"]:
+                dataset = trace.dataset
+                if dataset is None:  # pragma: no cover - real binding already guards this
+                    continue
+                metrics = compute_subsystem_metrics(scenario, trace)
+                frame = metrics.get("frame")
+                expected = {
+                    "trace_sha256": trace.manifest.provenance["trace_sha256"],
+                    "metadata_sha256": trace.metadata_sha256,
+                    "scenario_id": scenario.scenario_id,
+                    "scenario_sha256": trace.manifest.provenance["scenario_sha256"],
+                    "source": trace.manifest.source,
+                    "metric_kind": metrics.get("metric_kind"),
+                    "frame": frame,
+                    "repeat_count": _repeat_count(metrics, trace),
+                    "dataset_id": dataset.dataset_id,
+                    "episode_id": dataset.episode_id,
+                }
+                if dict(raw_source) == expected:
+                    matches.append((condition_id, trace))
+        if len(matches) != 1:
+            raise ContractError(
+                f"measurement source {key} must bind exactly one calibration-role real episode"
+            )
+        condition_id, trace = matches[0]
+        bindings[key] = {
+            "condition_id": condition_id,
+            "dataset_id": trace.dataset.dataset_id,
+            "episode_id": trace.dataset.episode_id,
+            "trace_sha256": trace.manifest.provenance["trace_sha256"],
+            "metadata_sha256": trace.metadata_sha256,
+        }
+    return {"pass": True, "required": sorted(required), "bindings": bindings}
 
 
 def _condition_coordinates(trace: LoadedTrace, scenario: Any) -> dict[str, Any]:
@@ -302,6 +428,461 @@ def _pool(observations: list[tuple[float, float, int]]) -> tuple[float, float, i
     return float(mean), float(math.sqrt(max(0.0, variance))), count
 
 
+def _numeric_vector(value: Any, name: str, *, length: int) -> np.ndarray:
+    if not isinstance(value, list) or len(value) != length:
+        raise ContractError(f"{name} must contain exactly {length} numeric values")
+    result = np.asarray([_number(item, name) for item in value], dtype=float)
+    return result
+
+
+def _derive_audit(
+    root: Path,
+    value: Any,
+    candidate: CalibrationProfileV1,
+) -> dict[str, Any]:
+    binding = _mapping(value, "audit_artifact")
+    _exact_fields(
+        binding,
+        name="audit_artifact",
+        required={"runtime_trace", "runtime_audit", "physical_measurements"},
+    )
+    audit_scenario = load_scenario("audit")
+    runtime_trace, _ = _trace_binding(
+        root,
+        binding["runtime_trace"],
+        "audit runtime_trace",
+        source="sim",
+        scenario=audit_scenario,
+        profile=candidate,
+    )
+    runtime_path, runtime_binding = _file_binding(
+        root, binding["runtime_audit"], "runtime audit"
+    )
+    if runtime_path != runtime_trace.directory / "runtime_audit.json":
+        raise ContractError("runtime audit must be the bound runtime_trace sibling")
+    runtime = _json(runtime_path, "runtime audit")
+    if runtime.get("schema_version") != 1 or isinstance(runtime.get("schema_version"), bool):
+        raise ContractError("runtime audit schema_version must be 1")
+    if runtime.get("num_envs") != 1 or isinstance(runtime.get("num_envs"), bool):
+        raise ContractError("runtime audit must describe one environment")
+    physics_dt = _number(runtime.get("physics_dt_s"), "runtime audit physics_dt_s")
+    if not math.isclose(physics_dt, PHYSICS_DT, rel_tol=0.0, abs_tol=1.0e-12):
+        raise ContractError("runtime audit physics_dt_s must be 1/120 s")
+    bodies = _mapping(runtime.get("body_properties"), "runtime audit body_properties")
+    runtime_mass = _number(bodies.get("total_mass_kg"), "runtime audit total_mass_kg")
+    if runtime_mass <= 0.0:
+        raise ContractError("runtime audit total_mass_kg must be positive")
+    sensors = _mapping(runtime.get("contact_sensors"), "runtime audit contact_sensors")
+    foot_sensor = _mapping(sensors.get("foot"), "runtime audit foot contact sensor")
+    foot_names = foot_sensor.get("body_names")
+    foot_count = foot_sensor.get("body_count")
+    if not isinstance(foot_names, list) or not all(isinstance(item, str) for item in foot_names):
+        raise ContractError("runtime audit foot body_names must be an array of strings")
+    if isinstance(foot_count, bool) or not isinstance(foot_count, int):
+        raise ContractError("runtime audit foot body_count must be an integer")
+
+    physical_path, physical_binding = _file_binding(
+        root, binding["physical_measurements"], "physical audit measurements"
+    )
+    physical = _json(physical_path, "physical audit measurements")
+    _exact_fields(
+        physical,
+        name="physical audit measurements",
+        required={
+            "schema_version",
+            "units",
+            "frames",
+            "joint_sign_observations",
+            "mass_measurements_kg",
+            "mass_instrument_uncertainty_kg",
+            "imu_rest_orientations",
+        },
+    )
+    if physical["schema_version"] != 1 or isinstance(physical["schema_version"], bool):
+        raise ContractError("physical audit schema_version must be 1")
+    units = _mapping(physical["units"], "physical audit units")
+    frames = _mapping(physical["frames"], "physical audit frames")
+    units_pass = units == _EXPECTED_AUDIT_UNITS
+    frames_pass = frames == _EXPECTED_AUDIT_FRAMES
+
+    raw_signs = physical["joint_sign_observations"]
+    if not isinstance(raw_signs, list):
+        raise ContractError("joint_sign_observations must be an array")
+    observed_signs: dict[str, bool] = {}
+    for index, raw in enumerate(raw_signs):
+        observation = _mapping(raw, f"joint_sign_observations[{index}]")
+        _exact_fields(
+            observation,
+            name="joint sign observation",
+            required={"joint", "encoder_delta_rad", "physical_delta_rad"},
+        )
+        joint = _identifier(observation["joint"], "joint sign observation joint")
+        if joint in observed_signs:
+            raise ContractError("joint_sign_observations joints must be unique")
+        encoder_delta = _number(
+            observation["encoder_delta_rad"], "joint sign encoder_delta_rad"
+        )
+        physical_delta = _number(
+            observation["physical_delta_rad"], "joint sign physical_delta_rad"
+        )
+        observed_signs[joint] = (
+            encoder_delta != 0.0
+            and physical_delta != 0.0
+            and encoder_delta * physical_delta > 0.0
+        )
+    expected_main_joints = {f"main_{index}" for index in range(6)}
+    joint_sign_pass = set(observed_signs) == expected_main_joints and all(
+        observed_signs.values()
+    )
+
+    raw_masses = physical["mass_measurements_kg"]
+    if not isinstance(raw_masses, list) or len(raw_masses) < 3:
+        raise ContractError("mass_measurements_kg requires at least three measurements")
+    masses = np.asarray(
+        [_number(item, "mass_measurements_kg") for item in raw_masses], dtype=float
+    )
+    if np.any(masses <= 0.0):
+        raise ContractError("mass_measurements_kg must be positive")
+    mass_uncertainty = _number(
+        physical["mass_instrument_uncertainty_kg"],
+        "mass_instrument_uncertainty_kg",
+        nonnegative=True,
+    )
+    mass_mean = float(np.mean(masses))
+    mass_std = float(np.std(masses))
+    mass_tolerance = max(mass_uncertainty, 2.0 * mass_std)
+    mass_error = abs(runtime_mass - mass_mean)
+    mass_pass = mass_error <= mass_tolerance
+
+    orientations = physical["imu_rest_orientations"]
+    if not isinstance(orientations, list) or len(orientations) < 2:
+        raise ContractError("imu_rest_orientations requires at least two known poses")
+    imu_errors: list[float] = []
+    labels: set[str] = set()
+    for index, raw in enumerate(orientations):
+        orientation = _mapping(raw, f"imu_rest_orientations[{index}]")
+        _exact_fields(
+            orientation,
+            name="IMU rest orientation",
+            required={"label", "measured_gravity", "expected_gravity"},
+        )
+        label = _identifier(orientation["label"], "IMU rest orientation label")
+        if label in labels:
+            raise ContractError("IMU rest orientation labels must be unique")
+        labels.add(label)
+        measured = _numeric_vector(
+            orientation["measured_gravity"], "measured_gravity", length=3
+        )
+        expected = _numeric_vector(
+            orientation["expected_gravity"], "expected_gravity", length=3
+        )
+        measured_norm = float(np.linalg.norm(measured))
+        expected_norm = float(np.linalg.norm(expected))
+        if measured_norm <= 0.0 or expected_norm <= 0.0:
+            raise ContractError("IMU gravity vectors must be nonzero")
+        cosine = float(np.dot(measured, expected) / (measured_norm * expected_norm))
+        imu_errors.append(math.degrees(math.acos(float(np.clip(cosine, -1.0, 1.0)))))
+    imu_mount_pass = max(imu_errors) <= 5.0
+
+    contact = runtime_trace.arrays.get("contact_force_n")
+    max_contact_force = (
+        float(np.max(contact)) if contact is not None and contact.size else 0.0
+    )
+    contact_sensor_pass = (
+        foot_count == len(EXPECTED_FOOT_BODY_NAMES)
+        and set(foot_names) == set(EXPECTED_FOOT_BODY_NAMES)
+        and max_contact_force > 0.05
+    )
+    checks = {
+        "units_pass": units_pass,
+        "frames_pass": frames_pass,
+        "joint_sign_pass": joint_sign_pass,
+        "mass_pass": mass_pass,
+        "imu_mount_pass": imu_mount_pass,
+        "contact_sensor_pass": contact_sensor_pass,
+    }
+    return {
+        "checks": checks,
+        "runtime_trace_sha256": runtime_trace.manifest.provenance["trace_sha256"],
+        "runtime_metadata_sha256": runtime_trace.metadata_sha256,
+        "runtime_audit_sha256": runtime_binding["sha256"],
+        "physical_measurements_sha256": physical_binding["sha256"],
+        "mass": {
+            "runtime_kg": runtime_mass,
+            "real_mean_kg": mass_mean,
+            "real_std_kg": mass_std,
+            "instrument_uncertainty_kg": mass_uncertainty,
+            "tolerance_kg": mass_tolerance,
+            "absolute_error_kg": mass_error,
+        },
+        "imu_max_error_deg": max(imu_errors),
+        "contact_max_force_n": max_contact_force,
+    }
+
+
+def _verify_sweep_for_holdout(
+    root: Path,
+    raw_binding: Any,
+    *,
+    holdout: Mapping[str, Any],
+    internal: Mapping[str, Any],
+    effort_limit_changed: bool,
+    known_load_traces: list[LoadedTrace],
+) -> bool:
+    binding = _mapping(raw_binding, "actuator sweep")
+    _exact_fields(
+        binding,
+        name="actuator sweep",
+        required={"path", "results_sha256"},
+    )
+    sweep_root = _artifact(root, binding["path"], "actuator sweep")
+    if not sweep_root.is_dir():
+        raise ContractError("actuator sweep path must name a directory")
+    results_path = sweep_root / "results.json"
+    if not results_path.is_file():
+        raise ContractError("actuator sweep results.json is missing")
+    expected_results_hash = _sha(
+        binding["results_sha256"], "actuator sweep results_sha256"
+    )
+    if sha256_file(results_path) != expected_results_hash:
+        raise ContractError("actuator sweep results hash mismatch")
+    results = _json(results_path, "actuator sweep results")
+    required_result_fields = {
+        "schema_version",
+        "sweep_sha256",
+        "sweep_mode",
+        "scenario_id",
+        "scene_mode",
+        "provenance_sha256",
+        "candidate_count",
+        "candidates",
+        "counts",
+    }
+    _exact_fields(results, name="actuator sweep results", required=required_result_fields)
+    if results["schema_version"] != 1 or isinstance(results["schema_version"], bool):
+        raise ContractError("actuator sweep results schema_version must be 1")
+    scenario = internal["scenario"]
+    if results["scenario_id"] != scenario.scenario_id:
+        raise ContractError("actuator sweep scenario does not match its holdout")
+    scenario_snapshot = load_scenario(sweep_root / "scenario.json")
+    if scenario_snapshot.to_dict() != scenario.to_dict():
+        raise ContractError("actuator sweep scenario snapshot does not match its holdout")
+    if results["sweep_mode"] not in {"one-factor", "coarse-grid"}:
+        raise ContractError("actuator sweep mode is unsupported")
+    expected_scene_mode = {
+        "fixed_base": "fixed-base",
+        "free_root": "free-root",
+    }.get(scenario.scene_mode)
+    if results["scene_mode"] != expected_scene_mode:
+        raise ContractError("actuator sweep scene mode does not match its holdout")
+
+    provenance = _json(sweep_root / "provenance.json", "actuator sweep provenance")
+    if sha256_json(provenance) != _sha(
+        results["provenance_sha256"], "actuator sweep provenance_sha256"
+    ):
+        raise ContractError("actuator sweep provenance hash mismatch")
+    required_provenance = {
+        "git_sha",
+        "asset_sha256",
+        "config_sha256",
+        "characterization_runner_sha256",
+        "sweep_runner_sha256",
+        "runtime_bundle_sha256",
+        "real_trace_sha256",
+        "real_metadata_sha256",
+        "known_load_trace_sha256",
+        "known_load_metadata_sha256",
+        "scene_mode",
+        "headless",
+        "seed",
+        "device",
+        "sweep_runner_schema_version",
+    }
+    if set(provenance) != required_provenance:
+        raise ContractError("actuator sweep provenance has missing or unknown fields")
+    for field in (
+        "asset_sha256",
+        "config_sha256",
+        "characterization_runner_sha256",
+        "sweep_runner_sha256",
+        "runtime_bundle_sha256",
+    ):
+        _sha(provenance[field], f"actuator sweep provenance {field}")
+    git_sha = provenance["git_sha"]
+    if not isinstance(git_sha, str) or len(git_sha) not in {40, 64}:
+        raise ContractError("actuator sweep provenance git_sha is invalid")
+    real_traces = internal["real_traces"]
+    if len(real_traces) != 1:
+        raise ContractError("an actuator sweep must bind exactly one real holdout episode")
+    real_trace = real_traces[0]
+    if provenance["real_trace_sha256"] != real_trace.manifest.provenance["trace_sha256"]:
+        raise ContractError("actuator sweep real reference trace mismatch")
+    if provenance["real_metadata_sha256"] != real_trace.metadata_sha256:
+        raise ContractError("actuator sweep real reference metadata mismatch")
+    if provenance["scene_mode"] != results["scene_mode"]:
+        raise ContractError("actuator sweep scene mode provenance mismatch")
+    known_load_identity = (
+        provenance["known_load_trace_sha256"],
+        provenance["known_load_metadata_sha256"],
+    )
+    if effort_limit_changed and known_load_traces:
+        expected_known_loads = {
+            (trace.manifest.provenance["trace_sha256"], trace.metadata_sha256)
+            for trace in known_load_traces
+        }
+        if known_load_identity not in expected_known_loads:
+            raise ContractError(
+                "actuator sweep known-load provenance does not match a calibration condition"
+            )
+    elif not effort_limit_changed and any(value is not None for value in known_load_identity):
+        raise ContractError(
+            "actuator sweep must not claim unused known-load provenance"
+        )
+
+    raw_candidates = results["candidates"]
+    candidate_count = results["candidate_count"]
+    if (
+        isinstance(candidate_count, bool)
+        or not isinstance(candidate_count, int)
+        or candidate_count < 1
+        or not isinstance(raw_candidates, list)
+        or len(raw_candidates) != candidate_count
+    ):
+        raise ContractError("actuator sweep candidate_count is invalid")
+    counts = _mapping(results["counts"], "actuator sweep counts")
+    expected_count_fields = {"cached", "completed", "failed", "generated", "pending"}
+    if set(counts) != expected_count_fields:
+        raise ContractError("actuator sweep counts have missing or unknown fields")
+    actual_counts = {
+        name: sum(
+            isinstance(item, Mapping) and item.get("status") == name
+            for item in raw_candidates
+        )
+        for name in expected_count_fields
+    }
+    if dict(counts) != actual_counts:
+        raise ContractError("actuator sweep counts do not match candidate statuses")
+    if any(
+        not isinstance(item, Mapping)
+        or item.get("status") not in {"completed", "cached"}
+        for item in raw_candidates
+    ):
+        raise ContractError("actuator sweep must complete every bounded candidate")
+    index_payload = _json(sweep_root / "index.json", "actuator sweep index")
+    expected_index = dict(results)
+    expected_index.pop("counts")
+    if dict(index_payload) != expected_index:
+        raise ContractError("actuator sweep index and results disagree")
+
+    candidate_profiles: list[CalibrationProfileV1] = []
+    candidate_inside = False
+    holdout_sim_hash = holdout["sim_trace_sha256"]
+    observed_sim_hashes: set[str] = set()
+    for offset, raw_candidate in enumerate(raw_candidates, start=1):
+        item = _mapping(raw_candidate, f"actuator sweep candidate {offset}")
+        if item.get("index") != offset:
+            raise ContractError("actuator sweep candidate indices must be contiguous")
+        status_path = _artifact(sweep_root, item.get("status_file"), "candidate status")
+        status = _json(status_path, "candidate status")
+        if status.get("schema_version") != 1:
+            raise ContractError("candidate status schema_version must be 1")
+        for field, value in item.items():
+            if field == "status_file":
+                continue
+            if status.get(field) != value:
+                raise ContractError(f"candidate status field {field} disagrees with results")
+        profile_path = _artifact(sweep_root, item.get("profile"), "candidate profile")
+        candidate_profile = load_profile(profile_path)
+        profile_sha = sha256_json(candidate_profile.to_dict())
+        if profile_sha != _sha(item.get("profile_sha256"), "candidate profile_sha256"):
+            raise ContractError("candidate profile hash mismatch")
+        candidate_profiles.append(candidate_profile)
+        if item.get("cache_key") != candidate_cache_key(
+            candidate_profile, scenario, provenance=provenance
+        ):
+            raise ContractError("candidate cache key mismatch")
+        run_output = _artifact(sweep_root, item.get("run_output"), "candidate run output")
+        if not run_output.is_dir():
+            raise ContractError("candidate run output must be a directory")
+        sim = load_trace(
+            run_output,
+            scenario=scenario,
+            profile=candidate_profile,
+            expected_metadata_sha256=_sha(
+                item.get("metadata_sha256"), "candidate metadata_sha256"
+            ),
+        )
+        if sim.manifest.source != "sim":
+            raise ContractError("candidate run trace must have source='sim'")
+        sim_hash = sim.manifest.provenance["trace_sha256"]
+        if sim_hash != _sha(item.get("trace_sha256"), "candidate trace_sha256"):
+            raise ContractError("candidate trace hash mismatch")
+        observed_sim_hashes.add(sim_hash)
+        for field in (
+            "git_sha",
+            "asset_sha256",
+            "config_sha256",
+            "characterization_runner_sha256",
+            "runtime_bundle_sha256",
+        ):
+            if sim.manifest.metadata.get(field) != provenance[field]:
+                raise ContractError(f"candidate runtime provenance {field} mismatch")
+        run_results = _json(run_output / "results.json", "candidate results")
+        expected_run = {
+            "schema_version": 1,
+            "scenario_id": scenario.scenario_id,
+            "mode": results["scene_mode"],
+            "trace_sha256": sim_hash,
+            "profile_id": candidate_profile.profile_id,
+        }
+        if any(run_results.get(field) != value for field, value in expected_run.items()):
+            raise ContractError("candidate results do not match the sweep artifact")
+        runtime_audit_name = run_results.get("runtime_audit")
+        runtime_audit = _artifact(run_output, runtime_audit_name, "candidate runtime audit")
+        _json(runtime_audit, "candidate runtime audit")
+        comparison_path = _artifact(
+            sweep_root, item.get("comparison"), "candidate comparison"
+        )
+        if comparison_path.parent != run_output:
+            raise ContractError("candidate comparison must belong to its run output")
+        comparison = _json(comparison_path, "candidate comparison")
+        if sha256_json(comparison) != _sha(
+            item.get("comparison_sha256"), "candidate comparison_sha256"
+        ):
+            raise ContractError("candidate comparison hash mismatch")
+        recomputed = compare_traces(real_trace, sim, scenario=scenario)
+        expected_comparison = {
+            **recomputed,
+            "real_trace_sha256": real_trace.manifest.provenance["trace_sha256"],
+            "sim_trace_sha256": sim_hash,
+        }
+        if dict(comparison) != expected_comparison:
+            raise ContractError("candidate comparison does not match bound traces")
+        if item.get("metrics") != recomputed["subsystems"]:
+            raise ContractError("candidate metrics do not match its comparison")
+        passes = True
+        metrics = compute_subsystem_metrics(scenario, sim)
+        for metric_path, expected in holdout["metrics"].items():
+            value, _, _ = _lookup(metrics, metric_path)
+            if abs(value - expected["real_mean"]) > expected["tolerance"]:
+                passes = False
+        candidate_inside |= passes
+    if holdout_sim_hash not in observed_sim_hashes:
+        raise ContractError("holdout simulator artifact is absent from its complete sweep")
+    expected_sweep_sha = sha256_json(
+        {
+            "schema_version": 1,
+            "sweep_mode": results["sweep_mode"],
+            "scenario": scenario.to_dict(),
+            "candidate_profiles": [profile.to_dict() for profile in candidate_profiles],
+            "provenance": dict(provenance),
+        }
+    )
+    if _sha(results["sweep_sha256"], "actuator sweep_sha256") != expected_sweep_sha:
+        raise ContractError("actuator sweep identity hash mismatch")
+    return candidate_inside
+
+
 def evaluate_promotion(
     profile: CalibrationProfileV1,
     evidence: Mapping[str, Any],
@@ -336,18 +917,12 @@ def evaluate_promotion(
     baseline_path, _ = _file_binding(root, data["baseline_profile"], "baseline profile")
     baseline = load_profile(baseline_path)
     fitted = _changed_subsystems(baseline, candidate)
+    effort_limit_changed = _main_effort_limit_changed(baseline, candidate)
     if not fitted:
         raise ContractError("candidate profile has no fitted subsystem changes from baseline")
 
-    audit_path, _ = _file_binding(root, data["audit_artifact"], "audit artifact")
-    audit_payload = _json(audit_path, "audit artifact")
-    _exact_fields(audit_payload, name="audit artifact", required={"schema_version", "checks"})
-    if audit_payload["schema_version"] != 1 or isinstance(audit_payload["schema_version"], bool):
-        raise ContractError("audit artifact schema_version must be 1")
-    audit = _mapping(audit_payload["checks"], "audit checks")
-    _exact_fields(audit, name="audit checks", required=_AUDIT_FIELDS)
-    if any(not isinstance(audit[field], bool) for field in _AUDIT_FIELDS):
-        raise ContractError("audit checks must be booleans")
+    audit_report = _derive_audit(root, data["audit_artifact"], candidate)
+    audit = audit_report["checks"]
     global_failures = [
         f"audit.{field} failed" for field in sorted(_AUDIT_FIELDS) if not audit[field]
     ]
@@ -360,7 +935,7 @@ def evaluate_promotion(
     }
     episode_ids: set[str] = set()
     condition_ids: set[str] = set()
-    real_hash_roles: dict[str, str] = {}
+    real_source_roles: dict[str, str] = {}
     condition_internal: dict[str, dict[str, Any]] = {}
 
     for index, raw in enumerate(raw_conditions):
@@ -401,14 +976,15 @@ def evaluate_promotion(
                 f"condition {condition_id} real episode {episode_index}",
                 source="real",
             )
-            trace_hash = loaded.manifest.provenance["trace_sha256"]
-            previous_role = real_hash_roles.get(trace_hash)
+            source_hash = loaded.manifest.provenance["source_sha256"]
+            previous_role = real_source_roles.get(source_hash)
             if previous_role is not None and previous_role != role:
                 raise ContractError("calibration and holdout real artifacts must be disjoint")
             if previous_role is not None:
-                raise ContractError("real trace hashes must be unique across conditions")
-            real_hash_roles[trace_hash] = role
+                raise ContractError("real raw sources must be unique across conditions")
+            real_source_roles[source_hash] = role
             episode_scenario = load_scenario(loaded.manifest.scenario_id)
+            validate_real_trace_provenance(loaded, episode_scenario)
             if episode_scenario.split != role:
                 raise ContractError(
                     f"condition {condition_id} role does not match scenario split"
@@ -449,6 +1025,7 @@ def evaluate_promotion(
             "real_trace_sha256": [
                 trace.manifest.provenance["trace_sha256"] for trace in loaded_real
             ],
+            "real_metadata_sha256": [trace.metadata_sha256 for trace in loaded_real],
             "real_repetition_count": repetitions,
             "metrics": {},
         }
@@ -466,63 +1043,81 @@ def evaluate_promotion(
                 raise ContractError("held_out_by contains an unsupported condition dimension")
             if len(held_out_by) != len(set(held_out_by)):
                 raise ContractError("held_out_by values must be unique")
-            sim_trace, _ = _trace_binding(
-                root,
-                condition.get("sim_artifact"),
-                f"condition {condition_id} simulator artifact",
-                source="sim",
-                scenario=scenario,
-                profile=candidate,
-            )
-            if _condition_coordinates(sim_trace, scenario) != coordinates:
-                raise ContractError("simulator artifact coordinates do not match real holdout")
-            if not raw_metrics:
-                raise ContractError("holdout condition metrics must be non-empty")
-            sim_metrics = compute_subsystem_metrics(scenario, sim_trace)
-            real_metric_sets = [compute_subsystem_metrics(scenario, trace) for trace in loaded_real]
-            for metric_path, raw_metric in sorted(raw_metrics.items()):
-                metric = _mapping(raw_metric, f"metric {metric_path}")
-                _exact_fields(
-                    metric,
-                    name=f"metric {metric_path}",
-                    required={"unit", "instrument_uncertainty"},
-                )
-                unit = metric["unit"]
-                if not isinstance(unit, str) or not unit.strip():
-                    raise ContractError(f"metric {metric_path} unit must be non-empty")
-                uncertainty = _number(
-                    metric["instrument_uncertainty"],
-                    f"metric {metric_path}.instrument_uncertainty",
-                    nonnegative=True,
-                )
-                observations = [
-                    _observation(metrics, metric_path, _repeat_count(metrics, trace))
-                    for metrics, trace in zip(real_metric_sets, loaded_real, strict=True)
-                ]
-                real_mean, real_std, real_count = _pool(observations)
-                sim_value, _, _ = _lookup(sim_metrics, metric_path)
-                tolerance = max(uncertainty, 2.0 * real_std)
-                error = abs(sim_value - real_mean)
-                passed = error <= tolerance
-                clean_condition["metrics"][metric_path] = {
-                    "unit": unit,
-                    "real_mean": real_mean,
-                    "real_std": real_std,
-                    "real_count": real_count,
-                    "instrument_uncertainty": uncertainty,
-                    "sim_value": sim_value,
-                    "tolerance": tolerance,
-                    "absolute_error": error,
-                    "pass": passed,
-                }
-                if not passed:
-                    subsystem_failures.append(
-                        f"{subsystem}.{condition_id}.{metric_path} is outside its held-out envelope"
-                    )
             clean_condition["held_out_by"] = list(held_out_by)
-            clean_condition["sim_trace_sha256"] = sim_trace.manifest.provenance[
-                "trace_sha256"
-            ]
+            if scenario.scene_mode == "manual":
+                if "sim_artifact" in condition:
+                    raise ContractError(
+                        "manual holdout cannot claim an Isaac simulator artifact"
+                    )
+                if raw_metrics:
+                    raise ContractError(
+                        "manual holdout metrics must remain empty until an Isaac runner exists"
+                    )
+                subsystem_failures.append(
+                    f"{subsystem}.{condition_id} is not Isaac-runnable and cannot "
+                    "satisfy held-out simulation validation"
+                )
+            else:
+                sim_trace, _ = _trace_binding(
+                    root,
+                    condition.get("sim_artifact"),
+                    f"condition {condition_id} simulator artifact",
+                    source="sim",
+                    scenario=scenario,
+                    profile=candidate,
+                )
+                if _condition_coordinates(sim_trace, scenario) != coordinates:
+                    raise ContractError("simulator artifact coordinates do not match real holdout")
+                if not raw_metrics:
+                    raise ContractError("holdout condition metrics must be non-empty")
+                sim_metrics = compute_subsystem_metrics(scenario, sim_trace)
+                real_metric_sets = [
+                    compute_subsystem_metrics(scenario, trace) for trace in loaded_real
+                ]
+                for metric_path, raw_metric in sorted(raw_metrics.items()):
+                    metric = _mapping(raw_metric, f"metric {metric_path}")
+                    _exact_fields(
+                        metric,
+                        name=f"metric {metric_path}",
+                        required={"unit", "instrument_uncertainty"},
+                    )
+                    unit = metric["unit"]
+                    if not isinstance(unit, str) or not unit.strip():
+                        raise ContractError(f"metric {metric_path} unit must be non-empty")
+                    uncertainty = _number(
+                        metric["instrument_uncertainty"],
+                        f"metric {metric_path}.instrument_uncertainty",
+                        nonnegative=True,
+                    )
+                    observations = [
+                        _observation(metrics, metric_path, _repeat_count(metrics, trace))
+                        for metrics, trace in zip(
+                            real_metric_sets, loaded_real, strict=True
+                        )
+                    ]
+                    real_mean, real_std, real_count = _pool(observations)
+                    sim_value, _, _ = _lookup(sim_metrics, metric_path)
+                    tolerance = max(uncertainty, 2.0 * real_std)
+                    error = abs(sim_value - real_mean)
+                    passed = error <= tolerance
+                    clean_condition["metrics"][metric_path] = {
+                        "unit": unit,
+                        "real_mean": real_mean,
+                        "real_std": real_std,
+                        "real_count": real_count,
+                        "instrument_uncertainty": uncertainty,
+                        "sim_value": sim_value,
+                        "tolerance": tolerance,
+                        "absolute_error": error,
+                        "pass": passed,
+                    }
+                    if not passed:
+                        subsystem_failures.append(
+                            f"{subsystem}.{condition_id}.{metric_path} is outside its held-out envelope"
+                        )
+                clean_condition["sim_trace_sha256"] = sim_trace.manifest.provenance[
+                    "trace_sha256"
+                ]
         clean_condition["failures"] = subsystem_failures
         grouped[subsystem][role].append(clean_condition)
         condition_internal[condition_id] = {
@@ -532,6 +1127,7 @@ def evaluate_promotion(
             "held_out_by": list(condition.get("held_out_by", [])),
             "scenario": scenario,
             "metrics": clean_condition["metrics"],
+            "real_traces": loaded_real,
         }
 
     for condition_id, internal in condition_internal.items():
@@ -542,63 +1138,49 @@ def evaluate_promotion(
             continue
         for dimension in internal["held_out_by"]:
             held_value = internal["coordinates"].get(dimension)
-            if held_value is None or all(
+            if held_value is None or any(
                 item["coordinates"].get(dimension) == held_value for item in calibrations
             ):
                 raise ContractError(
                     f"held-out dimension {dimension} does not differ from calibration"
                 )
 
+    measurement_source_report = _validate_measurement_sources(
+        baseline, candidate, condition_internal
+    )
+    known_load_traces = [
+        trace
+        for internal in condition_internal.values()
+        if internal["role"] == "calibration"
+        and internal["scenario"].experiment_kind == "manual_load"
+        for trace in internal["real_traces"]
+    ]
+
     raw_sweeps = _mapping(data["actuator_sweeps"], "actuator_sweeps")
     if set(raw_sweeps) - fitted:
         raise ContractError("actuator_sweeps references a subsystem not changed by the candidate")
     actuator_mismatch: dict[str, bool] = {subsystem: False for subsystem in fitted}
     if "main_drive" in fitted:
-        sweep = _mapping(raw_sweeps.get("main_drive"), "main_drive actuator sweep")
-        _exact_fields(
-            sweep,
-            name="main_drive actuator sweep",
-            required={"results_path", "results_sha256", "candidate_artifacts"},
-        )
-        results_path = _artifact(root, sweep["results_path"], "actuator sweep results")
-        if sha256_file(results_path) != _sha(sweep["results_sha256"], "sweep results hash"):
-            raise ContractError("actuator sweep results hash mismatch")
-        sweep_results = _json(results_path, "actuator sweep results")
-        if sweep_results.get("schema_version") != 1:
-            raise ContractError("actuator sweep results schema_version must be 1")
-        completed_hashes = {
-            item.get("trace_sha256")
-            for item in sweep_results.get("candidates", [])
-            if isinstance(item, Mapping) and item.get("status") in {"completed", "cached"}
-        }
-        raw_candidates = sweep["candidate_artifacts"]
-        if not isinstance(raw_candidates, list) or not raw_candidates:
-            raise ContractError("actuator sweep candidate_artifacts must be non-empty")
         holdouts = grouped["main_drive"]["holdout"]
-        candidate_inside = False
-        for index, raw_candidate in enumerate(raw_candidates):
-            if not holdouts:
-                break
-            scenario = load_scenario(holdouts[0]["scenario_id"])
-            trace, _ = _trace_binding(
-                root,
-                raw_candidate,
-                f"actuator sweep candidate {index}",
-                source="sim",
-                scenario=scenario,
+        sweeps = raw_sweeps.get("main_drive")
+        if not isinstance(sweeps, list):
+            raise ContractError("main_drive actuator sweeps must be an array")
+        if len(sweeps) != len(holdouts):
+            raise ContractError("every main_drive holdout requires exactly one actuator sweep")
+        inside_by_holdout: list[bool] = []
+        for sweep, holdout in zip(sweeps, holdouts, strict=True):
+            internal = condition_internal[holdout["condition_id"]]
+            inside_by_holdout.append(
+                _verify_sweep_for_holdout(
+                    root,
+                    sweep,
+                    holdout=holdout,
+                    internal=internal,
+                    effort_limit_changed=effort_limit_changed,
+                    known_load_traces=known_load_traces,
+                )
             )
-            trace_hash = trace.manifest.provenance["trace_sha256"]
-            if trace_hash not in completed_hashes:
-                raise ContractError("actuator sweep candidate is absent from completed results")
-            metrics = compute_subsystem_metrics(scenario, trace)
-            candidate_passes = True
-            for condition in holdouts:
-                for metric_path, expected in condition["metrics"].items():
-                    value, _, _ = _lookup(metrics, metric_path)
-                    if abs(value - expected["real_mean"]) > expected["tolerance"]:
-                        candidate_passes = False
-            candidate_inside |= candidate_passes
-        actuator_mismatch["main_drive"] = not candidate_inside
+        actuator_mismatch["main_drive"] = bool(holdouts) and not all(inside_by_holdout)
 
     subsystem_results: dict[str, Any] = {}
     all_failures = list(global_failures)
@@ -610,6 +1192,10 @@ def evaluate_promotion(
             local_failures.append(f"{subsystem} is missing a calibration condition")
         if not holdout:
             local_failures.append(f"{subsystem} is missing a holdout condition")
+        if subsystem == "main_drive" and effort_limit_changed and not known_load_traces:
+            local_failures.append(
+                "main_drive effort-limit fitting requires a managed known-load calibration condition"
+            )
         for condition in calibration + holdout:
             local_failures.extend(condition["failures"])
         mismatch = actuator_mismatch[subsystem]
@@ -634,7 +1220,8 @@ def evaluate_promotion(
         "evidence_sha256": sha256_json(data),
         "eligible_for_review": not all_failures,
         "promotion_requires_reviewed_config_change": True,
-        "audit": dict(audit),
+        "audit": audit_report,
+        "measurement_sources": measurement_source_report,
         "derived_fitted_subsystems": sorted(fitted),
         "subsystems": subsystem_results,
         "failures": all_failures,

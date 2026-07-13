@@ -120,10 +120,15 @@ def test_reviewed_scenario_catalog_is_complete_and_valid() -> None:
         "suspended-main-4-step-coast",
         "suspended-main-5-step-coast",
         "manual-load",
+        "manual-load-holdout",
         "mass-com",
+        "mass-com-holdout",
         "abad-static",
+        "abad-static-holdout",
         "spring",
+        "spring-holdout",
         "friction",
+        "contact-static-settle",
     }
 
     summaries = list_scenarios()
@@ -420,12 +425,14 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
         "scale_mass",
         "support_force",
         "support_position",
+        "repeat_index",
     }
     assert set(load_scenario("manual-load").required_channels) == {
         "load_force",
         "lever_arm",
         "command",
         "direction",
+        "repeat_index",
     }
     assert set(load_scenario("friction").required_channels) == {
         "breakaway_force",
@@ -441,4 +448,11 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
         "load_force",
         "lever_arm",
         "angle",
+        "repeat_index",
     }
+    assert load_scenario("mass-com").split == "calibration"
+    assert load_scenario("mass-com-holdout").split == "holdout"
+    assert load_scenario("spring").split == "calibration"
+    assert load_scenario("spring-holdout").split == "holdout"
+    assert load_scenario("manual-load").split == "calibration"
+    assert load_scenario("manual-load-holdout").split == "holdout"

@@ -16,7 +16,12 @@ from tools.sim2real.contracts import (
 )
 from tools.sim2real.scenarios import load_scenario
 from tools.sim2real.sweep import generate_one_factor_candidates
-from tools.sim2real.traces import sha256_json, write_trace
+from tools.sim2real.traces import (
+    sha256_file,
+    sha256_json,
+    sha256_path,
+    write_trace,
+)
 
 
 def _profile() -> CalibrationProfileV1:
@@ -39,6 +44,17 @@ def _candidates(count: int = 2) -> list[CalibrationProfileV1]:
         _profile(),
         {"simulation_physics.main_drive.damping": [0.3, 0.4][:count]},
     )
+
+
+def _effort_profiles() -> tuple[CalibrationProfileV1, CalibrationProfileV1]:
+    payload = _profile().to_dict()
+    payload["simulation_physics"]["main_drive"]["effort_limit"] = 1.0
+    baseline = CalibrationProfileV1.from_dict(payload)
+    candidate = generate_one_factor_candidates(
+        baseline,
+        {"simulation_physics.main_drive.effort_limit": [2.0]},
+    )[0]
+    return baseline, candidate
 
 
 def _argument(command: list[str], flag: str) -> str:
@@ -78,6 +94,7 @@ def _trace_metadata(scenario: ScenarioSpecV1, **overrides: Any) -> dict[str, Any
         "asset_sha256": "a" * 64,
         "config_sha256": "b" * 64,
         "characterization_runner_sha256": "c" * 64,
+        "runtime_bundle_sha256": "e" * 64,
     }
     metadata.update(overrides)
     return metadata
@@ -90,22 +107,135 @@ def _runtime_provenance(**overrides: Any) -> dict[str, str]:
         "config_sha256": "b" * 64,
         "characterization_runner_sha256": "c" * 64,
         "sweep_runner_sha256": "d" * 64,
+        "runtime_bundle_sha256": "e" * 64,
     }
     provenance.update(overrides)
     return provenance
 
 
 def _write_real_reference(output: Path, scenario: ScenarioSpecV1) -> None:
+    dataset = output.parent.parent
+    raw = dataset / "raw" / f"{output.name}.bin"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"immutable managed real reference")
+    manifest = write_trace(
+        output,
+        _response_arrays(scale=1.0),
+        scenario=scenario,
+        source="real",
+        source_path=raw,
+        profile=_profile(),
+        metadata={
+            **_trace_metadata(scenario),
+        },
+    )
+    metadata_sha256 = sha256_file(output / "metadata.json")
+    dataset_manifest = {
+        "schema_version": 1,
+        "dataset_id": dataset.name,
+        "raw": [
+            {
+                "path": raw.relative_to(dataset).as_posix(),
+                "sha256": sha256_path(raw),
+            }
+        ],
+        "episodes": [
+            {
+                "episode_id": output.name,
+                "scenario_id": scenario.scenario_id,
+                "path": output.relative_to(dataset).as_posix(),
+                "trace_sha256": manifest.provenance["trace_sha256"],
+                "metadata_sha256": metadata_sha256,
+                "raw_path": raw.relative_to(dataset).as_posix(),
+            }
+        ],
+    }
+    (dataset / "manifest.json").write_text(
+        json.dumps(dataset_manifest) + "\n", encoding="utf-8"
+    )
+
+
+def _write_standalone_real_reference(output: Path, scenario: ScenarioSpecV1) -> None:
+    raw = output.parent / f"{output.name}.bin"
+    raw.write_bytes(b"standalone real reference")
     write_trace(
         output,
         _response_arrays(scale=1.0),
         scenario=scenario,
         source="real",
+        source_path=raw,
+        profile=_profile(),
+        metadata=_trace_metadata(scenario),
+    )
+
+
+def _write_known_load_reference(output: Path) -> None:
+    scenario = load_scenario("manual-load")
+    dataset = output.parent.parent
+    raw = dataset / "raw" / f"{output.name}.bin"
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_bytes(b"immutable known-load measurement")
+    time_s = np.array([0.0, 1.0, 2.0])
+    manifest = write_trace(
+        output,
+        {
+            "load_force_time_s": time_s,
+            "load_force": np.array([10.0, 11.0, 9.0]),
+            "lever_arm_time_s": time_s,
+            "lever_arm": np.full(3, 0.1),
+            "command_time_s": time_s,
+            "command": np.array([0.2, 0.2, 0.2]),
+            "direction_time_s": time_s,
+            "direction": np.array([1.0, 1.0, 1.0]),
+            "repeat_index": np.arange(3),
+        },
+        scenario=scenario,
+        source="real",
+        source_path=raw,
         profile=_profile(),
         metadata={
-            **_trace_metadata(scenario),
-            "raw_data_sha256": "f" * 64,
+            "units": {
+                "load_force": "N",
+                "lever_arm": "m",
+                "command": "normalized",
+                "direction": "1",
+                "repeat_index": "1",
+            },
+            "frames": {
+                "load_force": "main_0",
+                "lever_arm": "main_0",
+                "command": "main_0",
+                "direction": "main_0",
+                "repeat_index": "main_0",
+            },
+            "calibration_constants": {
+                "position_mapping_source": "profile:baseline",
+                "requested_command_source": "profile:baseline",
+            },
         },
+    )
+    dataset_manifest = {
+        "schema_version": 1,
+        "dataset_id": dataset.name,
+        "raw": [
+            {
+                "path": raw.relative_to(dataset).as_posix(),
+                "sha256": sha256_path(raw),
+            }
+        ],
+        "episodes": [
+            {
+                "episode_id": output.name,
+                "scenario_id": scenario.scenario_id,
+                "path": output.relative_to(dataset).as_posix(),
+                "trace_sha256": manifest.provenance["trace_sha256"],
+                "metadata_sha256": sha256_file(output / "metadata.json"),
+                "raw_path": raw.relative_to(dataset).as_posix(),
+            }
+        ],
+    }
+    (dataset / "manifest.json").write_text(
+        json.dumps(dataset_manifest) + "\n", encoding="utf-8"
     )
 
 
@@ -161,12 +291,20 @@ def _execute(
         if generate_only:
             real_trace = None
         else:
-            real_trace = output.parent / f"{output.name}-real"
+            real_trace = (
+                output.parent
+                / "datasets"
+                / "sim2real"
+                / f"{output.name}-dataset"
+                / "episodes"
+                / f"{output.name}-real"
+            )
             if not real_trace.exists():
                 _write_real_reference(real_trace, selected_scenario)
     return execute_sweep(
         output=output,
         scenario=selected_scenario,
+        base_profile=_profile(),
         candidates=candidates or _candidates(),
         sweep_mode="one-factor",
         scene_mode="fixed-base",
@@ -178,6 +316,7 @@ def _execute(
         command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
         generate_only=generate_only,
         real_trace=real_trace,
+        known_load_trace=None,
         run_process=run_process,
     )
 
@@ -240,6 +379,37 @@ def test_execute_sweep_runs_fresh_process_per_candidate_and_verifies_outputs(
         assert payload["real_trace_sha256"] == provenance["real_trace_sha256"]
         assert payload["sim_trace_sha256"] == candidate["trace_sha256"]
         assert candidate["comparison_sha256"] == sha256_json(payload)
+        run = tmp_path / "sweep" / candidate["run_output"]
+        assert candidate["metadata_sha256"] == sha256_file(run / "metadata.json")
+        status = json.loads(
+            (tmp_path / "sweep" / candidate["status_file"]).read_text()
+        )
+        assert status["metadata_sha256"] == candidate["metadata_sha256"]
+
+
+def test_cached_candidate_rejects_metadata_changed_after_completion(
+    tmp_path: Path,
+) -> None:
+    def first_run(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    output = tmp_path / "sweep"
+    result = _execute(output, candidates=_candidates(1), run_process=first_run)
+    metadata_path = output / result["candidates"][0]["run_output"] / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["metadata"]["operator_note"] = "tampered after completion"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ContractError, match="metadata.*hash mismatch"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("tampered cache must fail before running")
+            ),
+        )
 
 
 def test_execution_requires_real_reference_before_writing_output(tmp_path: Path) -> None:
@@ -256,6 +426,122 @@ def test_execution_requires_real_reference_before_writing_output(tmp_path: Path)
         )
 
     assert not output.exists()
+
+
+def test_execution_rejects_standalone_real_reference_before_writing_output(
+    tmp_path: Path,
+) -> None:
+    scenario = load_scenario("main-step")
+    standalone = tmp_path / "standalone-real"
+    _write_standalone_real_reference(standalone, scenario)
+    output = tmp_path / "sweep"
+
+    with pytest.raises(ContractError, match="managed dataset"):
+        _execute(
+            output,
+            candidates=_candidates(1),
+            scenario=scenario,
+            real_trace=standalone,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("standalone reference must fail before running")
+            ),
+        )
+
+    assert not output.exists()
+
+
+def test_effort_limit_sweep_requires_managed_known_load_evidence(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.sweep_runner import execute_sweep
+
+    baseline, candidate = _effort_profiles()
+    scenario = load_scenario("main-step")
+    real = (
+        tmp_path
+        / "datasets"
+        / "sim2real"
+        / "main-reference-dataset"
+        / "episodes"
+        / "main-reference-real"
+    )
+    _write_real_reference(real, scenario)
+
+    with pytest.raises(ContractError, match="known-load.*effort_limit"):
+        execute_sweep(
+            output=tmp_path / "sweep",
+            scenario=scenario,
+            base_profile=baseline,
+            candidates=[candidate],
+            sweep_mode="one-factor",
+            scene_mode="fixed-base",
+            headless=True,
+            seed=17,
+            device="cpu",
+            provenance={},
+            provenance_provider=lambda: _runtime_provenance(),
+            command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
+            real_trace=real,
+            known_load_trace=None,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("missing known load must fail before running")
+            ),
+        )
+
+
+def test_effort_limit_sweep_binds_managed_known_load_evidence(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.sweep_runner import execute_sweep
+
+    baseline, candidate = _effort_profiles()
+    scenario = load_scenario("main-step")
+    real = (
+        tmp_path
+        / "datasets"
+        / "sim2real"
+        / "main-reference-dataset"
+        / "episodes"
+        / "main-reference-real"
+    )
+    known_load = (
+        tmp_path
+        / "datasets"
+        / "sim2real"
+        / "known-load-dataset"
+        / "episodes"
+        / "known-load-real"
+    )
+    _write_real_reference(real, scenario)
+    _write_known_load_reference(known_load)
+
+    def run_process(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = execute_sweep(
+        output=tmp_path / "sweep",
+        scenario=scenario,
+        base_profile=baseline,
+        candidates=[candidate],
+        sweep_mode="one-factor",
+        scene_mode="fixed-base",
+        headless=True,
+        seed=17,
+        device="cpu",
+        provenance={},
+        provenance_provider=lambda: _runtime_provenance(),
+        command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
+        real_trace=real,
+        known_load_trace=known_load,
+        run_process=run_process,
+    )
+
+    provenance = json.loads((tmp_path / "sweep" / "provenance.json").read_text())
+    assert result["counts"]["completed"] == 1
+    assert len(provenance["known_load_trace_sha256"]) == 64
+    assert len(provenance["known_load_metadata_sha256"]) == 64
 
 
 def test_cached_comparison_is_recomputed_against_bound_real_trace(
@@ -462,8 +748,11 @@ def test_artifact_provenance_mismatch_fails_closed(tmp_path: Path) -> None:
 
 
 def test_runtime_provenance_provider_hashes_production_inputs(tmp_path: Path) -> None:
-    from tools.sim2real.runtime_provenance import production_runtime_provenance
-    from tools.sim2real.traces import sha256_file
+    from tools.sim2real.runtime_provenance import (
+        _BEHAVIOR_INPUTS,
+        production_runtime_provenance,
+    )
+    from tools.sim2real.traces import sha256_file, sha256_json
 
     paths = {
         "asset_sha256": tmp_path / "RedRhex.usd",
@@ -477,6 +766,11 @@ def test_runtime_provenance_provider_hashes_production_inputs(tmp_path: Path) ->
     for index, path in enumerate(paths.values(), start=1):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(f"input-{index}".encode())
+    for index, relative in enumerate(_BEHAVIOR_INPUTS, start=1):
+        path = tmp_path / relative
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"behavior-{index}".encode())
 
     def run_git(command, **kwargs):
         assert command == ["git", "rev-parse", "HEAD"]
@@ -488,6 +782,12 @@ def test_runtime_provenance_provider_hashes_production_inputs(tmp_path: Path) ->
     assert result["git_sha"] == "e" * 40
     for field, path in paths.items():
         assert result[field] == sha256_file(path)
+    assert result["runtime_bundle_sha256"] == sha256_json(
+        {
+            relative.as_posix(): sha256_file(tmp_path / relative)
+            for relative in _BEHAVIOR_INPUTS
+        }
+    )
 
 
 def test_runtime_provenance_is_required_and_cannot_be_user_overridden(
@@ -672,6 +972,8 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
     assert captured["device"] == "cpu"
     assert captured["headless"] is True
     assert captured["real_trace"] == tmp_path / "real-reference"
+    assert captured["known_load_trace"] is None
+    assert captured["base_profile"].to_dict() == _profile().to_dict()
     assert captured["provenance"]["operator"] == "bench"
     assert captured["provenance_provider"] is production_runtime_provenance
 
@@ -743,4 +1045,46 @@ def test_sweep_cli_execution_requires_explicit_real_trace(
     )
 
     with pytest.raises(ValueError, match="--real-trace is required"):
+        _run(args)
+
+
+def test_sweep_cli_requires_known_load_when_effort_limit_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tools.sim2real import sweep_runner
+    from tools.sim2real.cli import _run, build_parser
+
+    baseline, _ = _effort_profiles()
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(baseline.to_dict()), encoding="utf-8")
+    isaac_root = tmp_path / "IsaacLab"
+    isaac_root.mkdir()
+    (isaac_root / "isaaclab.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sweep_runner,
+        "execute_sweep",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CLI must reject before invoking the runner")
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "sweep",
+            str(profile_path),
+            "--scenario",
+            "main-step",
+            "--mode",
+            "one-factor",
+            "--space-json",
+            '{"simulation_physics.main_drive.effort_limit":[2.0]}',
+            "--output",
+            str(tmp_path / "output"),
+            "--isaaclab-root",
+            str(isaac_root),
+            "--real-trace",
+            str(tmp_path / "real-reference"),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="--known-load-trace.*effort_limit"):
         _run(args)
