@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -32,16 +33,41 @@ def build_parser() -> argparse.ArgumentParser:
     comparison.add_argument("--scenario", default=None)
     comparison.add_argument("--output", type=Path, default=None)
 
-    sweep = subparsers.add_parser("sweep", help="Generate bounded deterministic candidates.")
+    sweep = subparsers.add_parser(
+        "sweep", help="Generate or execute a resumable bounded candidate sweep."
+    )
     sweep.add_argument("profile", type=Path)
     sweep.add_argument("--scenario", required=True)
     sweep.add_argument("--mode", choices=("one-factor", "coarse-grid"), required=True)
     sweep.add_argument("--space-json", required=True)
     sweep.add_argument("--max-candidates", type=int, default=256)
     sweep.add_argument("--output", required=True, type=Path)
+    sweep.add_argument(
+        "--scene-mode", choices=("fixed-base", "free-root", "contact"), default=None
+    )
+    sweep.add_argument("--isaaclab-root", type=Path, default=None)
+    sweep.add_argument("--device", default="cuda:0")
+    sweep.add_argument("--seed", type=int, default=0)
+    sweep.add_argument(
+        "--headless", action=argparse.BooleanOptionalAction, default=True
+    )
+    sweep.add_argument("--provenance-json", default="{}")
+    sweep.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="Write candidates and manifests without launching Isaac processes.",
+    )
 
     validator = subparsers.add_parser("validate-profile", help="Validate a versioned profile.")
     validator.add_argument("profile", type=Path)
+
+    promotion = subparsers.add_parser(
+        "validate-promotion",
+        help="Evaluate hash-bound audit and held-out evidence for a candidate profile.",
+    )
+    promotion.add_argument("profile", type=Path)
+    promotion.add_argument("evidence", type=Path)
+    promotion.add_argument("--output", type=Path, default=None)
 
     simulation = subparsers.add_parser(
         "run-sim", help="Run a finite Isaac Lab characterization scenario."
@@ -61,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     simulation.add_argument("--output", type=Path, required=True)
     simulation.add_argument("--physics-profile", type=Path, default=None)
+    simulation.add_argument("--replay-trace", type=Path, default=None)
     simulation.add_argument("--require-contact", action="store_true", default=False)
     simulation.add_argument("--contact-threshold-n", type=float, default=0.05)
     simulation.add_argument("--seed", type=int, default=0)
@@ -98,6 +125,21 @@ def _emit(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False))
 
 
+def _repo_git_sha() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
+
+
 def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "list":
         from .scenarios import list_scenarios
@@ -108,6 +150,18 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
 
         profile = load_profile(args.profile)
         return {"schema_version": 1, "valid": True, "profile_id": profile.profile_id}
+    if args.command == "validate-promotion":
+        from .contracts import load_profile
+        from .promotion import evaluate_promotion, load_validation_evidence
+
+        result = evaluate_promotion(
+            load_profile(args.profile), load_validation_evidence(args.evidence)
+        )
+        if args.output is not None:
+            if args.output.exists():
+                raise ValueError(f"output already exists: {args.output}")
+            _write_json(args.output, result)
+        return result
     if args.command == "import-real":
         from .dataset import import_real_dataset
         from .contracts import load_profile
@@ -149,13 +203,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         from .contracts import load_profile
         from .scenarios import load_scenario
         from .sweep import (
-            candidate_cache_key,
             generate_coarse_grid_candidates,
             generate_one_factor_candidates,
         )
+        from . import sweep_runner
+        from .traces import sha256_file
 
-        if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
-            raise ValueError(f"output already exists: {args.output}")
         profile = load_profile(args.profile)
         scenario = load_scenario(args.scenario)
         space = _json_object(args.space_json, "--space-json")
@@ -167,26 +220,50 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             candidates = generate_coarse_grid_candidates(
                 profile, space, max_candidates=args.max_candidates
             )
-        entries = []
-        for index, candidate in enumerate(candidates, start=1):
-            relative = Path("candidates") / f"{index:04d}.json"
-            _write_json(args.output / relative, candidate.to_dict())
-            entries.append(
-                {
-                    "index": index,
-                    "profile": relative.as_posix(),
-                    "cache_key": candidate_cache_key(candidate, scenario),
-                }
+        scene_mode = args.scene_mode or {
+            "fixed_base": "fixed-base",
+            "free_root": "free-root",
+        }.get(scenario.scene_mode)
+        if scene_mode is None:
+            raise ValueError(
+                f"--scene-mode is required for scenario scene_mode={scenario.scene_mode!r}"
             )
-        index_payload = {
-            "schema_version": 1,
-            "mode": args.mode,
-            "scenario_id": scenario.scenario_id,
-            "candidate_count": len(entries),
-            "candidates": entries,
-        }
-        _write_json(args.output / "index.json", index_payload)
-        return index_payload
+
+        command_prefix = None
+        if not args.generate_only:
+            root_value = args.isaaclab_root or os.environ.get("ISAACLAB_ROOT")
+            if root_value is None:
+                raise ValueError(
+                    "--isaaclab-root or ISAACLAB_ROOT is required unless --generate-only is used"
+                )
+            launcher = Path(root_value).expanduser() / "isaaclab.sh"
+            if not launcher.is_file():
+                raise ValueError(f"Isaac Lab launcher does not exist: {launcher}")
+            command_prefix = (
+                str(launcher),
+                "-p",
+                "-m",
+                "tools.sim2real",
+            )
+
+        provenance = _json_object(args.provenance_json, "--provenance-json")
+        git_sha = _repo_git_sha()
+        if git_sha is not None:
+            provenance["git_sha"] = git_sha
+        provenance["sweep_runner_sha256"] = sha256_file(Path(sweep_runner.__file__))
+        return sweep_runner.execute_sweep(
+            output=args.output,
+            scenario=scenario,
+            candidates=candidates,
+            sweep_mode=args.mode,
+            scene_mode=scene_mode,
+            headless=args.headless,
+            seed=args.seed,
+            device=args.device,
+            provenance=provenance,
+            command_prefix=command_prefix,
+            generate_only=args.generate_only,
+        )
     if args.command == "run-sim":
         # Importing this bootstrap is the first point at which Isaac Lab is
         # required. All CPU-only commands and parser construction stay light.
@@ -202,6 +279,8 @@ def main(argv: list[str] | None = None) -> int:
         result = _run(args)
         if args.command != "run-sim":
             _emit(result)
+        if args.command == "validate-promotion" and not result["eligible_for_review"]:
+            return 3
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

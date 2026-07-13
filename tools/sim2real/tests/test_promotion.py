@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
 from tools.sim2real.contracts import CalibrationProfileV1, ContractError
+from tools.sim2real.cli import main
 from tools.sim2real.promotion import evaluate_promotion
 from tools.sim2real.traces import sha256_json
 
@@ -192,3 +195,32 @@ def test_duplicate_condition_or_episode_identity_is_rejected() -> None:
     )
     with pytest.raises(ContractError, match="episode_id.*unique"):
         evaluate_promotion(profile, duplicate_episode)
+
+
+def test_validate_promotion_cli_writes_report_and_returns_nonzero_on_failure(
+    tmp_path: Path, capsys
+) -> None:
+    profile = _profile()
+    profile_path = tmp_path / "profile.json"
+    evidence_path = tmp_path / "evidence.json"
+    output_path = tmp_path / "report.json"
+    profile_path.write_text(json.dumps(profile.to_dict()), encoding="utf-8")
+    evidence = _evidence(profile)
+    evidence["audit"]["frames_pass"] = False
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+
+    code = main(
+        [
+            "validate-promotion",
+            str(profile_path),
+            str(evidence_path),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    emitted = json.loads(capsys.readouterr().out)
+    persisted = json.loads(output_path.read_text(encoding="utf-8"))
+    assert code == 3
+    assert emitted == persisted
+    assert emitted["eligible_for_review"] is False

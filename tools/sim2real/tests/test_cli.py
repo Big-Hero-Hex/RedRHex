@@ -274,6 +274,7 @@ def test_list_validate_and_sweep_commands_emit_json(tmp_path: Path, capsys) -> N
                 '{"simulation_physics.main_drive.damping":[0.2,0.3]}',
                 "--output",
                 str(output),
+                "--generate-only",
             ]
         )
         == 0
@@ -302,6 +303,7 @@ def test_one_factor_sweep_cli_enforces_max_candidates(tmp_path: Path, capsys) ->
             "1",
             "--output",
             str(output),
+            "--generate-only",
         ]
     )
 

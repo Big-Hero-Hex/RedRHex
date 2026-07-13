@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import math
+import json
 import re
+from pathlib import Path
 from typing import Any, Mapping
 
 from .contracts import CalibrationProfileV1, ContractError
@@ -19,6 +21,30 @@ _AUDIT_FIELDS = {
     "contact_sensor_pass",
 }
 _HELD_OUT_DIMENSIONS = {"leg", "direction", "command_level", "load"}
+
+
+def load_validation_evidence(path: str | Path) -> Mapping[str, Any]:
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key {key}")
+            result[key] = value
+        return result
+
+    source = Path(path)
+    try:
+        payload = json.loads(
+            source.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ContractError(f"cannot load validation evidence {source}: {exc}") from exc
+    return _mapping(payload, "validation evidence")
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
