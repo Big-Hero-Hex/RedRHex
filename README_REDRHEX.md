@@ -13,7 +13,7 @@ RedRhex is a 6-legged hexapod robot with 18 degrees of freedom (3 joints per leg
 - **Tripod Gait Locomotion**: Trains the robot to walk using an efficient 3-leg stance pattern
 - **Reinforcement Learning**: PPO (Proximal Policy Optimization) training using RSL-RL framework
 - **ABAD Joint Optimization**: Utilizes hip (ABAD) joints for dynamic balance and terrain adaptation
-- **Physics Simulation**: High-fidelity simulation at 250 Hz using NVIDIA PhysX
+- **Physics Simulation**: NVIDIA PhysX at 120 Hz, with the deployed controller running at 60 Hz
 
 ## Project Structure
 
