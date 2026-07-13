@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -48,6 +49,12 @@ class ScheduledCommand:
     label: str
     actuator_enabled: bool
     repeat_index: int
+
+
+@dataclass(frozen=True)
+class ReplaySchedule:
+    schedule: tuple[ScheduledCommand, ...]
+    trace_sha256: str
 
 
 def characterization_channel_metadata(
@@ -217,6 +224,112 @@ def scenario_schedule(
             )
         )
     return tuple(result)
+
+
+def apply_schedule_delay(
+    schedule: tuple[ScheduledCommand, ...],
+    *,
+    delay_steps: int,
+) -> tuple[ScheduledCommand, ...]:
+    """Delay every command transition by an exact number of physics frames."""
+
+    if isinstance(delay_steps, bool) or not isinstance(delay_steps, int) or delay_steps < 0:
+        raise ContractError("delay_steps must be a non-negative integer")
+    if not schedule:
+        raise ContractError("command schedule must not be empty")
+    if delay_steps == 0:
+        return schedule
+    pending = [schedule[0]] * delay_steps
+    applied: list[ScheduledCommand] = []
+    for requested in schedule:
+        applied.append(pending.pop(0))
+        pending.append(requested)
+    return tuple(applied)
+
+
+def load_replay_schedule(
+    value: str | Path,
+    scenario: ScenarioSpecV1,
+    *,
+    steps: int,
+    physics_dt: float = PHYSICS_DT,
+) -> ReplaySchedule:
+    """Load and zero-order-hold one verified real command trace onto physics steps."""
+
+    from .traces import load_trace
+
+    resolve_scenario_steps(scenario, steps, physics_dt)
+    if "command" not in scenario.time_bases:
+        raise ContractError("replay scenario does not declare a command channel")
+    command_unit = "rad" if scenario.experiment_kind == "abad_static" else "rad/s"
+    loaded = load_trace(
+        value,
+        scenario=scenario,
+        expected_units={"command": command_unit},
+        expected_frames={"command": scenario.joint},
+    )
+    if loaded.manifest.source != "real":
+        raise ContractError("replay trace must have source='real'")
+
+    time_name = loaded.manifest.time_bases.get("command")
+    if time_name is None:
+        raise ContractError("replay trace has no command time base")
+    command_time = np.asarray(loaded.arrays[time_name], dtype=np.float64)
+    command = np.asarray(loaded.arrays["command"], dtype=np.float64)
+    if command.ndim != 1:
+        raise ContractError("isolated replay command must be one-dimensional")
+
+    duration_s = float(steps) * float(physics_dt)
+    constants = loaded.manifest.metadata.get("calibration_constants", {})
+    evidence = constants.get("probe_event_evidence") if isinstance(constants, dict) else None
+    time_origin_s = 0.0
+    coverage_end_s = float(command_time[-1])
+    if evidence is not None:
+        if not isinstance(evidence, dict):
+            raise ContractError("probe replay coverage evidence must be an object")
+        try:
+            time_origin_s = float(evidence["scenario_receive_time_s"])
+            coverage_end_s = float(evidence["complete_receive_time_s"])
+            complete_ticks = int(evidence["complete_ticks"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ContractError("probe replay coverage evidence is incomplete") from exc
+        expected_ticks = int(round(duration_s * 60.0))
+        if complete_ticks != expected_ticks:
+            raise ContractError("probe replay coverage tick count does not match scenario")
+        if not np.isfinite([time_origin_s, coverage_end_s]).all():
+            raise ContractError("probe replay coverage times must be finite")
+
+    relative_time = command_time - time_origin_s
+    relative_coverage_end = coverage_end_s - time_origin_s
+    tolerance = max(1.0e-9, physics_dt * 1.0e-6)
+    if relative_time[0] > tolerance:
+        raise ContractError("replay command trace does not cover scenario start")
+    if relative_coverage_end + tolerance < duration_s:
+        raise ContractError("replay command trace does not cover complete scenario duration")
+
+    sample_time = (np.arange(steps, dtype=np.float64) + 0.5) * physics_dt
+    sample_indices = np.searchsorted(relative_time, sample_time, side="right") - 1
+    if np.any(sample_indices < 0):
+        raise ContractError("replay command trace has no sample at scenario start")
+    replay_values = command[sample_indices]
+    nominal = scenario_schedule(scenario, steps, physics_dt)
+    schedule: list[ScheduledCommand] = []
+    for item, value in zip(nominal, replay_values, strict=True):
+        actuator_enabled = item.actuator_enabled
+        if scenario.experiment_kind == "step_coast":
+            actuator_enabled = not math.isclose(float(value), 0.0, abs_tol=1.0e-12)
+        schedule.append(
+            ScheduledCommand(
+                value=float(value),
+                label=item.label,
+                actuator_enabled=actuator_enabled,
+                repeat_index=item.repeat_index,
+            )
+        )
+    return ReplaySchedule(
+        schedule=tuple(schedule),
+        trace_sha256=loaded.manifest.provenance["trace_sha256"],
+    )
 
 
 def validate_contact_probe(

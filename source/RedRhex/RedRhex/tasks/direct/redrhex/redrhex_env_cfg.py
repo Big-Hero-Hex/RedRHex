@@ -299,6 +299,10 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # - decimation = 2 表示每 2 次物理計算，AI 才做一次決策
     # - 所以 AI 控制頻率 = 120 ÷ 2 = 60 Hz（每秒決策 60 次）
     decimation = 2
+
+    # Explicit calibration profiles may set a deterministic actuator-target
+    # delay in 120 Hz physics steps. The production default remains immediate.
+    sim2real_command_delay_steps = 0
     
     # 每個訓練回合（episode）持續 60 秒
     # 越長的回合讓機器人有更多時間學習和探索

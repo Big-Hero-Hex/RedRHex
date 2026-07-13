@@ -38,11 +38,27 @@ def test_run_sim_parser_is_available_without_importing_isaac() -> None:
     assert args.command == "run-sim"
     assert args.steps == 240
     assert args.physics_profile is None
+    assert args.replay_trace is None
 
     defaults = build_parser().parse_args(
         ["run-sim", "--scenario", "main-step", "--mode", "fixed-base", "--output", "/tmp/out"]
     )
     assert defaults.steps is None
+
+    replay = build_parser().parse_args(
+        [
+            "run-sim",
+            "--scenario",
+            "main-step",
+            "--mode",
+            "fixed-base",
+            "--output",
+            "/tmp/out",
+            "--replay-trace",
+            "/tmp/real-episode",
+        ]
+    )
+    assert replay.replay_trace == Path("/tmp/real-episode")
 
 
 def test_isaac_bootstrap_launches_app_before_importing_runner() -> None:
@@ -157,3 +173,14 @@ def test_training_and_playback_do_not_load_a_default_profile() -> None:
         }
         assert isinstance(defaults.get("default"), ast.Constant)
         assert defaults["default"].value is None
+
+
+def test_training_environment_delays_final_actuator_targets_only_when_configured() -> None:
+    cfg_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py")
+    env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")
+
+    assert "sim2real_command_delay_steps = 0" in cfg_source
+    assert "_apply_sim2real_command_delay" in env_source
+    assert "_requested_target_drive_vel" in env_source
+    assert "_requested_target_abad_pos" in env_source
+    assert env_source.count("self._apply_sim2real_command_delay(") >= 2

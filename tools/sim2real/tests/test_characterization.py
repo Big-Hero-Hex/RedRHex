@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -212,3 +213,155 @@ def test_simulation_scope_refuses_to_invent_a_friction_pull_measurement() -> Non
     validate_simulated_experiment(load_scenario("audit"))
     with pytest.raises(ContractError, match="controlled pull"):
         validate_simulated_experiment(load_scenario("friction"))
+
+
+def test_command_delay_shifts_requested_schedule_by_exact_physics_steps() -> None:
+    from tools.sim2real.characterization import apply_schedule_delay, scenario_schedule
+
+    scenario = load_scenario("main-step")
+    requested = scenario_schedule(scenario, 1260, 1.0 / 120.0)
+
+    applied = apply_schedule_delay(requested, delay_steps=3)
+
+    assert requested[60].value == pytest.approx(0.25)
+    assert [item.value for item in applied[60:63]] == [0.0, 0.0, 0.0]
+    assert applied[63].value == pytest.approx(0.25)
+    assert apply_schedule_delay(requested, delay_steps=0) == requested
+
+
+def _write_replay_trace(
+    tmp_path: Path,
+    *,
+    scenario_id: str = "main-step",
+    unit: str = "rad/s",
+    frame: str | None = None,
+    end_time_s: float | None = None,
+    source: str = "real",
+    calibration_constants: dict[str, object] | None = None,
+) -> Path:
+    from tools.sim2real.characterization import scenario_schedule, scenario_step_count
+    from tools.sim2real.traces import write_trace
+
+    scenario = load_scenario(scenario_id)
+    steps = scenario_step_count(scenario, 1.0 / 120.0)
+    duration_s = steps / 120.0
+    final_time = duration_s if end_time_s is None else end_time_s
+    command_time = np.arange(0.0, final_time + 1.0e-12, 1.0 / 60.0)
+    nominal = scenario_schedule(scenario, steps, 1.0 / 120.0)
+    command = np.asarray(
+        [nominal[min(int(time_s * 120.0), steps - 1)].value for time_s in command_time],
+        dtype=np.float64,
+    )
+    raw = tmp_path / f"{scenario_id}-raw.bin"
+    raw.write_bytes(b"immutable raw replay source")
+    output = tmp_path / f"{scenario_id}-episode"
+    metadata = {
+        "units": {"command": unit, "position": "rad"},
+        "frames": {
+            "command": frame or scenario.joint,
+            "position": scenario.joint,
+        },
+        "calibration_constants": dict(calibration_constants or {}),
+    }
+    write_trace(
+        output,
+        {
+            "command_time_s": command_time,
+            "command": command,
+            "position_time_s": np.asarray([0.0, final_time], dtype=np.float64),
+            "position": np.zeros(2, dtype=np.float64),
+        },
+        scenario=scenario,
+        source=source,
+        source_path=raw,
+        metadata=metadata,
+    )
+    return output
+
+
+def test_real_trace_replay_verifies_provenance_and_resamples_exact_scenario(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.characterization import load_replay_schedule
+
+    trace = _write_replay_trace(tmp_path)
+    replay = load_replay_schedule(
+        trace,
+        load_scenario("main-step"),
+        steps=1260,
+        physics_dt=1.0 / 120.0,
+    )
+
+    assert len(replay.schedule) == 1260
+    assert replay.schedule[59].value == pytest.approx(0.0)
+    assert replay.schedule[60].value == pytest.approx(0.25)
+    assert len(replay.trace_sha256) == 64
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({"unit": "normalized_pwm"}, "unit"),
+        ({"frame": "main_1"}, "frame"),
+        ({"end_time_s": 1.0}, "cover"),
+        ({"source": "sim"}, "real"),
+    ],
+)
+def test_real_trace_replay_rejects_incompatible_or_incomplete_trace(
+    tmp_path: Path, override: dict[str, object], expected: str
+) -> None:
+    from tools.sim2real.characterization import load_replay_schedule
+
+    trace = _write_replay_trace(tmp_path, **override)
+    with pytest.raises(ContractError, match=expected):
+        load_replay_schedule(
+            trace,
+            load_scenario("main-step"),
+            steps=1260,
+            physics_dt=1.0 / 120.0,
+        )
+
+
+def test_real_trace_replay_rejects_scenario_id_or_hash_mismatch(tmp_path: Path) -> None:
+    from tools.sim2real.characterization import load_replay_schedule, scenario_step_count
+
+    trace = _write_replay_trace(tmp_path)
+    other = load_scenario("main-coast")
+    with pytest.raises(ContractError, match="scenario"):
+        load_replay_schedule(
+            trace,
+            other,
+            steps=scenario_step_count(other),
+            physics_dt=1.0 / 120.0,
+        )
+
+
+def test_bound_probe_completion_evidence_covers_suppressed_final_neutral(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.characterization import load_replay_schedule, scenario_step_count
+
+    scenario = load_scenario("suspended-main-0-step-coast")
+    duration_s = scenario_step_count(scenario) / 120.0
+    trace = _write_replay_trace(
+        tmp_path,
+        scenario_id=scenario.scenario_id,
+        end_time_s=duration_s - 0.5,
+        calibration_constants={
+            "probe_event_evidence": {
+                "scenario_receive_time_s": 0.0,
+                "complete_receive_time_s": duration_s,
+                "complete_ticks": int(duration_s * 60.0),
+            }
+        },
+    )
+
+    replay = load_replay_schedule(
+        trace,
+        scenario,
+        steps=scenario_step_count(scenario),
+        physics_dt=1.0 / 120.0,
+    )
+
+    assert len(replay.schedule) == scenario_step_count(scenario)
+    assert replay.schedule[-1].value == pytest.approx(0.0)

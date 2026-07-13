@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -40,6 +41,37 @@ def _set_fields(target: object, values: Mapping[str, Any], field_map: Mapping[st
         setattr(target, attribute, copy.deepcopy(value))
 
 
+def _apply_sensor_timing(
+    env_cfg: object,
+    timing: Mapping[str, float],
+) -> dict[str, float | int]:
+    supported = {"aggregate_command_delay_s"}
+    unsupported = set(timing) - supported
+    if unsupported:
+        raise ContractError(
+            "unsupported sensor_timing fields for simulation: "
+            + ", ".join(sorted(unsupported))
+        )
+    sim = getattr(env_cfg, "sim", None)
+    physics_dt = float(getattr(sim, "dt", 0.0))
+    if not math_is_positive(physics_dt):
+        raise ContractError("environment configuration has no positive finite sim.dt")
+    if not hasattr(env_cfg, "sim2real_command_delay_steps"):
+        raise ContractError("environment configuration does not support sim2real command delay")
+
+    requested_delay_s = float(timing.get("aggregate_command_delay_s", 0.0))
+    if requested_delay_s > 0.0:
+        delay_steps = max(1, int(math.floor(requested_delay_s / physics_dt + 0.5)))
+    else:
+        delay_steps = 0
+    env_cfg.sim2real_command_delay_steps = delay_steps
+    return {
+        **dict(timing),
+        "command_delay_steps": delay_steps,
+        "effective_command_delay_s": delay_steps * physics_dt,
+    }
+
+
 def apply_profile_to_config(
     env_cfg: object,
     profile: CalibrationProfileV1 | None,
@@ -53,6 +85,7 @@ def apply_profile_to_config(
     if profile is None:
         return None
     profile = profile.validate()
+    timing_summary = _apply_sensor_timing(env_cfg, profile.sensor_timing)
     physics = profile.simulation_physics
     robot = _robot_cfg(env_cfg)
 
@@ -110,7 +143,7 @@ def apply_profile_to_config(
         "schema_version": 1,
         "profile_id": profile.profile_id,
         "hardware_mapping": copy.deepcopy(profile.hardware_mapping),
-        "sensor_timing": copy.deepcopy(profile.sensor_timing),
+        "sensor_timing": timing_summary,
         "runtime_physics": {
             name: copy.deepcopy(physics.get(name, {}))
             for name in (

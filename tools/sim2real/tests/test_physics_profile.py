@@ -5,8 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from tools.sim2real.contracts import CalibrationProfileV1
+from tools.sim2real.contracts import CalibrationProfileV1, ContractError
 
 
 def _profile() -> CalibrationProfileV1:
@@ -16,8 +17,6 @@ def _profile() -> CalibrationProfileV1:
             "profile_id": "candidate-a",
             "hardware_mapping": {"pwm_scale": {"Revolute_15": 0.2}},
             "sensor_timing": {
-                "measured_state_rate_hz": 60.0,
-                "velocity_filter_alpha": 0.3,
                 "aggregate_command_delay_s": 0.025,
             },
             "simulation_physics": {
@@ -72,10 +71,11 @@ def _fake_env_cfg() -> SimpleNamespace:
     )
     return SimpleNamespace(
         robot_cfg=robot_cfg,
-        sim=SimpleNamespace(physics_material=material_a),
+        sim=SimpleNamespace(physics_material=material_a, dt=1.0 / 120.0),
         terrain=SimpleNamespace(physics_material=material_b),
         damper_stiffness=200.0,
         damper_damping=20.0,
+        sim2real_command_delay_steps=0,
     )
 
 
@@ -99,7 +99,10 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert candidate.sim.physics_material.static_friction == 0.9
     assert candidate.terrain.physics_material.dynamic_friction == 0.8
     assert summary["profile_id"] == "candidate-a"
-    assert summary["sensor_timing"]["measured_state_rate_hz"] == 60.0
+    assert summary["sensor_timing"]["aggregate_command_delay_s"] == 0.025
+    assert summary["sensor_timing"]["command_delay_steps"] == 3
+    assert summary["sensor_timing"]["effective_command_delay_s"] == pytest.approx(0.025)
+    assert candidate.sim2real_command_delay_steps == 3
 
 
 def test_none_profile_is_a_noop() -> None:
@@ -109,6 +112,46 @@ def test_none_profile_is_a_noop() -> None:
     before = copy.deepcopy(cfg)
     assert apply_profile_to_config(cfg, None) is None
     assert cfg.robot_cfg.spawn.rigid_props.linear_damping == before.robot_cfg.spawn.rigid_props.linear_damping
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "command_delay_s",
+        "sensor_delay_s",
+        "sample_period_s",
+        "measured_state_rate_hz",
+        "velocity_filter_alpha",
+        "position_noise_std_rad",
+        "velocity_filter_window_s",
+    ],
+)
+def test_simulation_profile_rejects_timing_fields_without_a_physical_effect(field: str) -> None:
+    from tools.sim2real.physics_profile import apply_profile_to_config
+
+    payload = _profile().to_dict()
+    payload["sensor_timing"] = {field: 60.0 if field == "measured_state_rate_hz" else 0.01}
+    profile = CalibrationProfileV1.from_dict(payload)
+    cfg = _fake_env_cfg()
+    before = copy.deepcopy(cfg)
+
+    with pytest.raises(ContractError, match="unsupported sensor_timing"):
+        apply_profile_to_config(cfg, profile)
+
+    assert cfg.robot_cfg.spawn.rigid_props.linear_damping == before.robot_cfg.spawn.rigid_props.linear_damping
+
+
+def test_positive_substep_delay_is_not_silently_rounded_to_zero() -> None:
+    from tools.sim2real.physics_profile import apply_profile_to_config
+
+    payload = _profile().to_dict()
+    payload["sensor_timing"] = {"aggregate_command_delay_s": 0.001}
+    cfg = _fake_env_cfg()
+
+    summary = apply_profile_to_config(cfg, CalibrationProfileV1.from_dict(payload))
+
+    assert cfg.sim2real_command_delay_steps == 1
+    assert summary["sensor_timing"]["effective_command_delay_s"] == pytest.approx(1.0 / 120.0)
 
 
 def test_mass_correction_scales_mass_and_inertia_and_offsets_root_com() -> None:

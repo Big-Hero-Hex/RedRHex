@@ -72,6 +72,7 @@ from isaaclab.markers.config import GREEN_ARROW_X_MARKER_CFG, RED_ARROW_X_MARKER
 
 # 從同目錄匯入配置檔案（定義了機器人的各種參數）
 from .redrhex_env_cfg import RedrhexEnvCfg
+from .target_delay import advance_target_delay
 
 
 class RedrhexEnv(DirectRLEnv):
@@ -570,6 +571,29 @@ class RedrhexEnv(DirectRLEnv):
         # 初始化目標速度緩衝
         self._target_drive_vel = torch.zeros(self.num_envs, self.num_main_drive_joints, device=self.device)
         self._target_abad_pos = self._abad_rest_pos.expand(self.num_envs, -1).clone()
+        self._requested_target_drive_vel = self._target_drive_vel.clone()
+        self._requested_target_abad_pos = self._target_abad_pos.clone()
+        self._sim2real_command_delay_steps = int(
+            getattr(self.cfg, "sim2real_command_delay_steps", 0)
+        )
+        if self._sim2real_command_delay_steps < 0:
+            raise ValueError("sim2real_command_delay_steps must be non-negative")
+        if self._sim2real_command_delay_steps:
+            self._drive_command_delay_history = torch.zeros(
+                self.num_envs,
+                self._sim2real_command_delay_steps,
+                self.num_main_drive_joints,
+                device=self.device,
+            )
+            self._abad_command_delay_history = self._abad_rest_pos.unsqueeze(1).expand(
+                self.num_envs,
+                self._sim2real_command_delay_steps,
+                self.num_abad_joints,
+            ).clone()
+        else:
+            self._drive_command_delay_history = None
+            self._abad_command_delay_history = None
+        self._command_delay_cursor = 0
         self.robot.set_joint_position_target(self._target_abad_pos, joint_ids=self._abad_indices)
         self._damper_pos_target = self._damper_rest_pos.expand(self.num_envs, -1).clone()
         self._damper_vel_target = torch.zeros(self.num_envs, self.num_damper_joints, device=self.device)
@@ -1994,6 +2018,35 @@ class RedrhexEnv(DirectRLEnv):
             abad_rest - self._abad_pos_limit_rad,
         )
 
+    def _apply_sim2real_command_delay(
+        self,
+        requested_drive: torch.Tensor,
+        requested_abad: torch.Tensor,
+    ) -> None:
+        """Apply the explicit profile delay to final actuator targets."""
+
+        self._requested_target_drive_vel = requested_drive.clone()
+        self._requested_target_abad_pos = requested_abad.clone()
+        if self._sim2real_command_delay_steps:
+            applied_drive, applied_abad, self._command_delay_cursor = advance_target_delay(
+                self._drive_command_delay_history,
+                self._abad_command_delay_history,
+                self._command_delay_cursor,
+                requested_drive,
+                requested_abad,
+            )
+        else:
+            applied_drive = requested_drive
+            applied_abad = requested_abad
+        self._target_drive_vel = applied_drive.clone()
+        self._target_abad_pos = applied_abad.clone()
+        self.robot.set_joint_velocity_target(
+            self._target_drive_vel, joint_ids=self._main_drive_indices
+        )
+        self.robot.set_joint_position_target(
+            self._target_abad_pos, joint_ids=self._abad_indices
+        )
+
     def _apply_action(self) -> None:
         """將策略輸出轉為關節控制（含 FWD/LAT/DIAG/YAW 模式 gating）。
 
@@ -2002,8 +2055,10 @@ class RedrhexEnv(DirectRLEnv):
         其餘 substep 直接重寫入快取的目標，避免計時器以 decimation 倍速前進。
         """
         if getattr(self, "_action_targets_computed", False):
-            self.robot.set_joint_velocity_target(self._target_drive_vel, joint_ids=self._main_drive_indices)
-            self.robot.set_joint_position_target(self._target_abad_pos, joint_ids=self._abad_indices)
+            self._apply_sim2real_command_delay(
+                self._requested_target_drive_vel,
+                self._requested_target_abad_pos,
+            )
             self._apply_damper_hold()
             return
         raw_drive_actions = self.actions[:, self._main_action_slice].clone()
@@ -2194,7 +2249,6 @@ class RedrhexEnv(DirectRLEnv):
 
         # 保存診斷
         self._base_velocity = (forward_bias_joint + yaw_bias_joint).clone()
-        self._target_drive_vel = target_drive_vel.clone()
 
         # LAT FSM: NORMAL(0) -> GO_TO_STAND(1) -> LATERAL_STEP(2)
         final_drive_vel = target_drive_vel.clone()
@@ -2316,10 +2370,6 @@ class RedrhexEnv(DirectRLEnv):
 
         # Main-drive: policy/CPG/LAT-FSM target velocities, then final DR/safety clamp.
         final_drive_vel = self._compute_main_drive_targets(final_drive_vel, max_vel)
-        self._target_drive_vel = final_drive_vel.clone()
-
-        self.robot.set_joint_velocity_target(final_drive_vel, joint_ids=self._main_drive_indices)
-        
         # ABAD: policy controls rest-relative offsets; forward mode locks to rest.
         target_abad_pos = self._compute_abad_targets(
             abad_actions=masked_abad_actions,
@@ -2331,8 +2381,7 @@ class RedrhexEnv(DirectRLEnv):
             yaw_hard_brake=yaw_hard_brake,
             yaw_hard_brake_scale=yaw_hard_brake_scale,
         )
-        self._target_abad_pos = target_abad_pos.clone()
-        self.robot.set_joint_position_target(target_abad_pos, joint_ids=self._abad_indices)
+        self._apply_sim2real_command_delay(final_drive_vel, target_abad_pos)
 
         # Damper/spring-leg joints are passive supports: fixed rest pose + zero velocity target.
         self._apply_damper_hold()
@@ -4173,8 +4222,18 @@ class RedrhexEnv(DirectRLEnv):
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
         self.last_main_drive_vel[env_ids] = 0.0  # 從零開始
+        self._requested_target_drive_vel[env_ids] = 0.0
+        self._requested_target_abad_pos[env_ids_tensor] = abad_rest_reset
         self._target_drive_vel[env_ids] = 0.0
         self._target_abad_pos[env_ids_tensor] = abad_rest_reset
+        if self._sim2real_command_delay_steps:
+            self._drive_command_delay_history[env_ids_tensor] = 0.0
+            self._abad_command_delay_history[env_ids_tensor] = abad_rest_reset.unsqueeze(1)
+        self.robot.set_joint_velocity_target(
+            self._target_drive_vel[env_ids_tensor],
+            joint_ids=self._main_drive_indices,
+            env_ids=env_ids_tensor,
+        )
         self.robot.set_joint_position_target(abad_rest_reset, joint_ids=self._abad_indices, env_ids=env_ids_tensor)
         self._apply_damper_hold(env_ids_tensor)
         self._base_velocity[env_ids] = 0.0

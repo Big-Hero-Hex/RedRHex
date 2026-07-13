@@ -25,7 +25,9 @@ from RedRhex.tasks.direct.redrhex.redrhex_env_cfg import REDRHEX_CFG, RedrhexEnv
 
 from .characterization import (
     PHYSICS_DT,
+    apply_schedule_delay,
     characterization_channel_metadata,
+    load_replay_schedule,
     requires_contact_probe,
     resolve_scenario_steps,
     scenario_schedule,
@@ -280,9 +282,11 @@ def _trace_metadata(
     scenario: Any,
     env_cfg: RedrhexEnvCfg,
     profile: CalibrationProfileV1 | None,
+    profile_application: Mapping[str, Any] | None,
     audit: Mapping[str, Any],
     *,
     mode: str,
+    replay_trace_sha256: str | None,
 ) -> dict[str, Any]:
     units, frames = characterization_channel_metadata(scenario, set(time_bases))
 
@@ -303,11 +307,16 @@ def _trace_metadata(
         "config_sha256": sha256_file(cfg_path),
         "calibration_constants": {
             "profile_id": profile.profile_id if profile is not None else None,
-            "sensor_timing": profile.sensor_timing if profile is not None else {},
+            "sensor_timing": (
+                profile_application["sensor_timing"]
+                if profile_application is not None
+                else {}
+            ),
             "hardware_mapping": profile.hardware_mapping if profile is not None else {},
             "physics_dt_s": PHYSICS_DT,
             "mode": mode,
             "fixed_base": bool(audit["is_fixed_base"]),
+            "replay_trace_sha256": replay_trace_sha256,
         },
         "raw_data_sha256": None,
     }
@@ -331,12 +340,34 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     )
     physics_dt = request.physics_dt
     profile = load_optional_profile(args.physics_profile)
+    replay_trace = getattr(args, "replay_trace", None)
 
     torch.manual_seed(int(args.seed))
     np.random.seed(int(args.seed))
     env_cfg = RedrhexEnvCfg()
-    apply_profile_to_config(env_cfg, profile)
+    profile_application = apply_profile_to_config(env_cfg, profile)
     env_cfg.robot_cfg.spawn.articulation_props.fix_root_link = request.mode == "fixed-base"
+
+    requested_schedule = scenario_schedule(scenario, request.steps, physics_dt)
+    replay_trace_sha256 = None
+    if replay_trace is not None:
+        replay = load_replay_schedule(
+            replay_trace,
+            scenario,
+            steps=request.steps,
+            physics_dt=physics_dt,
+        )
+        requested_schedule = replay.schedule
+        replay_trace_sha256 = replay.trace_sha256
+    delay_steps = (
+        int(profile_application["sensor_timing"]["command_delay_steps"])
+        if profile_application is not None
+        else 0
+    )
+    applied_schedule = apply_schedule_delay(
+        requested_schedule,
+        delay_steps=delay_steps,
+    )
 
     sim_cfg = copy.deepcopy(env_cfg.sim)
     sim_cfg.dt = physics_dt
@@ -374,7 +405,6 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     selected_joint = _resolve_selected_joint(scenario, env_cfg, robot)
-    schedule = scenario_schedule(scenario, request.steps, physics_dt)
     default_position = robot.data.default_joint_pos.clone()
     zero_velocity = torch.zeros_like(robot.data.default_joint_vel)
     original_selected_damping = (
@@ -402,26 +432,27 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     body_contact_force_log: list[np.ndarray] = []
 
     for step_index in range(request.steps):
-        scheduled = schedule[step_index]
+        requested_scheduled = requested_schedule[step_index]
+        applied_scheduled = applied_schedule[step_index]
         position_target = default_position.clone()
         velocity_target = zero_velocity.clone()
         requested = torch.zeros_like(zero_velocity)
         if selected_joint is not None:
-            requested[:, selected_joint] = scheduled.value
+            requested[:, selected_joint] = requested_scheduled.value
             if scenario.experiment_kind == "abad_static":
-                position_target[:, selected_joint] = scheduled.value
+                position_target[:, selected_joint] = applied_scheduled.value
             else:
-                velocity_target[:, selected_joint] = scheduled.value
-            if scheduled.actuator_enabled != was_enabled:
+                velocity_target[:, selected_joint] = applied_scheduled.value
+            if applied_scheduled.actuator_enabled != was_enabled:
                 robot.write_joint_stiffness_to_sim(
-                    original_selected_stiffness if scheduled.actuator_enabled else 0.0,
+                    original_selected_stiffness if applied_scheduled.actuator_enabled else 0.0,
                     joint_ids=[selected_joint],
                 )
                 robot.write_joint_damping_to_sim(
-                    original_selected_damping if scheduled.actuator_enabled else 0.0,
+                    original_selected_damping if applied_scheduled.actuator_enabled else 0.0,
                     joint_ids=[selected_joint],
                 )
-                was_enabled = scheduled.actuator_enabled
+                was_enabled = applied_scheduled.actuator_enabled
 
         robot.set_joint_position_target(position_target)
         robot.set_joint_velocity_target(velocity_target)
@@ -435,7 +466,7 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         joint_position_log.append(robot.data.joint_pos[0].detach().cpu().numpy().copy())
         joint_velocity_log.append(robot.data.joint_vel[0].detach().cpu().numpy().copy())
         effort_estimate = robot.data.applied_torque[0].detach().cpu().numpy().copy()
-        if selected_joint is not None and not scheduled.actuator_enabled:
+        if selected_joint is not None and not applied_scheduled.actuator_enabled:
             effort_estimate[selected_joint] = 0.0
         joint_effort_estimate_log.append(effort_estimate)
         root_position_log.append(robot.data.root_pos_w[0].detach().cpu().numpy().copy())
@@ -498,8 +529,10 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         scenario,
         env_cfg,
         profile,
+        profile_application,
         audit,
         mode=request.mode,
+        replay_trace_sha256=replay_trace_sha256,
     )
     manifest = write_trace(
         output,
@@ -519,6 +552,9 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         "physics_dt_s": request.physics_dt,
         "trace_sha256": manifest.provenance["trace_sha256"],
         "profile_id": profile.profile_id if profile is not None else None,
+        "command_delay_steps": delay_steps,
+        "effective_command_delay_s": delay_steps * physics_dt,
+        "replay_trace_sha256": replay_trace_sha256,
         "contact_validation": contact_validation,
         "runtime_audit": "runtime_audit.json",
     }
