@@ -11,6 +11,7 @@ from typing import Any
 
 
 RATE_HZ = 60.0
+MAX_TICK_LATENESS_S = 1.0 / RATE_HZ
 REPEATS = 3
 COMMAND_SPEED_RAD_S = 0.25
 NEUTRAL_DURATION_S = 0.5
@@ -73,6 +74,8 @@ class ProbeTick:
 @dataclass(frozen=True)
 class SafetySnapshot:
     command_subscriber_count: int
+    command_publisher_count: int
+    command_publisher_is_self: bool
     heartbeat_value: bool | None
     heartbeat_received_at: float | None
     joint_state_received_at: float | None
@@ -181,10 +184,12 @@ def build_preview(main_index: object) -> dict[str, Any]:
         "ticks": len(schedule),
         "duration_s": len(schedule) / RATE_HZ,
         "command_speed_cap_rad_s": COMMAND_SPEED_RAD_S,
+        "max_tick_lateness_s": MAX_TICK_LATENESS_S,
         "terminal_disable_packets": TERMINAL_DISABLE_PACKETS,
         "segments": [dict(segment) for segment in scenario_spec(selected)["command_segments"]],
         "safety": {
             "command_subscriber_required": True,
+            "exclusive_command_publisher_required": True,
             "heartbeat_true_max_age_s": INPUT_FRESHNESS_TIMEOUT_S,
             "joint_states_max_age_s": INPUT_FRESHNESS_TIMEOUT_S,
             "explicit_estop_false_required": True,
@@ -204,6 +209,8 @@ def safety_failure(snapshot: SafetySnapshot, *, now: float) -> str | None:
         return "E-stop must be explicitly false"
     if snapshot.command_subscriber_count < 1:
         return "motor command subscriber is not visible"
+    if snapshot.command_publisher_count != 1 or not snapshot.command_publisher_is_self:
+        return "probe must be the only motor command publisher"
     if snapshot.heartbeat_value is not True or not _is_recent(snapshot.heartbeat_received_at, now):
         return "low-level heartbeat is false, missing, stale, or has invalid callback time"
     if not _is_recent(snapshot.joint_state_received_at, now):
@@ -283,6 +290,26 @@ class ProbeRunner:
         if self._abort_reason is not None:
             raise ProbeAbort(self._abort_reason)
 
+    def _check_deadline(self, deadline: float, *, phase: str) -> tuple[float, float]:
+        actual = self._monotonic()
+        lateness = actual - deadline
+        if not math.isfinite(actual) or not math.isfinite(lateness):
+            reason = f"scheduler overrun during {phase}: invalid monotonic time"
+            self.request_abort(reason, immediate=True)
+            raise ProbeAbort(reason)
+        if lateness < -1.0e-9:
+            reason = f"scheduler overrun during {phase}: wait returned before its deadline"
+            self.request_abort(reason, immediate=True)
+            raise ProbeAbort(reason)
+        if lateness > MAX_TICK_LATENESS_S:
+            reason = (
+                f"scheduler overrun during {phase}: {lateness:.6f} s late exceeds "
+                f"{MAX_TICK_LATENESS_S:.6f} s"
+            )
+            self.request_abort(reason, immediate=True)
+            raise ProbeAbort(reason)
+        return actual, max(0.0, lateness)
+
     def bind(self, main_index: object) -> None:
         selected = _validate_main_index(main_index)
         if self._main_index is not None and self._main_index != selected:
@@ -297,6 +324,7 @@ class ProbeRunner:
         self._start_time = self._monotonic()
         last_repetition: int | None = None
         last_segment: tuple[int, int] | None = None
+        last_command_time: float | None = None
         try:
             self._publish_event(
                 self._event(
@@ -308,11 +336,29 @@ class ProbeRunner:
                 )
             )
             for tick in schedule:
-                self._wait_until(self._start_time + tick.elapsed_s)
+                scheduled_deadline = self._start_time + tick.elapsed_s
+                wait_deadline = scheduled_deadline
+                if last_command_time is not None:
+                    wait_deadline = max(
+                        wait_deadline, last_command_time + 1.0 / RATE_HZ
+                    )
+                self._wait_until(wait_deadline)
                 self._poll()
                 self._raise_if_aborted()
+                actual, lateness = self._check_deadline(
+                    scheduled_deadline, phase=f"tick {tick.tick_index}"
+                )
+                actual_elapsed_s = actual - self._start_time
                 if tick.repetition != last_repetition:
-                    self._publish_event(self._event("repetition", repetition=tick.repetition))
+                    self._publish_event(
+                        self._event(
+                            "repetition",
+                            repetition=tick.repetition,
+                            scheduled_elapsed_s=tick.elapsed_s,
+                            actual_elapsed_s=actual_elapsed_s,
+                            lateness_s=lateness,
+                        )
+                    )
                     last_repetition = tick.repetition
                 segment_key = (tick.repetition, tick.segment_index)
                 if segment_key != last_segment:
@@ -323,18 +369,38 @@ class ProbeRunner:
                             segment_index=tick.segment_index,
                             segment=tick.segment,
                             tick_index=tick.tick_index,
+                            scheduled_elapsed_s=tick.elapsed_s,
+                            actual_elapsed_s=actual_elapsed_s,
+                            lateness_s=lateness,
                         )
                     )
                     last_segment = segment_key
-                failure = safety_failure(self._safety_snapshot(), now=self._monotonic())
+                snapshot = self._safety_snapshot()
+                actual, _lateness = self._check_deadline(
+                    scheduled_deadline, phase=f"tick {tick.tick_index} safety checks"
+                )
+                failure = safety_failure(snapshot, now=actual)
                 if failure is not None:
                     self.request_abort(failure, immediate=True)
                     raise ProbeAbort(failure)
                 self._publish_command(tick.command)
-            self._wait_until(self._start_time + len(schedule) / RATE_HZ)
+                last_command_time = actual
+            completion_deadline = self._start_time + len(schedule) / RATE_HZ
+            self._wait_until(completion_deadline)
             self._poll()
             self._raise_if_aborted()
-            self._publish_event(self._event("complete", ticks=len(schedule)))
+            actual, lateness = self._check_deadline(
+                completion_deadline, phase="completion"
+            )
+            self._publish_event(
+                self._event(
+                    "complete",
+                    ticks=len(schedule),
+                    scheduled_elapsed_s=len(schedule) / RATE_HZ,
+                    actual_elapsed_s=actual - self._start_time,
+                    lateness_s=lateness,
+                )
+            )
         except BaseException as exc:
             if isinstance(exc, KeyboardInterrupt):
                 reason = "SIGINT"

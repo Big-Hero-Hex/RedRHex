@@ -112,8 +112,23 @@ def _run_ros(args: argparse.Namespace) -> int:
                 self._runner.request_abort("E-stop asserted", immediate=True)
 
         def _safety_snapshot(self) -> SafetySnapshot:
+            try:
+                publishers = self.get_publishers_info_by_topic(
+                    self._command_pub.topic_name
+                )
+            except Exception as exc:
+                self.get_logger().error(f"Motor command graph query failed: {exc}")
+                publishers = []
+            publisher = publishers[0] if len(publishers) == 1 else None
+            publisher_is_self = (
+                publisher is not None
+                and publisher.node_name == self.get_name()
+                and publisher.node_namespace == self.get_namespace()
+            )
             return SafetySnapshot(
                 command_subscriber_count=self._command_pub.get_subscription_count(),
+                command_publisher_count=len(publishers),
+                command_publisher_is_self=publisher_is_self,
                 heartbeat_value=self._heartbeat_value,
                 heartbeat_received_at=self._heartbeat_received_at,
                 joint_state_received_at=self._joint_state_received_at,

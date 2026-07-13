@@ -53,6 +53,8 @@ class FakeClock:
 def _fresh_snapshot(core, clock: FakeClock):
     return core.SafetySnapshot(
         command_subscriber_count=1,
+        command_publisher_count=1,
+        command_publisher_is_self=True,
         heartbeat_value=True,
         heartbeat_received_at=clock.now,
         joint_state_received_at=clock.now,
@@ -189,6 +191,7 @@ def test_preview_is_machine_readable_and_reports_exact_caps() -> None:
     assert decoded["ticks"] == 990
     assert decoded["duration_s"] == 16.5
     assert decoded["command_speed_cap_rad_s"] == 0.25
+    assert decoded["max_tick_lateness_s"] == pytest.approx(1.0 / 60.0)
     assert decoded["terminal_disable_packets"] >= 5
 
 
@@ -196,6 +199,9 @@ def test_preview_is_machine_readable_and_reports_exact_caps() -> None:
     ("change", "reason"),
     [
         ({"command_subscriber_count": 0}, "subscriber"),
+        ({"command_publisher_count": 0}, "publisher"),
+        ({"command_publisher_count": 2}, "publisher"),
+        ({"command_publisher_is_self": False}, "publisher"),
         ({"heartbeat_value": None}, "heartbeat"),
         ({"heartbeat_value": False}, "heartbeat"),
         ({"heartbeat_received_at": None}, "heartbeat"),
@@ -208,7 +214,15 @@ def test_preview_is_machine_readable_and_reports_exact_caps() -> None:
 )
 def test_actuation_safety_is_fail_closed_on_each_missing_or_stale_input(change, reason) -> None:
     core = _load_core()
-    base = core.SafetySnapshot(1, True, 10.0, 10.0, False)
+    base = core.SafetySnapshot(
+        command_subscriber_count=1,
+        command_publisher_count=1,
+        command_publisher_is_self=True,
+        heartbeat_value=True,
+        heartbeat_received_at=10.0,
+        joint_state_received_at=10.0,
+        estop_value=False,
+    )
     snapshot = replace(base, **change)
 
     assert reason in core.safety_failure(snapshot, now=10.0)
@@ -216,7 +230,7 @@ def test_actuation_safety_is_fail_closed_on_each_missing_or_stale_input(change, 
 
 def test_actuation_safety_uses_callback_receive_time_and_rejects_future_timestamps() -> None:
     core = _load_core()
-    fresh = core.SafetySnapshot(1, True, 4.8, 4.8, False)
+    fresh = core.SafetySnapshot(1, 1, True, True, 4.8, 4.8, False)
     assert core.safety_failure(fresh, now=5.0) is None
 
     future_heartbeat = replace(fresh, heartbeat_received_at=5.01)
@@ -241,6 +255,10 @@ def test_normal_completion_emits_markers_and_five_terminal_disable_packets() -> 
     assert [event["event"] for event in events].count("segment") == 21
     assert [event["event"] for event in events].count("complete") == 1
     assert [event["event"] for event in events].count("abort") == 0
+    segment_events = [event for event in events if event["event"] == "segment"]
+    assert all("scheduled_elapsed_s" in event for event in segment_events)
+    assert all("actual_elapsed_s" in event for event in segment_events)
+    assert all("lateness_s" in event for event in segment_events)
     assert clock.now == pytest.approx(16.5)
     assert clock.deadlines[-1] == pytest.approx(16.5)
 
@@ -303,6 +321,88 @@ def test_state_loss_during_disabled_coast_still_aborts_immediately() -> None:
     assert commands[-2 * core.TERMINAL_DISABLE_PACKETS :] == [
         core.terminal_command()
     ] * (2 * core.TERMINAL_DISABLE_PACKETS)
+
+
+def test_competing_command_publisher_appearing_mid_drive_aborts_immediately() -> None:
+    core = _load_core()
+    clock = FakeClock()
+    commands = []
+    events = []
+
+    def safety():
+        snapshot = _fresh_snapshot(core, clock)
+        if clock.now >= core.NEUTRAL_DURATION_S + 1.0 / core.RATE_HZ:
+            return replace(snapshot, command_publisher_count=2)
+        return snapshot
+
+    runner = _runner(core, publisher=commands.append, events=events, clock=clock, safety=safety)
+    with pytest.raises(core.ProbeAbort, match="publisher"):
+        runner.run(1)
+
+    assert [event["event"] for event in events].count("abort") == 1
+    assert all(not command.enable for command in commands[-2 * core.TERMINAL_DISABLE_PACKETS :])
+
+
+def test_scheduler_overrun_aborts_before_an_overdue_enabled_tick_is_published() -> None:
+    core = _load_core()
+    clock = FakeClock()
+    commands = []
+    events = []
+    delayed = False
+
+    def wait_until(deadline: float) -> None:
+        nonlocal delayed
+        clock.wait_until(deadline)
+        if not delayed and deadline >= core.NEUTRAL_DURATION_S:
+            clock.now += 2.0 / core.RATE_HZ
+            delayed = True
+
+    runner = core.ProbeRunner(
+        publish_command=commands.append,
+        publish_event=events.append,
+        safety_snapshot=lambda: _fresh_snapshot(core, clock),
+        monotonic=clock.monotonic,
+        wait_until=wait_until,
+        poll=lambda: None,
+        terminal_pause=lambda: None,
+    )
+
+    with pytest.raises(core.ProbeAbort, match="overrun"):
+        runner.run(0)
+
+    assert commands
+    assert all(not command.enable for command in commands)
+    assert [event["event"] for event in events].count("abort") == 1
+
+
+def test_tolerated_jitter_shifts_following_ticks_instead_of_catching_up() -> None:
+    core = _load_core()
+    clock = FakeClock()
+    published = []
+    delayed = False
+
+    def wait_until(deadline: float) -> None:
+        nonlocal delayed
+        clock.wait_until(deadline)
+        if not delayed and deadline >= core.NEUTRAL_DURATION_S:
+            clock.now += 0.5 / core.RATE_HZ
+            delayed = True
+
+    runner = core.ProbeRunner(
+        publish_command=lambda command: published.append((clock.now, command)),
+        publish_event=lambda _event: None,
+        safety_snapshot=lambda: _fresh_snapshot(core, clock),
+        monotonic=clock.monotonic,
+        wait_until=wait_until,
+        poll=lambda: None,
+        terminal_pause=lambda: None,
+    )
+
+    runner.run(0)
+
+    scenario_times = [timestamp for timestamp, _command in published[:990]]
+    intervals = [later - earlier for earlier, later in zip(scenario_times, scenario_times[1:])]
+    assert min(intervals) == pytest.approx(1.0 / core.RATE_HZ)
 
 
 def test_immediate_estop_callback_path_publishes_disable_burst_before_loop_unwinds() -> None:
@@ -476,6 +576,9 @@ def test_ros_adapter_uses_callback_receive_time_topics_and_immediate_abort_hooks
     assert 'request_abort("E-stop asserted", immediate=True)' in source
     assert 'request_abort("low-level heartbeat false", immediate=True)' in source
     assert "get_subscription_count()" in source
+    assert "get_publishers_info_by_topic" in source
+    assert "publisher.node_name" in source
+    assert "publisher.node_namespace" in source
     assert "String()" in source and "json.dumps(" in source
 
 
@@ -489,5 +592,6 @@ def test_setup_registers_probe_and_operator_docs_are_fail_safe() -> None:
     assert "/motor/command" in readme and "/motor/state" in readme
     assert "60 Hz" in readme
     assert "990" in readme and "16.5" in readme
+    assert "16.7 ms" in readme and "overrun" in readme and "不會補送" in readme
     for mandatory in ("實體急停", "限流", "sbRIO watchdog"):
         assert mandatory in readme

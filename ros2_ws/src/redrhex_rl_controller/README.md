@@ -1337,7 +1337,9 @@ preview 會列出綁定該腿的 immutable scenario ID、schema version 和 SHA-
 sbRIO watchdog 已驗證會在 command 中斷時關閉馬達
 ```
 
-先停止 RL controller、`motor_command_tool`、`rinbo_tripod` 等其他 command publisher，確認只有 `redrhex_lowlevel_bridge` 訂閱 `/redrhex/motor_commands`。probe 在每一個 60 Hz tick 都要求：command subscriber 可見、callback 接收時間在 0.25 秒內且值為 true 的 `/redrhex/lowlevel_heartbeat`、callback 接收時間在 0.25 秒內的 `/joint_states`，以及明確收到 `/estop=false`。任何一項消失、變 false 或過期，都會 abort 並重送 disabled packets。
+先停止 RL controller、`motor_command_tool`、`rinbo_tripod` 等其他 command publisher，確認只有 `redrhex_lowlevel_bridge` 訂閱 `/redrhex/motor_commands`。probe 在每一個 60 Hz tick 都要求：ROS graph 中它自己是 `/redrhex/motor_commands` 唯一 publisher、command subscriber 可見、callback 接收時間在 0.25 秒內且值為 true 的 `/redrhex/lowlevel_heartbeat`、callback 接收時間在 0.25 秒內的 `/joint_states`，以及明確收到 `/estop=false`。無法查詢 graph、出現第二個 command publisher，或任何 safety input 消失、變 false、過期，都會 abort 並重送 disabled packets。
+
+每個 tick 也有 absolute deadline。若 ROS/Python stall 讓 command 晚超過一個 60 Hz period（約 `16.7 ms`），probe 會以 scheduler overrun abort 並立即送 disabled packets；它不會補送過期 tick，也不會把漏掉的 enabled command 集中 burst 出去。event marker 會記錄 scheduled time、actual time 與 lateness。
 
 原始 BioRoLa topic 必須直接錄進 rosbag；不要只錄重新蓋 timestamp 的衍生 feedback：
 
