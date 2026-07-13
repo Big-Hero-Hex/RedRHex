@@ -37,5 +37,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             flush=True,
         )
         return result
+    except BaseException:
+        # Kit owns process shutdown. Preserve a failing process status even when
+        # framework teardown ends the interpreter before Python can re-raise.
+        simulation_app.app.post_quit(2)
+        raise
     finally:
         simulation_app.close()

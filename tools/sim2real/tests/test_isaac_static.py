@@ -84,6 +84,20 @@ def test_isaac_bootstrap_closes_app_on_success_and_failure() -> None:
         for statement in guarded.finalbody
         for node in ast.walk(statement)
     )
+    failure_handler = next(
+        handler for handler in guarded.handlers if handler.type is not None
+    )
+    post_quit = next(
+        node
+        for statement in failure_handler.body
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "post_quit"
+    )
+    assert len(post_quit.args) == 1
+    assert isinstance(post_quit.args[0], ast.Constant)
+    assert post_quit.args[0].value != 0
 
 
 def test_characterization_runner_is_finite_one_env_and_direct_targeted() -> None:
