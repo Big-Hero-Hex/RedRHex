@@ -846,11 +846,24 @@ def test_geometry_audit_derives_explicit_failures_from_measurements(
     physical = json.loads(physical_path.read_text())
     mutate(physical)
     physical_binding["sha256"] = _write_json(physical_path, physical)
+    evidence["actuator_sweeps"]["main_drive"] = []
 
     result = evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
     assert result["audit"]["checks"][failed_check] is False
     assert any(f"audit.{failed_check}" in item for item in result["failures"])
+
+
+def test_failed_audit_rejects_stale_actuator_sweep_bindings(tmp_path: Path) -> None:
+    profile, evidence = _fixture(tmp_path)
+    physical_binding = evidence["audit_artifact"]["physical_measurements"]
+    physical_path = tmp_path / physical_binding["path"]
+    physical = json.loads(physical_path.read_text())
+    physical["mass_measurements_kg"] = [12.0, 12.0, 12.0]
+    physical_binding["sha256"] = _write_json(physical_path, physical)
+
+    with pytest.raises(ContractError, match="failed pre-fit audit.*actuator sweep"):
+        evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
 
 def test_runtime_audit_json_must_be_content_bound_to_its_trace(tmp_path: Path) -> None:
@@ -1065,15 +1078,10 @@ def test_promotion_rejects_unbound_or_fake_artifact_claims(
         evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
 
-def test_audit_metric_and_model_envelope_fail_the_affected_subsystem(
+def test_model_envelope_fails_the_affected_subsystem(
     tmp_path: Path,
 ) -> None:
     profile, evidence = _fixture(tmp_path, sim_scale=1.3)
-    physical_binding = evidence["audit_artifact"]["physical_measurements"]
-    audit_path = tmp_path / physical_binding["path"]
-    audit = json.loads(audit_path.read_text())
-    audit["mass_measurements_kg"] = [12.0, 12.0, 12.0]
-    physical_binding["sha256"] = _write_json(audit_path, audit)
 
     result = evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
@@ -1081,7 +1089,6 @@ def test_audit_metric_and_model_envelope_fail_the_affected_subsystem(
     main = result["subsystems"]["main_drive"]
     assert main["pass"] is False
     assert main["actuator_model_mismatch"] is True
-    assert any("audit.mass_pass" in reason for reason in result["failures"])
     assert any("outside" in reason for reason in main["failures"])
 
 

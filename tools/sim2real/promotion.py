@@ -1643,8 +1643,20 @@ def evaluate_promotion(
     raw_sweeps = _mapping(data["actuator_sweeps"], "actuator_sweeps")
     if set(raw_sweeps) - fitted:
         raise ContractError("actuator_sweeps references a subsystem not changed by the candidate")
+    for subsystem, sweeps in raw_sweeps.items():
+        if not isinstance(sweeps, list):
+            raise ContractError(f"{subsystem} actuator sweeps must be an array")
     actuator_mismatch: dict[str, bool] = {subsystem: False for subsystem in fitted}
-    if "main_drive" in fitted:
+    if global_failures:
+        stale_sweeps = sorted(
+            subsystem for subsystem, sweeps in raw_sweeps.items() if sweeps
+        )
+        if stale_sweeps:
+            raise ContractError(
+                "failed pre-fit audit cannot reference non-empty actuator sweep "
+                "bindings: " + ", ".join(stale_sweeps)
+            )
+    elif "main_drive" in fitted:
         holdouts = grouped["main_drive"]["holdout"]
         sweeps = raw_sweeps.get("main_drive")
         if not isinstance(sweeps, list):
