@@ -209,6 +209,81 @@ def test_gate_requests_immediate_disable_for_estop_and_stale_state_once():
     assert gate.output_active is False
 
 
+def test_failed_emergency_disable_stays_latched_after_trigger_recovers():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    selection = gate.accept_command(
+        _command(enable=True, main_drive_enable=[True] + [False] * 5),
+        state_fresh=True,
+    )
+    gate.mark_command_sent(selection)
+
+    assert gate.on_estop(True) is True
+    assert gate.disable_pending is True
+    gate.on_estop(False)
+    assert gate.ready_for_output is False
+    with pytest.raises(safety.CommandRejectedError, match="disable"):
+        gate.accept_command(
+            _command(enable=True, main_drive_enable=[True] + [False] * 5),
+            state_fresh=True,
+        )
+
+    # Fresh feedback must not clear uncertainty about the failed disable.
+    assert gate.on_state_freshness(True) is True
+    gate.mark_disabled()
+    assert gate.disable_pending is False
+    assert gate.ready_for_output is True
+
+
+def test_stale_state_disable_stays_latched_after_feedback_recovers():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    selection = gate.accept_command(
+        _command(enable=True, abad_output_enable=True), state_fresh=True
+    )
+    gate.mark_command_sent(selection)
+
+    assert gate.on_state_freshness(False) is True
+    assert gate.disable_pending is True
+    assert gate.on_state_freshness(True) is True
+    assert gate.ready_for_output is False
+    with pytest.raises(safety.CommandRejectedError, match="disable"):
+        gate.accept_command(
+            _command(enable=True, abad_output_enable=True), state_fresh=True
+        )
+
+
+def test_enabled_command_rejects_nonfinite_numeric_payloads():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+
+    for field, value in (
+        ("target_position_rad", float("nan")),
+        ("target_velocity_rad_s", float("inf")),
+        ("kp", float("-inf")),
+        ("kd", float("nan")),
+        ("effort_limit_nm", float("inf")),
+    ):
+        command = _command(enable=True, main_drive_enable=[True] + [False] * 5)
+        getattr(command, field)[0] = value
+        with pytest.raises(safety.CommandSelectionError, match=field):
+            gate.accept_command(command, state_fresh=True)
+
+
+def test_enabled_command_rejects_wrong_numeric_array_shapes():
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    command = _command(enable=True, main_drive_enable=[True] + [False] * 5)
+    command.target_velocity_rad_s = command.target_velocity_rad_s[:6]
+
+    with pytest.raises(safety.CommandSelectionError, match="target_velocity_rad_s"):
+        gate.accept_command(command, state_fresh=True)
+
+
 def test_failed_disabled_transition_preserves_active_output_for_emergency_disable():
     safety = _command_safety()
     gate = safety.FailClosedOutputGate()
@@ -263,6 +338,45 @@ def test_dispatcher_emergency_disables_when_malformed_disabled_send_fails():
             _command(enable=False),
         )
     assert backend.emergency_disable_calls == 1
+    assert gate.output_active is False
+
+
+def test_dispatcher_latches_failed_emergency_disable_until_retry_succeeds():
+    safety = _command_safety()
+
+    class Backend:
+        def __init__(self) -> None:
+            self.disable_should_fail = True
+
+        @staticmethod
+        def output_state_is_fresh() -> bool:
+            return True
+
+        @staticmethod
+        def send_motor_command(_command) -> None:
+            raise RuntimeError("enabled send failed")
+
+        def emergency_disable(self) -> None:
+            if self.disable_should_fail:
+                raise RuntimeError("disable failed")
+
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    backend = Backend()
+    with pytest.raises(RuntimeError, match="disable failed"):
+        safety.dispatch_command_fail_closed(
+            gate,
+            backend,
+            _command(enable=True, main_drive_enable=[True] + [False] * 5),
+        )
+
+    assert gate.disable_pending is True
+    assert gate.output_active is True
+    assert gate.ready_for_output is False
+    backend.disable_should_fail = False
+    backend.emergency_disable()
+    gate.mark_disabled()
+    assert gate.disable_pending is False
     assert gate.output_active is False
 
 
@@ -470,12 +584,143 @@ def test_biorola_repeats_disable_when_a_new_enabled_command_is_blocked(monkeypat
     backend.last_actual_publish_state = "published_enabled"
     backend.last_block_reason = ""
     backend._last_warned_block_reason = ""
-    backend.send_motor_command(
-        _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
-    )
+    with pytest.raises(module.CommandRejectedError, match="no subscriber"):
+        backend.send_motor_command(
+            _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+        )
     assert len(published) == 2
     assert backend.last_command_was_enabled is False
     assert backend.last_actual_publish_state == "blocked_no_command_subscriber"
+
+
+@pytest.mark.parametrize(
+    "blocked_path",
+    ["allow_enable", "recent_state", "duplicate_publishers", "command_subscriber"],
+)
+def test_biorola_enabled_block_paths_raise_without_publishing_enabled_packet(
+    monkeypatch, blocked_path
+):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.node.get_logger = lambda: SimpleNamespace(warn=lambda _message: None)
+    backend.connected = True
+    backend.publish_preview = False
+    backend.command_topic = "/motor/command"
+    backend.allow_enable = True
+    backend.block_if_duplicate_command_publishers = False
+    backend.last_state_time = module.time.monotonic()
+    backend.state_timeout_s = 1.0
+    backend.last_actual_publish_state = "never"
+    backend.last_block_reason = ""
+    backend._last_warned_block_reason = ""
+    subscriber_count = 1
+    if blocked_path == "allow_enable":
+        backend.allow_enable = False
+    elif blocked_path == "recent_state":
+        backend.last_state_time = None
+    elif blocked_path == "duplicate_publishers":
+        backend.block_if_duplicate_command_publishers = True
+        backend._command_publisher_count = lambda: (2, "/a,/b")
+    elif blocked_path == "command_subscriber":
+        subscriber_count = 0
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: subscriber_count,
+    )
+    backend.shutdown_disable_repeats = 2
+    backend.shutdown_disable_period_s = 0.0
+
+    with pytest.raises(module.CommandRejectedError):
+        backend.send_motor_command(
+            _command(enable=True, main_drive_enable=[True, False, False, False, False, False])
+        )
+
+    assert published == []
+    assert backend.last_command_was_enabled is False
+    assert backend.last_actual_publish_state.startswith("blocked_")
+
+
+def test_biorola_successful_enabled_send_is_observable_to_dispatcher(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.publish_preview = False
+    backend.command_topic = "/motor/command"
+    backend.allow_enable = True
+    backend.block_if_duplicate_command_publishers = False
+    backend.last_state_time = module.time.monotonic()
+    backend.state_timeout_s = 1.0
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: 1,
+    )
+
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+    safety.dispatch_command_fail_closed(
+        gate,
+        backend,
+        _command(enable=True, main_drive_enable=[True, False, False, False, False, False]),
+    )
+
+    assert len(published) == 1
+    assert backend.last_actual_publish_state == "published_enabled"
+    assert gate.output_active is True
+    assert gate.disable_pending is False
+
+
+def test_biorola_effective_active_to_inactive_transition_repeats_disable(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.publish_preview = False
+    backend.command_topic = "/motor/command"
+    backend.allow_enable = True
+    backend.block_if_duplicate_command_publishers = False
+    backend.last_state_time = module.time.monotonic()
+    backend.state_timeout_s = 1.0
+    backend.last_command_was_enabled = True
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: 1,
+    )
+    backend.shutdown_disable_repeats = 3
+    backend.shutdown_disable_period_s = 0.0
+
+    backend.send_motor_command(_command(enable=True))
+
+    assert len(published) == 3
+    assert backend.last_command_was_enabled is False
+    assert backend.last_actual_publish_state == "published_disabled_repeated"
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+def test_biorola_rejects_nonfinite_command_before_preview_or_publish(monkeypatch, bad_value):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+    backend.connected = True
+    backend.publish_preview = True
+    backend.preview_pub = SimpleNamespace(publish=published.append)
+    backend.allow_enable = True
+    backend.block_if_duplicate_command_publishers = False
+    backend.last_state_time = module.time.monotonic()
+    backend.state_timeout_s = 1.0
+    backend.cmd_pub = SimpleNamespace(
+        publish=published.append,
+        get_subscription_count=lambda: 1,
+    )
+    command = _command(enable=True, main_drive_enable=[True] + [False] * 5)
+    command.target_velocity_rad_s[0] = bad_value
+
+    with pytest.raises(module.CommandSelectionError, match="target_velocity_rad_s"):
+        backend.send_motor_command(command)
+
+    assert published == []
 
 
 def test_mock_records_effective_selection_and_disable_override(monkeypatch):
@@ -498,6 +743,30 @@ def test_mock_records_effective_selection_and_disable_override(monkeypatch):
     )
     assert backend.last_main_drive_enable == (False,) * 6
     assert backend.last_abad_output_enable is False
+
+
+def test_mock_feedback_changes_only_effectively_selected_outputs(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "mock_bridge")
+    backend = module.MockLowLevelBridge(print_every_n=1000)
+    backend.connect()
+    command = _command(
+        enable=True,
+        main_drive_enable=[False, True, False, False, False, False],
+    )
+    command.target_position_rad = [float(index + 1) for index in range(12)]
+    command.target_velocity_rad_s = [float(index + 101) for index in range(12)]
+    backend.send_motor_command(command)
+
+    state = backend.read_motor_state()
+    assert state.position_rad[:6] == [0.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    assert state.velocity_rad_s[:6] == [0.0, 102.0, 0.0, 0.0, 0.0, 0.0]
+    assert state.position_rad[6:] == [0.0] * 6
+    assert state.velocity_rad_s[6:] == [0.0] * 6
+
+    backend.send_motor_command(_command(enable=False))
+    disabled_state = backend.read_motor_state()
+    assert disabled_state.position_rad[1] == 2.0
+    assert disabled_state.velocity_rad_s == [0.0] * 12
 
 
 def test_lowlevel_node_wires_estop_emergency_gate_and_preserves_state_timestamp():
@@ -529,6 +798,7 @@ def test_lowlevel_node_wires_estop_emergency_gate_and_preserves_state_timestamp(
     )
     assert "FailClosedOutputGate" in source
     assert "dispatch_command_fail_closed" in source
+    assert "disable_pending" in ast.unparse(tick)
 
 
 def test_rl_controller_explicitly_selects_all_outputs_only_when_enabled():
@@ -607,3 +877,10 @@ def test_manual_tool_wires_estop_masks_and_fail_safe_finalization():
     assert '"/estop"' in source or "estop_topic" in source
     assert "run_with_terminal_disable" in source
     assert "estop_state" in source
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_manual_command_cli_numeric_parser_rejects_nonfinite_values(value):
+    safety = _manual_safety()
+    with pytest.raises(ValueError, match="finite"):
+        safety.finite_float(value)

@@ -886,7 +886,7 @@ redrhex_lowlevel_bridge:
 
 `preview_topic` 是安全預覽 topic。當 `publish_preview: true` 時，adapter 會把轉換後的 `rinbo_msgs/MotorCmdStamped` 發到 `/redrhex/rinbo_motor_command_preview`，讓你在 `allow_enable=false` 時也能檢查 `l1/l2/.../sr3` 的 PWM、direction、servo encoder。BioRoLaROS2 bridge 不會訂閱這個 topic，所以它不會讓馬達動。
 
-`publish_when_disabled: false` 也先保持 false。BioRoLaROS2 的 ABAD servo command 沒有 per-servo enable 欄位；如果 disabled command 也 publish，servo 仍可能吃到 `position_encoder`。所以 dry-run 階段只看 `/redrhex/motor_commands`，不要讓 adapter publish `/motor/command`。如果 adapter 前一包已經是 enabled，下一包 disabled 仍會被送出一次，確保 main legs release。等你確認伺服電源斷開、或確認 `servo_control_mode=0` 真的不會動，再暫時打開它做 message-level 測試。
+`publish_when_disabled: false` 也先保持 false。BioRoLaROS2 的 ABAD servo command 沒有 per-servo enable 欄位；如果 disabled command 也 publish，servo 仍可能吃到 `position_encoder`。所以 dry-run 階段只看 `/redrhex/motor_commands`，不要讓 adapter publish `/motor/command`。實際輸出還需要明確收到 `/estop=false`；`enable=false` 永遠覆蓋 `main_drive_enable[6]` 與 `abad_output_enable`，而 `enable=true` 時只有 mask 選中的 main drives 與 aggregate ABAD output 可以動。如果 adapter 從任何有效 enabled mask 切換為全 disabled，會依 `shutdown_disable_repeats` 連續送出多包 all-disabled command，不依賴單一封包。等你確認伺服電源斷開、或確認 `servo_control_mode=0` 真的不會動，再暫時打開它做 message-level 測試。
 
 `publish_shutdown_disable: true` 代表你 Ctrl-C 關掉 RedRhex bridge 時，adapter 會補送幾包 disabled command 到 `/motor/command`。這是軟體保險，不能取代 sbRIO watchdog 或實體急停；但它可以降低「節點關掉後低階端保留上一包 PWM」的風險。
 

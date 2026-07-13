@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -9,6 +10,15 @@ from typing import TypeVar
 T = TypeVar("T")
 _ALL_DISABLED = (False, False, False, False, False, False)
 _ALL_ENABLED = (True, True, True, True, True, True)
+
+
+def finite_float(value: object) -> float:
+    """Argparse-compatible finite float parser for physical command values."""
+
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("value must be finite")
+    return result
 
 
 def selection_for_mode(

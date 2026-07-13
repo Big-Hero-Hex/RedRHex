@@ -160,7 +160,7 @@ class LowLevelBridgeNode(Node):
             dispatch_command_fail_closed(self.output_gate, self.bridge, msg)
         except Exception as exc:
             self.get_logger().error(f"Failed to send motor command: {exc}")
-            if self.output_gate.output_active:
+            if self.output_gate.output_active or self.output_gate.disable_pending:
                 self._emergency_disable("motor command rejected or failed")
 
     def _on_estop(self, msg: Bool) -> None:
@@ -168,6 +168,7 @@ class LowLevelBridgeNode(Node):
             self._emergency_disable("E-stop asserted")
 
     def _emergency_disable(self, reason: str) -> None:
+        self.output_gate.require_disable()
         try:
             self.bridge.emergency_disable()
             self.output_gate.mark_disabled()
@@ -178,10 +179,14 @@ class LowLevelBridgeNode(Node):
     def _tick(self) -> None:
         alive = self.bridge.is_alive()
         state_fresh = self.bridge.output_state_is_fresh()
-        if self.output_gate.estop_state is True and self.output_gate.output_active:
-            self._emergency_disable("retry while E-stop remains asserted")
-        elif self.output_gate.on_state_freshness(state_fresh):
-            self._emergency_disable("raw motor state became stale while output was active")
+        self.output_gate.on_state_freshness(state_fresh)
+        if self.output_gate.disable_pending:
+            reason = (
+                "raw motor state became stale while output was active"
+                if not state_fresh
+                else "retry pending emergency motor disable"
+            )
+            self._emergency_disable(reason)
         hb = Bool()
         hb.data = bool(alive and state_fresh and self.output_gate.ready_for_output)
         self.heartbeat_pub.publish(hb)

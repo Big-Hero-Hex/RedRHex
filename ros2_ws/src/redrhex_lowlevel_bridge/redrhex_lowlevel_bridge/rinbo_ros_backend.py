@@ -19,7 +19,13 @@ from sensor_msgs.msg import JointState
 from redrhex_msgs.msg import RedRhexMotorState
 
 from .bridge_base import LowLevelBridgeBase
-from .command_safety import OutputSelection, resolve_output_selection
+from .command_safety import (
+    CommandRejectedError,
+    CommandSelectionError,
+    OutputSelection,
+    resolve_output_selection,
+    validate_enabled_command_payload,
+)
 
 
 @dataclass(frozen=True)
@@ -190,9 +196,10 @@ class RinboRosBackend(LowLevelBridgeBase):
     def send_motor_command(self, cmd) -> None:
         if not self.connected:
             raise RuntimeError("Rinbo ROS backend is not connected")
-        self._validate_command_shape(cmd)
-        selection = resolve_output_selection(cmd)
         enabled = bool(cmd.enable)
+        selection = resolve_output_selection(cmd)
+        if enabled:
+            validate_enabled_command_payload(cmd)
 
         preview_msg = self._make_motor_cmd_msg(cmd, enabled=enabled, preview=True)
         if self.publish_preview:
@@ -219,7 +226,7 @@ class RinboRosBackend(LowLevelBridgeBase):
             )
             return
 
-        if not enabled and self.last_command_was_enabled:
+        if not selection.any_enabled and self.last_command_was_enabled:
             self.emergency_disable()
             self.last_actual_publish_state = "published_disabled_repeated"
             return
@@ -260,12 +267,6 @@ class RinboRosBackend(LowLevelBridgeBase):
         else:
             self._set_abad_neutral_targets(msg)
         return msg
-
-    def _validate_command_shape(self, cmd) -> None:
-        if len(cmd.target_velocity_rad_s) < 6:
-            raise ValueError("target_velocity_rad_s must contain at least 6 main-drive values")
-        if len(cmd.target_position_rad) < 12:
-            raise ValueError("target_position_rad must contain 6 main-drive + 6 ABAD values")
 
     def read_motor_state(self):
         state = self.latest_motor_state
@@ -331,11 +332,12 @@ class RinboRosBackend(LowLevelBridgeBase):
     def _block_enabled_command(self, publish_state: str, reason: str) -> None:
         output_was_active = self.last_command_was_enabled
         self.last_block_reason = reason
+        self.last_actual_publish_state = publish_state
         self._warn_once(reason)
         if output_was_active:
             self.emergency_disable()
         self.last_command_was_enabled = False
-        self.last_actual_publish_state = publish_state
+        raise CommandRejectedError(reason)
 
     def _command_publisher_count(self) -> tuple[int, str]:
         try:

@@ -19,7 +19,7 @@ from std_msgs.msg import Bool
 from redrhex_msgs.msg import RedRhexMotorCommand
 
 from . import redrhex_contract as C
-from .manual_command_safety import run_with_terminal_disable, selection_for_mode
+from .manual_command_safety import finite_float, run_with_terminal_disable, selection_for_mode
 
 try:
     from rclpy._rclpy_pybind11 import RCLError
@@ -230,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topic", default="/redrhex/motor_commands")
     parser.add_argument("--heartbeat-topic", default="/redrhex/lowlevel_heartbeat")
     parser.add_argument("--estop-topic", default="/estop")
-    parser.add_argument("--wait-for-subscriber-s", type=float, default=2.0)
+    parser.add_argument("--wait-for-subscriber-s", type=finite_float, default=2.0)
     parser.add_argument(
         "--allow-no-subscriber",
         action="store_true",
@@ -241,17 +241,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow enabled commands without /redrhex/lowlevel_heartbeat=true. Not recommended on hardware.",
     )
-    parser.add_argument("--heartbeat-timeout-s", type=float, default=2.0)
+    parser.add_argument("--heartbeat-timeout-s", type=finite_float, default=2.0)
     parser.add_argument("--index", type=int, default=0, help="Leg/joint index 0..5 in policy order.")
-    parser.add_argument("--position", type=float, default=0.0, help="Target ABAD position in rad.")
-    parser.add_argument("--velocity", type=float, default=0.3, help="Target main-drive velocity in rad/s.")
-    parser.add_argument("--kp", type=float, default=8.0)
-    parser.add_argument("--kd", type=float, default=0.5)
-    parser.add_argument("--effort-limit", type=float, default=2.0)
-    parser.add_argument("--duration", type=float, default=2.0)
-    parser.add_argument("--rate-hz", type=float, default=50.0)
+    parser.add_argument("--position", type=finite_float, default=0.0, help="Target ABAD position in rad.")
+    parser.add_argument("--velocity", type=finite_float, default=0.3, help="Target main-drive velocity in rad/s.")
+    parser.add_argument("--kp", type=finite_float, default=8.0)
+    parser.add_argument("--kd", type=finite_float, default=0.5)
+    parser.add_argument("--effort-limit", type=finite_float, default=2.0)
+    parser.add_argument("--duration", type=finite_float, default=2.0)
+    parser.add_argument("--rate-hz", type=finite_float, default=50.0)
     parser.add_argument("--disable-repeats", type=int, default=5)
-    parser.add_argument("--disable-period-s", type=float, default=0.02)
+    parser.add_argument("--disable-period-s", type=finite_float, default=0.02)
     parser.add_argument("--mode-id", type=int, default=2)
     return parser
 
