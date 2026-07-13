@@ -272,3 +272,5 @@ python -m tools.sim2real validate-promotion \
 ```
 
 The evidence binds each real episode and simulator trace by SHA-256, declares calibration versus holdout conditions and what was held out, records instrument uncertainty, and reports whether bounded actuator candidates entered the real envelope. The command returns nonzero when any audit, repetition, holdout, metric, or actuator-model check fails. A passing report says only `eligible_for_review`; it never edits training defaults or promotes a profile automatically.
+
+Main-drive, ABAD, and static-contact holdouts have executable Isaac routes. Mass/CoM and passive-spring calibration/holdout scenarios are repeat-authenticated manual measurements, but their honest simulator-side held-out runners are not implemented in this MVP; the promotion gate reports those subsystems ineligible instead of accepting fabricated simulator artifacts. Add those runners before promoting a profile that changes mass/CoM or spring parameters.
