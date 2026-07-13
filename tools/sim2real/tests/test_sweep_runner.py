@@ -29,7 +29,14 @@ def _profile() -> CalibrationProfileV1:
         {
             "schema_version": 1,
             "profile_id": "baseline",
-            "hardware_mapping": {},
+            "hardware_mapping": {
+                "encoder_counts_per_rev": {"main_0": 54984.83},
+                "encoder_zero_count": {"main_0": 0.0},
+                "encoder_sign": {"main_0": 1},
+                "joint_direction": {"main_0": 1},
+                "pwm_scale": {"main_0": 1.0 / 120.0},
+                "pwm_cap": {"main_0": 500.0 / 120.0},
+            },
             "sensor_timing": {"aggregate_command_delay_s": 0.01},
             "simulation_physics": {
                 "main_drive": {"damping": 0.2},
