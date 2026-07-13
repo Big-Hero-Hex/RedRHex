@@ -436,6 +436,85 @@ class _MotorCmd:
             setattr(self, field, _Servo())
 
 
+def _rinbo_init_kwargs() -> dict:
+    return {
+        "node": SimpleNamespace(),
+        "command_topic": "/motor/command",
+        "state_topic": "/motor/state",
+        "joint_state_topic": "/joint_states",
+        "preview_topic": "/preview",
+        "publish_preview": True,
+        "allow_enable": False,
+        "publish_when_disabled": False,
+        "disabled_servo_control_mode": 0,
+        "publish_shutdown_disable": True,
+        "shutdown_disable_repeats": 5,
+        "shutdown_disable_period_s": 0.02,
+        "require_state": True,
+        "block_if_duplicate_command_publishers": True,
+        "state_timeout_s": 0.25,
+        "main_position_counts_per_rev": 54984.83,
+        "main_pwm_per_rad_s": 120.0,
+        "main_max_pwm": 500.0,
+        "main_encoder_zero_counts_rinbo_order": [0.0] * 6,
+        "main_encoder_sign_rinbo_order": [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
+        "main_velocity_sign_policy_order": [1.0] * 6,
+        "main_direction_positive_rinbo_order": [True, True, True, False, False, False],
+        "main_velocity_filter_alpha": 0.35,
+        "main_velocity_max_dt_s": 0.2,
+        "main_velocity_clip_rad_s": 80.0,
+        "abad_encoder_zero_rinbo_order": [740, 2565, 3283, 1944, 2071, 989],
+        "abad_encoder_counts_per_rad": 1000.0,
+        "abad_encoder_min": 0,
+        "abad_encoder_max": 65535,
+        "abad_sign_rinbo_order": [1.0] * 6,
+        "servo_control_mode": 2,
+        "main_joint_names_policy_order": [f"joint_{index}" for index in range(6)],
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("state_timeout_s", float("nan")),
+        ("state_timeout_s", float("inf")),
+        ("main_position_counts_per_rev", float("nan")),
+        ("main_position_counts_per_rev", float("inf")),
+        ("main_pwm_per_rad_s", float("nan")),
+        ("main_pwm_per_rad_s", float("inf")),
+        ("main_max_pwm", float("nan")),
+        ("main_max_pwm", float("inf")),
+        ("main_velocity_max_dt_s", float("nan")),
+        ("main_velocity_clip_rad_s", float("inf")),
+        ("abad_encoder_counts_per_rad", float("nan")),
+        ("shutdown_disable_period_s", float("inf")),
+        ("main_encoder_zero_counts_rinbo_order", [0.0, 0.0, float("nan"), 0.0, 0.0, 0.0]),
+        ("main_encoder_sign_rinbo_order", [-1.0, -1.0, 0.0, 1.0, 1.0, 1.0]),
+        ("main_velocity_sign_policy_order", [1.0, 1.0, float("inf"), 1.0, 1.0, 1.0]),
+        ("main_direction_positive_rinbo_order", [True, True, 1, False, False, False]),
+        ("abad_sign_rinbo_order", [1.0, 1.0, float("nan"), 1.0, 1.0, 1.0]),
+    ],
+)
+def test_biorola_constructor_rejects_nonfinite_or_invalid_conversion_parameters(
+    monkeypatch, field, bad_value
+):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    kwargs = _rinbo_init_kwargs()
+    kwargs[field] = bad_value
+
+    with pytest.raises(ValueError, match=field):
+        module.RinboRosBackend(**kwargs)
+
+
+def test_biorola_constructor_accepts_finite_reviewed_conversion_parameters(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = module.RinboRosBackend(**_rinbo_init_kwargs())
+
+    assert backend.main_pwm_per_rad_s == 120.0
+    assert backend.main_max_pwm == 500.0
+    assert backend.main_encoder_sign_rinbo_order == [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+
+
 def _configured_rinbo(module):
     backend = module.RinboRosBackend.__new__(module.RinboRosBackend)
     backend.MotorCmdStamped = _MotorCmd

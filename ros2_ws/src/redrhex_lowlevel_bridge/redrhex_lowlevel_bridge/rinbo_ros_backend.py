@@ -106,13 +106,12 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.block_if_duplicate_command_publishers = bool(block_if_duplicate_command_publishers)
         self.state_timeout_s = float(state_timeout_s)
         self.main_position_counts_per_rev = float(main_position_counts_per_rev)
-        self.main_rad_per_count = 2.0 * math.pi / self.main_position_counts_per_rev
         self.main_pwm_per_rad_s = float(main_pwm_per_rad_s)
         self.main_max_pwm = float(main_max_pwm)
         self.main_encoder_zero_counts_rinbo_order = [float(x) for x in main_encoder_zero_counts_rinbo_order]
         self.main_encoder_sign_rinbo_order = [float(x) for x in main_encoder_sign_rinbo_order]
         self.main_velocity_sign_policy_order = [float(x) for x in main_velocity_sign_policy_order]
-        self.main_direction_positive_rinbo_order = [bool(x) for x in main_direction_positive_rinbo_order]
+        self.main_direction_positive_rinbo_order = list(main_direction_positive_rinbo_order)
         self.main_velocity_filter_alpha = float(main_velocity_filter_alpha)
         self.main_velocity_max_dt_s = float(main_velocity_max_dt_s)
         self.main_velocity_clip_rad_s = float(main_velocity_clip_rad_s)
@@ -138,24 +137,49 @@ class RinboRosBackend(LowLevelBridgeBase):
             raise ValueError("abad_sign_rinbo_order must have length 6")
         if len(self.main_joint_names_policy_order) != 6:
             raise ValueError("main_joint_names_policy_order must have length 6")
-        if self.main_position_counts_per_rev <= 0.0:
-            raise ValueError("main_position_counts_per_rev must be positive")
-        if self.main_pwm_per_rad_s <= 0.0 or self.main_max_pwm <= 0.0:
-            raise ValueError("main PWM conversion parameters must be positive")
-        if self.abad_encoder_counts_per_rad <= 0.0:
-            raise ValueError("abad_encoder_counts_per_rad must be positive")
+        if not math.isfinite(self.state_timeout_s) or self.state_timeout_s <= 0.0:
+            raise ValueError("state_timeout_s must be positive and finite")
+        if (
+            not math.isfinite(self.main_position_counts_per_rev)
+            or self.main_position_counts_per_rev <= 0.0
+        ):
+            raise ValueError("main_position_counts_per_rev must be positive and finite")
+        if not math.isfinite(self.main_pwm_per_rad_s) or self.main_pwm_per_rad_s <= 0.0:
+            raise ValueError("main_pwm_per_rad_s must be positive and finite")
+        if not math.isfinite(self.main_max_pwm) or self.main_max_pwm <= 0.0:
+            raise ValueError("main_max_pwm must be positive and finite")
+        if not all(math.isfinite(value) for value in self.main_encoder_zero_counts_rinbo_order):
+            raise ValueError("main_encoder_zero_counts_rinbo_order must contain finite values")
+        if any(value not in (-1.0, 1.0) for value in self.main_encoder_sign_rinbo_order):
+            raise ValueError("main_encoder_sign_rinbo_order must contain only -1 or 1")
+        if any(value not in (-1.0, 1.0) for value in self.main_velocity_sign_policy_order):
+            raise ValueError("main_velocity_sign_policy_order must contain only -1 or 1")
+        if any(type(value) is not bool for value in self.main_direction_positive_rinbo_order):
+            raise ValueError("main_direction_positive_rinbo_order must contain only booleans")
+        if (
+            not math.isfinite(self.abad_encoder_counts_per_rad)
+            or self.abad_encoder_counts_per_rad <= 0.0
+        ):
+            raise ValueError("abad_encoder_counts_per_rad must be positive and finite")
+        if any(value not in (-1.0, 1.0) for value in self.abad_sign_rinbo_order):
+            raise ValueError("abad_sign_rinbo_order must contain only -1 or 1")
         if self.abad_encoder_min >= self.abad_encoder_max:
             raise ValueError("abad_encoder_min must be smaller than abad_encoder_max")
-        if not 0.0 <= self.main_velocity_filter_alpha <= 1.0:
-            raise ValueError("main_velocity_filter_alpha must be in [0, 1]")
-        if self.main_velocity_max_dt_s <= 0.0:
-            raise ValueError("main_velocity_max_dt_s must be positive")
-        if self.main_velocity_clip_rad_s <= 0.0:
-            raise ValueError("main_velocity_clip_rad_s must be positive")
+        if (
+            not math.isfinite(self.main_velocity_filter_alpha)
+            or not 0.0 <= self.main_velocity_filter_alpha <= 1.0
+        ):
+            raise ValueError("main_velocity_filter_alpha must be finite and in [0, 1]")
+        if not math.isfinite(self.main_velocity_max_dt_s) or self.main_velocity_max_dt_s <= 0.0:
+            raise ValueError("main_velocity_max_dt_s must be positive and finite")
+        if not math.isfinite(self.main_velocity_clip_rad_s) or self.main_velocity_clip_rad_s <= 0.0:
+            raise ValueError("main_velocity_clip_rad_s must be positive and finite")
         if self.shutdown_disable_repeats < 2:
             raise ValueError("shutdown_disable_repeats must be at least 2")
-        if self.shutdown_disable_period_s < 0.0:
-            raise ValueError("shutdown_disable_period_s must be non-negative")
+        if not math.isfinite(self.shutdown_disable_period_s) or self.shutdown_disable_period_s < 0.0:
+            raise ValueError("shutdown_disable_period_s must be non-negative and finite")
+
+        self.main_rad_per_count = 2.0 * math.pi / self.main_position_counts_per_rev
 
         self.connected = False
         self.sequence = 0
