@@ -560,7 +560,26 @@ def _fixture(root: Path, *, sim_scale: float = 1.02) -> tuple[CalibrationProfile
         sim_scale=sim_scale,
     )
     sim_trace = load_trace(simulated)
-    metric_path = "step.positive.steady_speed_rad_s"
+    metric_units = {
+        **{
+            f"step.{direction}.{metric}": unit
+            for direction in ("positive", "negative")
+            for metric, unit in (
+                ("onset_delay_s", "s"),
+                ("steady_speed_rad_s", "rad/s"),
+                ("rise_time_s", "s"),
+                ("overshoot_ratio", "1"),
+            )
+        },
+        **{
+            f"coast.{direction}.{metric}": unit
+            for direction in ("positive", "negative")
+            for metric, unit in (
+                ("coast_time_s", "s"),
+                ("pre_coast_speed_rad_s", "rad/s"),
+            )
+        },
+    }
     evidence = {
         "schema_version": 1,
         "candidate_profile_sha256": sha256_json(candidate.to_dict()),
@@ -608,9 +627,10 @@ def _fixture(root: Path, *, sim_scale: float = 1.02) -> tuple[CalibrationProfile
                 },
                 "metrics": {
                     metric_path: {
-                        "unit": "rad/s",
+                        "unit": unit,
                         "instrument_uncertainty": 0.15,
                     }
+                    for metric_path, unit in metric_units.items()
                 },
             },
         ],
@@ -619,6 +639,14 @@ def _fixture(root: Path, *, sim_scale: float = 1.02) -> tuple[CalibrationProfile
         },
     }
     return candidate, evidence
+
+
+def test_promotion_requires_every_mandatory_heldout_metric(tmp_path: Path) -> None:
+    profile, evidence = _fixture(tmp_path)
+    evidence["conditions"][1]["metrics"].pop("coast.negative.coast_time_s")
+
+    with pytest.raises(ContractError, match="mandatory held-out metrics.*coast.negative"):
+        evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
 
 def test_promotion_resolves_artifacts_and_derives_repetitions_metrics_and_fitted_subsystems(
@@ -962,8 +990,11 @@ def _direct_measurement_fixture(
             profile=candidate,
             metadata=_direct_measurement_metadata("abad-static-holdout"),
         )
-        metric_path = "aggregate.target_scale"
-        unit = "1"
+        metric_units = {
+            "aggregate.target_scale": "1",
+            "aggregate.target_offset_rad": "rad",
+            "aggregate.fit_rmse_rad": "rad",
+        }
         uncertainty = 0.01
         held_out_by = ["command_level"]
     elif subsystem == "contact":
@@ -1004,8 +1035,10 @@ def _direct_measurement_fixture(
                 "contact-static-settle", load_coordinate="full-robot"
             ),
         )
-        metric_path = "settled.root_height_m"
-        unit = "m"
+        metric_units = {
+            "settled.root_height_m": "m",
+            "settled.contact_force_n": "N",
+        }
         uncertainty = 0.005
         held_out_by = ["load"]
     else:  # pragma: no cover - test helper guard
@@ -1040,6 +1073,7 @@ def _direct_measurement_fixture(
                         "unit": unit,
                         "instrument_uncertainty": uncertainty,
                     }
+                    for metric_path, unit in metric_units.items()
                 },
             },
         ],

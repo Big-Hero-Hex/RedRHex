@@ -257,6 +257,52 @@ def _scenario_supports(subsystem: str, scenario_subsystem: str) -> bool:
     return scenario_subsystem in supported.get(subsystem, {subsystem})
 
 
+def _mandatory_holdout_metrics(
+    subsystem: str, scenario: Any
+) -> dict[str, str]:
+    """Return the complete reviewed metric contract for one runnable holdout."""
+
+    kind = scenario.experiment_kind
+    if subsystem in {"main_drive", "timing"}:
+        result: dict[str, str] = {}
+        if kind in {"step", "step_coast"}:
+            step_metrics = (
+                (("onset_delay_s", "s"),)
+                if subsystem == "timing"
+                else (
+                    ("onset_delay_s", "s"),
+                    ("steady_speed_rad_s", "rad/s"),
+                    ("rise_time_s", "s"),
+                    ("overshoot_ratio", "1"),
+                )
+            )
+            prefix = "step." if kind == "step_coast" else ""
+            for direction in ("positive", "negative"):
+                for metric, unit in step_metrics:
+                    result[f"{prefix}{direction}.{metric}"] = unit
+        if subsystem == "main_drive" and kind in {"coast", "step_coast"}:
+            prefix = "coast." if kind == "step_coast" else ""
+            for direction in ("positive", "negative"):
+                result[f"{prefix}{direction}.coast_time_s"] = "s"
+                result[f"{prefix}{direction}.pre_coast_speed_rad_s"] = "rad/s"
+        if result:
+            return result
+    elif subsystem == "abad" and kind == "abad_static":
+        return {
+            "aggregate.target_scale": "1",
+            "aggregate.target_offset_rad": "rad",
+            "aggregate.fit_rmse_rad": "rad",
+        }
+    elif subsystem == "contact" and kind == "static_settle":
+        return {
+            "settled.root_height_m": "m",
+            "settled.contact_force_n": "N",
+        }
+    raise ContractError(
+        f"no mandatory held-out metric contract for {subsystem}.{scenario.scenario_id}"
+    )
+
+
 def _required_measurement_source_keys(
     baseline: CalibrationProfileV1,
     candidate: CalibrationProfileV1,
@@ -1074,6 +1120,20 @@ def evaluate_promotion(
                 real_metric_sets = [
                     compute_subsystem_metrics(scenario, trace) for trace in loaded_real
                 ]
+                mandatory_metrics = _mandatory_holdout_metrics(subsystem, scenario)
+                supplied_metrics = set(raw_metrics)
+                missing_metrics = set(mandatory_metrics) - supplied_metrics
+                if missing_metrics:
+                    raise ContractError(
+                        "mandatory held-out metrics are missing: "
+                        + ", ".join(sorted(missing_metrics))
+                    )
+                unsupported_metrics = supplied_metrics - set(mandatory_metrics)
+                if unsupported_metrics:
+                    raise ContractError(
+                        "unsupported held-out metrics: "
+                        + ", ".join(sorted(unsupported_metrics))
+                    )
                 for metric_path, raw_metric in sorted(raw_metrics.items()):
                     metric = _mapping(raw_metric, f"metric {metric_path}")
                     _exact_fields(
@@ -1084,6 +1144,11 @@ def evaluate_promotion(
                     unit = metric["unit"]
                     if not isinstance(unit, str) or not unit.strip():
                         raise ContractError(f"metric {metric_path} unit must be non-empty")
+                    expected_unit = mandatory_metrics[metric_path]
+                    if unit != expected_unit:
+                        raise ContractError(
+                            f"metric {metric_path} unit must be {expected_unit}, got {unit}"
+                        )
                     uncertainty = _number(
                         metric["instrument_uncertainty"],
                         f"metric {metric_path}.instrument_uncertainty",
