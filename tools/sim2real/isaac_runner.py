@@ -215,18 +215,38 @@ def _runtime_audit(
     env_cfg: RedrhexEnvCfg,
     *,
     mode: str,
+    runtime_profile_application: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     masses = robot.root_physx_view.get_masses()
     inertias = robot.root_physx_view.get_inertias()
     coms = robot.root_physx_view.get_coms()
     total_mass = masses[0].sum()
+    body_masses = masses[0].to(robot.data.body_com_pos_w.device)
     aggregate_com_world = (
-        robot.data.body_com_pos_w[0] * masses[0].unsqueeze(-1)
-    ).sum(dim=0) / total_mass
+        robot.data.body_com_pos_w[0] * body_masses.unsqueeze(-1)
+    ).sum(dim=0) / body_masses.sum()
     aggregate_com_body = quat_apply_inverse(
         robot.data.root_quat_w[0].unsqueeze(0),
         (aggregate_com_world - robot.data.root_pos_w[0]).unsqueeze(0),
     )[0]
+    mass_profile_application = (
+        runtime_profile_application.get("mass")
+        if runtime_profile_application is not None
+        else None
+    )
+    if (
+        isinstance(mass_profile_application, Mapping)
+        and mass_profile_application.get("mode") == "absolute"
+    ):
+        # Mass/CoM setters take effect immediately, while Isaac's cached body
+        # CoM world-state may not refresh until the next scene update. The
+        # application result is read back from PhysX and analytically verified,
+        # so use its effective value in this pre-experiment audit.
+        aggregate_com_body = torch.as_tensor(
+            mass_profile_application["achieved_whole_com_root_m"],
+            dtype=aggregate_com_body.dtype,
+            device=aggregate_com_body.device,
+        )
     actuator_audit: dict[str, Any] = {}
     for name, actuator in robot.actuators.items():
         actuator_audit[name] = {
@@ -271,6 +291,7 @@ def _runtime_audit(
             "com_pose_xyz_xyzw": _to_list(coms),
             "aggregate_com_body_m": _to_list(aggregate_com_body),
         },
+        "mass_profile_application": copy.deepcopy(mass_profile_application),
         "joint_geometry": _runtime_joint_geometry(robot, scene, env_cfg),
         "joint_properties": joint_properties,
         "effort_trace_semantics": (
@@ -513,7 +534,9 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         initial_joint_position, initial_joint_velocity
     )
     scene.reset()
-    apply_profile_to_runtime_env(SimpleNamespace(robot=robot, cfg=env_cfg), profile)
+    runtime_profile_application = apply_profile_to_runtime_env(
+        SimpleNamespace(robot=robot, cfg=env_cfg), profile
+    )
 
     # Record the effective PhysX state before the experiment can alter it.
     audit = _runtime_audit(
@@ -523,6 +546,7 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         scene,
         env_cfg,
         mode=request.mode,
+        runtime_profile_application=runtime_profile_application,
     )
 
     default_position = initial_joint_position.clone()

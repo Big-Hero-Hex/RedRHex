@@ -350,6 +350,172 @@ def test_runtime_mass_profile_replaces_domain_randomization_baseline() -> None:
     assert unwrapped._robot_mass == 11.0
 
 
+def _absolute_mass_profile(
+    *,
+    target_mass_kg: float = 10.0,
+    target_com_xy_m: tuple[float, float] = (0.8, 0.2),
+) -> CalibrationProfileV1:
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {
+        "mass": {
+            "target_total_mass_kg": target_mass_kg,
+            "reference_planar_com_xy_m": list(target_com_xy_m),
+            "reference_joint_position_rad": {
+                f"{group}_{index}": 0.0
+                for group in ("main", "abad", "damper")
+                for index in range(6)
+            },
+            "reference_root_orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+    return CalibrationProfileV1.from_dict(payload)
+
+
+def _absolute_mass_runtime(
+    *, state_device: str = "cpu"
+) -> tuple[SimpleNamespace, object]:
+    import torch
+
+    cfg = _fake_env_cfg()
+    runtime_names = (
+        cfg.main_drive_joint_names
+        + cfg.abad_joint_names
+        + cfg.damper_joint_names
+    )
+
+    class FakeView:
+        def __init__(self) -> None:
+            self.masses = torch.tensor([[2.0, 3.0]])
+            self.inertias = torch.ones((1, 2, 9))
+            self.coms = torch.zeros((1, 2, 7))
+            self.coms[..., 6] = 1.0
+
+        def get_masses(self):
+            return self.masses
+
+        def get_inertias(self):
+            return self.inertias
+
+        def get_coms(self):
+            return self.coms
+
+        def set_masses(self, values, _indices):
+            self.masses = values.clone()
+
+        def set_inertias(self, values, _indices):
+            self.inertias = values.clone()
+
+        def set_coms(self, values, _indices):
+            self.coms = values.clone()
+
+    view = FakeView()
+    data = SimpleNamespace(
+        default_mass=view.masses.clone(),
+        default_inertia=view.inertias.clone(),
+        joint_pos=torch.zeros((1, 18), device=state_device),
+        root_pos_w=torch.tensor([[10.0, 0.0, 0.0]], device=state_device),
+        root_quat_w=torch.tensor(
+            [[1.0, 0.0, 0.0, 0.0]], device=state_device
+        ),
+        body_com_pos_w=torch.tensor(
+            [[[10.0, 0.0, 0.0], [11.0, 0.0, 0.0]]], device=state_device
+        ),
+    )
+    robot = SimpleNamespace(
+        root_physx_view=view,
+        data=data,
+        num_instances=1,
+        device=state_device,
+        joint_names=runtime_names,
+    )
+    unwrapped = SimpleNamespace(
+        robot=robot,
+        cfg=cfg,
+        _default_body_masses=view.masses.clone(),
+        _robot_mass=5.0,
+    )
+    return unwrapped, view
+
+
+def test_absolute_mass_profile_hits_measured_mass_and_planar_com() -> None:
+    import torch
+
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    unwrapped, view = _absolute_mass_runtime()
+
+    summary = apply_profile_to_runtime_env(
+        SimpleNamespace(unwrapped=unwrapped), _absolute_mass_profile()
+    )
+
+    torch.testing.assert_close(view.masses, torch.tensor([[4.0, 6.0]]))
+    torch.testing.assert_close(view.inertias, torch.full((1, 2, 9), 2.0))
+    torch.testing.assert_close(view.coms[0, 0, :3], torch.tensor([0.5, 0.5, 0.0]))
+    assert summary["mass"]["mode"] == "absolute"
+    assert summary["mass"]["reference_total_mass_kg"] == pytest.approx(5.0)
+    assert summary["mass"]["reference_whole_com_root_m"] == pytest.approx(
+        [0.6, 0.0, 0.0]
+    )
+    assert summary["mass"]["achieved_total_mass_kg"] == pytest.approx(10.0)
+    assert summary["mass"]["achieved_whole_com_root_m"][:2] == pytest.approx(
+        [0.8, 0.2]
+    )
+    assert unwrapped._robot_mass == pytest.approx(10.0)
+
+
+def test_absolute_mass_supports_cpu_physx_properties_with_cuda_state() -> None:
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    unwrapped, view = _absolute_mass_runtime(state_device="cuda")
+
+    summary = apply_profile_to_runtime_env(
+        SimpleNamespace(unwrapped=unwrapped), _absolute_mass_profile()
+    )
+
+    assert view.masses.device.type == "cpu"
+    assert summary["mass"]["achieved_total_mass_kg"] == pytest.approx(10.0)
+    assert summary["mass"]["achieved_whole_com_root_m"][:2] == pytest.approx(
+        [0.8, 0.2]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda runtime: runtime.robot.data.joint_pos.__setitem__((0, 0), 0.1), "joint pose"),
+        (
+            lambda runtime: setattr(
+                runtime.robot.data,
+                "root_quat_w",
+                __import__("torch").tensor([[0.0, 1.0, 0.0, 0.0]]),
+            ),
+            "root orientation",
+        ),
+        (
+            lambda runtime: delattr(runtime.robot.data, "body_com_pos_w"),
+            "body_com_pos_w",
+        ),
+    ],
+    ids=("joint-pose-mismatch", "orientation-mismatch", "missing-body-com-state"),
+)
+def test_absolute_mass_profile_fails_closed_without_matching_reference_state(
+    mutation, message: str
+) -> None:
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    unwrapped, _view = _absolute_mass_runtime()
+    mutation(unwrapped)
+
+    with pytest.raises(ContractError, match=message):
+        apply_profile_to_runtime_env(
+            SimpleNamespace(unwrapped=unwrapped), _absolute_mass_profile()
+        )
+
+
 def test_runtime_profile_overrides_unknown_robot_material_for_measured_pair_friction() -> None:
     import torch
 

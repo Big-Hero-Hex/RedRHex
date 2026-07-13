@@ -164,6 +164,84 @@ def test_profile_rejects_unknown_or_physically_invalid_fields() -> None:
         )
 
 
+def _absolute_mass_section() -> dict[str, object]:
+    return {
+        "target_total_mass_kg": 12.5,
+        "reference_planar_com_xy_m": [0.12, -0.03],
+        "reference_joint_position_rad": {
+            f"{group}_{index}": 0.01 * index
+            for group in ("main", "abad", "damper")
+            for index in range(6)
+        },
+        "reference_root_orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+    }
+
+
+def test_profile_accepts_absolute_mass_and_reference_pose_contract() -> None:
+    mass = _absolute_mass_section()
+
+    profile = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "absolute-mass",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {"mass": mass},
+        }
+    )
+
+    assert profile.simulation_physics["mass"] == mass
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"scale": 1.1},
+        {"reference_planar_com_xy_m": [0.1]},
+        {"reference_joint_position_rad": {"main_0": 0.0}},
+        {"reference_root_orientation_xyzw": [0.0, 0.0, 0.0, 2.0]},
+    ],
+    ids=(
+        "mixed-legacy-mode",
+        "invalid-planar-com",
+        "incomplete-reference-joints",
+        "unnormalized-root-orientation",
+    ),
+)
+def test_profile_rejects_invalid_absolute_mass_contract(
+    mutation: dict[str, object],
+) -> None:
+    mass = _absolute_mass_section()
+    mass.update(mutation)
+
+    with pytest.raises(ContractError, match="mass"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "invalid-absolute-mass",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {"mass": mass},
+            }
+        )
+
+
+def test_profile_requires_all_absolute_mass_reference_fields() -> None:
+    mass = _absolute_mass_section()
+    del mass["reference_root_orientation_xyzw"]
+
+    with pytest.raises(ContractError, match="missing fields"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "incomplete-absolute-mass",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {"mass": mass},
+            }
+        )
+
+
 def test_manifest_requires_explicit_units_frames_and_provenance_metadata() -> None:
     payload = {
         "schema_version": 1,
@@ -463,6 +541,7 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
         "lever_arm",
         "command",
         "direction",
+        "saturation_confirmed",
         "repeat_index",
     }
     assert set(load_scenario("friction").required_channels) == {

@@ -23,6 +23,18 @@ _MAX_CANONICAL_PWM_CAP_RAD_S = 50.0
 _MIN_ABAD_TARGET_SCALE = 0.5
 _MAX_ABAD_TARGET_SCALE = 1.5
 _MAX_ABAD_TARGET_OFFSET_RAD = 0.35
+_LEGACY_MASS_FIELDS = {"scale", "added_mass_kg", "com_offset_m"}
+_ABSOLUTE_MASS_FIELDS = {
+    "target_total_mass_kg",
+    "reference_planar_com_xy_m",
+    "reference_joint_position_rad",
+    "reference_root_orientation_xyzw",
+}
+_CANONICAL_JOINTS = {
+    f"{group}_{index}"
+    for group in ("main", "abad", "damper")
+    for index in range(6)
+}
 
 
 class ContractError(ValueError):
@@ -635,24 +647,102 @@ class CalibrationProfileV1:
                     springs[joint] = clean_spring
                 clean_physics[section_name] = springs
             elif section_name == "mass":
-                unknown = set(section) - {"scale", "added_mass_kg", "com_offset_m"}
+                unknown = set(section) - _LEGACY_MASS_FIELDS - _ABSOLUTE_MASS_FIELDS
                 if unknown:
                     raise ContractError(f"unknown simulation_physics.mass fields: {', '.join(sorted(unknown))}")
-                clean_mass: dict[str, Any] = {}
-                if "scale" in section:
-                    clean_mass["scale"] = _positive(section["scale"], "simulation_physics.mass.scale")
-                if "added_mass_kg" in section:
-                    clean_mass["added_mass_kg"] = _number(
-                        section["added_mass_kg"], "simulation_physics.mass.added_mass_kg", minimum=0.0
+                legacy_fields = set(section) & _LEGACY_MASS_FIELDS
+                absolute_fields = set(section) & _ABSOLUTE_MASS_FIELDS
+                if legacy_fields and absolute_fields:
+                    raise ContractError(
+                        "simulation_physics.mass cannot mix legacy relative and "
+                        "absolute mass fields"
                     )
-                if "com_offset_m" in section:
-                    offset = section["com_offset_m"]
-                    if not isinstance(offset, list) or len(offset) != 3:
-                        raise ContractError("simulation_physics.mass.com_offset_m must contain three values")
-                    clean_mass["com_offset_m"] = [
-                        _number(value, f"simulation_physics.mass.com_offset_m[{index}]")
-                        for index, value in enumerate(offset)
+                clean_mass: dict[str, Any] = {}
+                if absolute_fields:
+                    missing = _ABSOLUTE_MASS_FIELDS - absolute_fields
+                    if missing:
+                        raise ContractError(
+                            "simulation_physics.mass absolute mode is missing fields: "
+                            + ", ".join(sorted(missing))
+                        )
+                    clean_mass["target_total_mass_kg"] = _positive(
+                        section["target_total_mass_kg"],
+                        "simulation_physics.mass.target_total_mass_kg",
+                    )
+                    planar_com = section["reference_planar_com_xy_m"]
+                    if not isinstance(planar_com, list) or len(planar_com) != 2:
+                        raise ContractError(
+                            "simulation_physics.mass.reference_planar_com_xy_m must "
+                            "contain two values"
+                        )
+                    clean_mass["reference_planar_com_xy_m"] = [
+                        _number(
+                            value,
+                            "simulation_physics.mass.reference_planar_com_xy_m"
+                            f"[{index}]",
+                        )
+                        for index, value in enumerate(planar_com)
                     ]
+                    reference_joints = _string_map(
+                        section["reference_joint_position_rad"],
+                        "simulation_physics.mass.reference_joint_position_rad",
+                    )
+                    if set(reference_joints) != _CANONICAL_JOINTS:
+                        missing_joints = _CANONICAL_JOINTS - set(reference_joints)
+                        unknown_joints = set(reference_joints) - _CANONICAL_JOINTS
+                        details = []
+                        if missing_joints:
+                            details.append("missing " + ", ".join(sorted(missing_joints)))
+                        if unknown_joints:
+                            details.append("unknown " + ", ".join(sorted(unknown_joints)))
+                        raise ContractError(
+                            "simulation_physics.mass.reference_joint_position_rad "
+                            "must contain all 18 canonical joints (" + "; ".join(details) + ")"
+                        )
+                    clean_mass["reference_joint_position_rad"] = {
+                        joint: _number(
+                            reference_joints[joint],
+                            "simulation_physics.mass.reference_joint_position_rad."
+                            f"{joint}",
+                        )
+                        for joint in sorted(reference_joints)
+                    }
+                    orientation = section["reference_root_orientation_xyzw"]
+                    if not isinstance(orientation, list) or len(orientation) != 4:
+                        raise ContractError(
+                            "simulation_physics.mass.reference_root_orientation_xyzw "
+                            "must contain four values"
+                        )
+                    clean_orientation = [
+                        _number(
+                            value,
+                            "simulation_physics.mass.reference_root_orientation_xyzw"
+                            f"[{index}]",
+                        )
+                        for index, value in enumerate(orientation)
+                    ]
+                    norm = math.sqrt(sum(value * value for value in clean_orientation))
+                    if not math.isclose(norm, 1.0, rel_tol=0.0, abs_tol=1.0e-6):
+                        raise ContractError(
+                            "simulation_physics.mass.reference_root_orientation_xyzw "
+                            "must be normalized"
+                        )
+                    clean_mass["reference_root_orientation_xyzw"] = clean_orientation
+                else:
+                    if "scale" in section:
+                        clean_mass["scale"] = _positive(section["scale"], "simulation_physics.mass.scale")
+                    if "added_mass_kg" in section:
+                        clean_mass["added_mass_kg"] = _number(
+                            section["added_mass_kg"], "simulation_physics.mass.added_mass_kg", minimum=0.0
+                        )
+                    if "com_offset_m" in section:
+                        offset = section["com_offset_m"]
+                        if not isinstance(offset, list) or len(offset) != 3:
+                            raise ContractError("simulation_physics.mass.com_offset_m must contain three values")
+                        clean_mass["com_offset_m"] = [
+                            _number(value, f"simulation_physics.mass.com_offset_m[{index}]")
+                            for index, value in enumerate(offset)
+                        ]
                 clean_physics[section_name] = clean_mass
             else:
                 allowed = {"static_friction", "dynamic_friction", "restitution"}
