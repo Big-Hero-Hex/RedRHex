@@ -8,11 +8,21 @@ import numpy as np
 from .contracts import ContractError, ScenarioSpecV1
 from .metrics import compute_subsystem_metrics
 from .scenarios import load_scenario
-from .traces import LoadedTrace, load_trace
+from .traces import LoadedTrace, load_trace, sha256_json
 
 
-def _loaded(value: LoadedTrace | str | Path) -> LoadedTrace:
-    return value if isinstance(value, LoadedTrace) else load_trace(value)
+def _loaded(
+    value: LoadedTrace | str | Path, scenario: ScenarioSpecV1
+) -> LoadedTrace:
+    if not isinstance(value, LoadedTrace):
+        return load_trace(value, scenario=scenario)
+    if value.manifest.scenario_id != scenario.scenario_id:
+        raise ContractError("scenario id mismatch")
+    if value.manifest.provenance.get("scenario_sha256") != sha256_json(
+        scenario.to_dict()
+    ):
+        raise ContractError("scenario hash mismatch")
+    return value
 
 
 def _compatible(real: LoadedTrace, sim: LoadedTrace, scenario: ScenarioSpecV1) -> None:
@@ -51,19 +61,27 @@ def compare_traces(
     *,
     scenario: ScenarioSpecV1 | str | Path | None = None,
 ) -> dict[str, Any]:
-    real_trace = _loaded(real)
-    sim_trace = _loaded(sim)
     spec = (
         scenario
         if isinstance(scenario, ScenarioSpecV1)
-        else load_scenario(scenario or real_trace.manifest.scenario_id)
+        else load_scenario(
+            scenario
+            or (
+                real.manifest.scenario_id
+                if isinstance(real, LoadedTrace)
+                else load_trace(real).manifest.scenario_id
+            )
+        )
     )
+    real_trace = _loaded(real, spec)
+    sim_trace = _loaded(sim, spec)
     _compatible(real_trace, sim_trace, spec)
     real_metrics = compute_subsystem_metrics(spec, real_trace)
     sim_metrics = compute_subsystem_metrics(spec, sim_trace)
     return {
         "schema_version": 1,
         "scenario_id": spec.scenario_id,
+        "delta_convention": "sim_minus_real",
         "subsystems": {
             spec.subsystem: {
                 "real": real_metrics,

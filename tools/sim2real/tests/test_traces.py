@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -171,3 +172,67 @@ def test_optional_channels_require_explicit_independent_time_bases(tmp_path: Pat
             source="sim",
             time_bases={"imu_acceleration": "imu_time_s"},
         )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda payload: payload.__setitem__("schema_version", 2), "schema_version"),
+        (lambda payload: payload.__setitem__("mystery", True), "unknown fields"),
+    ],
+    ids=("schema-version", "unknown-field"),
+)
+def test_trace_writer_strictly_validates_mapping_manifests(
+    tmp_path: Path, mutate, message: str
+) -> None:
+    seed = write_trace(
+        tmp_path / "seed",
+        _valid_arrays(),
+        scenario=load_scenario("main-step"),
+        source="sim",
+    )
+    payload = seed.to_dict()
+    mutate(payload)
+    target = tmp_path / "copy"
+
+    with pytest.raises(ContractError, match=message):
+        write_trace(target, _valid_arrays(), manifest=payload)
+
+    assert not target.exists()
+
+
+def test_failed_trace_write_can_be_retried_at_the_same_path(tmp_path: Path) -> None:
+    target = tmp_path / "episode"
+    invalid_metadata = {
+        "clock": {
+            "source": "test",
+            "timestamp_semantics": "relative_monotonic",
+        }
+    }
+
+    with pytest.raises(ContractError, match="time_unit"):
+        write_trace(
+            target,
+            _valid_arrays(),
+            scenario=load_scenario("main-step"),
+            source="sim",
+            metadata=invalid_metadata,
+        )
+
+    assert not target.exists()
+    manifest = write_trace(
+        target,
+        _valid_arrays(),
+        scenario=load_scenario("main-step"),
+        source="sim",
+    )
+    assert manifest.trace_file == "trace.npz"
+    assert (target / "metadata.json").is_file()
+
+
+def test_trace_writer_docstring_names_the_emitted_metadata_file() -> None:
+    docstring = inspect.getdoc(write_trace)
+
+    assert docstring is not None
+    assert "metadata.json" in docstring
+    assert "manifest.json" not in docstring

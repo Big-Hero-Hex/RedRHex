@@ -136,7 +136,9 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         scenario = load_scenario(args.scenario)
         space = _json_object(args.space_json, "--space-json")
         if args.mode == "one-factor":
-            candidates = generate_one_factor_candidates(profile, space)
+            candidates = generate_one_factor_candidates(
+                profile, space, max_candidates=args.max_candidates
+            )
         else:
             candidates = generate_coarse_grid_candidates(
                 profile, space, max_candidates=args.max_candidates

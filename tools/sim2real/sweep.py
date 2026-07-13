@@ -67,12 +67,21 @@ def _candidate(
 def generate_one_factor_candidates(
     base: CalibrationProfileV1,
     search_space: Mapping[str, list[float]],
+    *,
+    max_candidates: int = 256,
 ) -> list[CalibrationProfileV1]:
+    if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates < 1:
+        raise ContractError("max_candidates must be a positive integer")
     payload = base.to_dict()
     changes: list[tuple[str, float]] = []
     for path, values in _space(search_space):
         current = float(_get(payload, path))
         changes.extend((path, value) for value in values if value != current)
+    if len(changes) > max_candidates:
+        raise ContractError(
+            f"one-factor sweep has {len(changes)} candidates, "
+            f"exceeding max_candidates={max_candidates}"
+        )
     return [
         _candidate(base, {path: value}, mode="one-factor", index=index)
         for index, (path, value) in enumerate(changes, start=1)

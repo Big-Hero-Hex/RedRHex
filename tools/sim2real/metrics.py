@@ -356,6 +356,8 @@ def _interpolate(trace: LoadedTrace, source: str, target: str) -> np.ndarray:
     values = trace.arrays[source]
     if values.ndim != 1:
         raise ContractError(f"cannot interpolate multidimensional channel {source}")
+    if source_time[0] > target_time[0] or source_time[-1] < target_time[-1]:
+        raise ContractError(f"{source} clock does not cover {target} clock")
     return np.interp(target_time, source_time, values)
 
 

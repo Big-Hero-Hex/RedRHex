@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 
 from tools.sim2real.compare import compare_traces
-from tools.sim2real.contracts import ContractError
+from tools.sim2real.contracts import ContractError, ScenarioSpecV1
 from tools.sim2real.metrics import (
     bidirectional_coast_metrics,
     bidirectional_step_metrics,
     coast_response_metrics,
+    compute_subsystem_metrics,
     friction_metrics,
     mass_com_metrics,
     position_derived_velocity,
@@ -90,7 +91,9 @@ def _write_drive_trace(
     *,
     position_scale: float,
     position_unit: str = "rad",
+    scenario: ScenarioSpecV1 | None = None,
 ):
+    scenario = scenario or load_scenario("main-step")
     time_s = np.arange(0.0, 3.01, 0.05)
     command = np.where((time_s >= 0.5) & (time_s < 2.0), 0.25, 0.0)
     velocity = np.where((time_s >= 0.7) & (time_s < 2.0), 2.0, 0.0)
@@ -117,11 +120,11 @@ def _write_drive_trace(
             "position_time_s": time_s,
             "position": position,
         },
-        scenario=load_scenario("main-step"),
+        scenario=scenario,
         source="sim",
         metadata=metadata,
     )
-    return load_trace(directory, scenario=load_scenario("main-step"))
+    return load_trace(directory, scenario=scenario)
 
 
 def test_comparison_keeps_subsystems_separate_without_a_global_score(tmp_path: Path) -> None:
@@ -130,13 +133,58 @@ def test_comparison_keeps_subsystems_separate_without_a_global_score(tmp_path: P
 
     result = compare_traces(real, sim, scenario=load_scenario("main-step"))
 
-    assert set(result) == {"schema_version", "scenario_id", "subsystems"}
+    assert set(result) == {
+        "schema_version",
+        "scenario_id",
+        "delta_convention",
+        "subsystems",
+    }
+    assert result["delta_convention"] == "sim_minus_real"
     assert set(result["subsystems"]) == {"main_drive"}
     assert set(result["subsystems"]["main_drive"]) == {"real", "sim", "delta"}
     assert result["subsystems"]["main_drive"]["delta"]["positive"][
         "steady_speed_rad_s"
     ] < 0.0
     assert "score" not in str(result).lower()
+
+
+@pytest.mark.parametrize("input_kind", ["path", "loaded"])
+def test_comparison_rejects_selected_scenario_id_mismatch(
+    tmp_path: Path, input_kind: str
+) -> None:
+    recorded_scenario = load_scenario("main-coast")
+    real_loaded = _write_drive_trace(
+        tmp_path / "real", position_scale=1.0, scenario=recorded_scenario
+    )
+    sim_loaded = _write_drive_trace(
+        tmp_path / "sim", position_scale=0.8, scenario=recorded_scenario
+    )
+    real = real_loaded.directory if input_kind == "path" else real_loaded
+    sim = sim_loaded.directory if input_kind == "path" else sim_loaded
+
+    with pytest.raises(ContractError, match="scenario id mismatch"):
+        compare_traces(real, sim, scenario=load_scenario("main-step"))
+
+
+@pytest.mark.parametrize("input_kind", ["path", "loaded"])
+def test_comparison_rejects_selected_scenario_hash_mismatch(
+    tmp_path: Path, input_kind: str
+) -> None:
+    canonical = load_scenario("main-step")
+    modified_payload = canonical.to_dict()
+    modified_payload["description"] = "Locally modified scenario contract."
+    recorded_scenario = ScenarioSpecV1.from_dict(modified_payload)
+    real_loaded = _write_drive_trace(
+        tmp_path / "real", position_scale=1.0, scenario=recorded_scenario
+    )
+    sim_loaded = _write_drive_trace(
+        tmp_path / "sim", position_scale=0.8, scenario=recorded_scenario
+    )
+    real = real_loaded.directory if input_kind == "path" else real_loaded
+    sim = sim_loaded.directory if input_kind == "path" else sim_loaded
+
+    with pytest.raises(ContractError, match="scenario hash mismatch"):
+        compare_traces(real, sim, scenario=canonical)
 
 
 def test_comparison_rejects_unit_or_frame_mismatch(tmp_path: Path) -> None:
@@ -198,3 +246,39 @@ def test_torsional_spring_dynamic_friction_and_variation_metrics() -> None:
         "steady_speed_rad_s_std": pytest.approx(np.std([1.0, 2.0, 3.0])),
         "steady_speed_rad_s_count": 3,
     }
+
+
+@pytest.mark.parametrize(
+    ("load_force_time_s", "other_time_s"),
+    [
+        (np.array([10.0, 11.0]), np.array([0.0, 1.0])),
+        (np.array([0.0, 1.0]), np.array([0.5, 1.5])),
+    ],
+    ids=("disjoint", "partial-overlap"),
+)
+def test_metrics_reject_interpolation_without_full_clock_coverage(
+    tmp_path: Path,
+    load_force_time_s: np.ndarray,
+    other_time_s: np.ndarray,
+) -> None:
+    scenario = load_scenario("manual-load")
+    episode = tmp_path / "episode"
+    write_trace(
+        episode,
+        {
+            "load_force_time_s": load_force_time_s,
+            "load_force": np.array([10.0, 20.0]),
+            "lever_arm_time_s": other_time_s,
+            "lever_arm": np.array([0.1, 0.2]),
+            "command_time_s": other_time_s,
+            "command": np.array([0.1, 0.2]),
+            "direction_time_s": other_time_s,
+            "direction": np.array([1.0, 1.0]),
+        },
+        scenario=scenario,
+        source="sim",
+    )
+    trace = load_trace(episode, scenario=scenario)
+
+    with pytest.raises(ContractError, match="lever_arm.*load_force.*clock"):
+        compute_subsystem_metrics(scenario, trace)

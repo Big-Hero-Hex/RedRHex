@@ -152,8 +152,8 @@ def _base_manifest_fields(
     if manifest is None:
         return {}
     if isinstance(manifest, TraceManifestV1):
-        return manifest.to_dict()
-    return dict(manifest)
+        return manifest.validate().to_dict()
+    return TraceManifestV1.from_dict(manifest).to_dict()
 
 
 def _metadata(
@@ -205,11 +205,12 @@ def write_trace(
     metadata: Mapping[str, Any] | None = None,
     time_bases: Mapping[str, str] | None = None,
 ) -> TraceManifestV1:
-    """Validate and atomically write ``trace.npz`` plus ``manifest.json``."""
+    """Validate and atomically write ``trace.npz`` plus ``metadata.json``."""
 
     output = Path(output_dir)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise ContractError(f"trace artifact already exists: {output}")
+    created_output = not output.exists()
     clean_arrays = _numeric_arrays(arrays)
     spec = _coerce_scenario(scenario)
     base = _base_manifest_fields(manifest)
@@ -241,36 +242,50 @@ def write_trace(
     source_hash = sha256_path(source_path) if source_path is not None else None
     output.mkdir(parents=True, exist_ok=True)
     trace_path = output / trace_file
-    _atomic_npz(trace_path, clean_arrays)
-    provenance = dict(base.get("provenance", {}))
-    provenance["trace_sha256"] = sha256_file(trace_path)
-    if scenario_hash is not None:
-        provenance["scenario_sha256"] = scenario_hash
-    if source_hash is not None:
-        provenance["source_sha256"] = source_hash
-    if profile is not None:
-        provenance["profile_sha256"] = sha256_json(profile.to_dict())
-    clean_metadata = _metadata(
-        arrays=clean_arrays,
-        time_bases=resolved_time_bases,
-        scenario_hash=scenario_hash,
-        source_hash=source_hash,
-        supplied=metadata or base.get("metadata"),
-    )
-    payload = {
-        "schema_version": 1,
-        "scenario_id": scenario_id,
-        "source": trace_source,
-        "trace_file": trace_file,
-        "channels": sorted(clean_arrays),
-        "time_bases": resolved_time_bases,
-        "sample_counts": sample_counts,
-        "provenance": provenance,
-        "metadata": clean_metadata,
-    }
-    result = TraceManifestV1.from_dict(payload)
-    _atomic_json(output / "metadata.json", result.to_dict())
-    return result
+    metadata_path = output / "metadata.json"
+    try:
+        _atomic_npz(trace_path, clean_arrays)
+        provenance = dict(base.get("provenance", {}))
+        provenance["trace_sha256"] = sha256_file(trace_path)
+        if scenario_hash is not None:
+            provenance["scenario_sha256"] = scenario_hash
+        if source_hash is not None:
+            provenance["source_sha256"] = source_hash
+        if profile is not None:
+            provenance["profile_sha256"] = sha256_json(profile.to_dict())
+        clean_metadata = _metadata(
+            arrays=clean_arrays,
+            time_bases=resolved_time_bases,
+            scenario_hash=scenario_hash,
+            source_hash=source_hash,
+            supplied=metadata or base.get("metadata"),
+        )
+        payload = {
+            "schema_version": 1,
+            "scenario_id": scenario_id,
+            "source": trace_source,
+            "trace_file": trace_file,
+            "channels": sorted(clean_arrays),
+            "time_bases": resolved_time_bases,
+            "sample_counts": sample_counts,
+            "provenance": provenance,
+            "metadata": clean_metadata,
+        }
+        result = TraceManifestV1.from_dict(payload)
+        _atomic_json(metadata_path, result.to_dict())
+        return result
+    except BaseException:
+        for artifact in (metadata_path, trace_path):
+            try:
+                artifact.unlink()
+            except FileNotFoundError:
+                pass
+        if created_output:
+            try:
+                output.rmdir()
+            except OSError:
+                pass
+        raise
 
 
 def load_trace(

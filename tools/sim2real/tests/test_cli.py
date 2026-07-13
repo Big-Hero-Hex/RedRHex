@@ -108,6 +108,32 @@ def test_list_validate_and_sweep_commands_emit_json(tmp_path: Path, capsys) -> N
     assert (output / "index.json").is_file()
 
 
+def test_one_factor_sweep_cli_enforces_max_candidates(tmp_path: Path, capsys) -> None:
+    profile = _profile_file(tmp_path / "profile.json")
+    output = tmp_path / "sweep"
+
+    code = main(
+        [
+            "sweep",
+            str(profile),
+            "--scenario",
+            "main-step",
+            "--mode",
+            "one-factor",
+            "--space-json",
+            '{"simulation_physics.main_drive.damping":[0.1,0.2,0.3]}',
+            "--max-candidates",
+            "1",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 2
+    assert "max_candidates=1" in capsys.readouterr().err
+    assert not output.exists()
+
+
 def test_import_real_numeric_trace_and_compare_cli(tmp_path: Path, capsys) -> None:
     source = _npz(tmp_path / "raw.npz")
     units = '{"command":"normalized","position":"rad"}'

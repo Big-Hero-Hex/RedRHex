@@ -49,6 +49,16 @@ def test_one_factor_candidates_are_deterministic_and_change_one_value() -> None:
     assert first[0].profile_id == "baseline-one-factor-0001"
 
 
+def test_one_factor_candidates_respect_the_candidate_bound() -> None:
+    space = {"simulation_physics.main_drive.damping": [0.1, 0.2, 0.3]}
+
+    assert len(
+        generate_one_factor_candidates(_profile(), space, max_candidates=2)
+    ) == 2
+    with pytest.raises(ContractError, match="max_candidates=1"):
+        generate_one_factor_candidates(_profile(), space, max_candidates=1)
+
+
 def test_coarse_grid_is_bounded_and_order_independent() -> None:
     space = {
         "simulation_physics.main_drive.damping": [0.3, 0.1],
