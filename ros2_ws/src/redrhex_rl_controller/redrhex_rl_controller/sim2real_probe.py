@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 
 from .sim2real_probe_core import (
@@ -52,12 +53,14 @@ def _run_ros(args: argparse.Namespace) -> int:
     import rclpy
     from rclpy.executors import ExternalShutdownException
     from rclpy.node import Node
+    from rclpy.signals import SignalHandlerOptions
     from sensor_msgs.msg import JointState
     from std_msgs.msg import Bool, String
 
     from redrhex_msgs.msg import RedRhexMotorCommand
 
     from . import redrhex_contract as C
+    from .shutdown_signals import install_controlled_signal_handlers, restore_signal_handlers
 
     try:
         from rclpy._rclpy_pybind11 import RCLError
@@ -94,6 +97,7 @@ def _run_ros(args: argparse.Namespace) -> int:
                 wait_until=self._wait_until,
                 poll=self._poll,
                 terminal_pause=lambda: time.sleep(TERMINAL_DISABLE_PERIOD_S),
+                terminal_disable_failure=self._terminal_disable_unavailable,
             )
             self._runner.bind(args.main_index)
 
@@ -150,6 +154,7 @@ def _run_ros(args: argparse.Namespace) -> int:
             command_message.enable = bool(command.enable)
             command_message.main_drive_enable = list(command.main_drive_enable)
             command_message.abad_output_enable = False
+            command_message.sim2real_probe = True
             command_message.mode = 2
             return command_message
 
@@ -187,13 +192,27 @@ def _run_ros(args: argparse.Namespace) -> int:
                 rclpy.spin_once(self, timeout_sec=min(remaining, 1.0 / RATE_HZ))
 
         def _fallback_terminal_burst(self) -> None:
+            published = 0
             for packet in range(TERMINAL_DISABLE_PACKETS):
                 try:
                     self._publish_command(terminal_command())
+                    published += 1
                 except BaseException as exc:
                     self.get_logger().error(f"Terminal disable packet failed: {exc}")
                 if packet + 1 < TERMINAL_DISABLE_PACKETS:
                     time.sleep(TERMINAL_DISABLE_PERIOD_S)
+            if published == 0:
+                self._terminal_disable_unavailable(TERMINAL_DISABLE_PACKETS)
+
+        @staticmethod
+        def _terminal_disable_unavailable(attempted: int) -> None:
+            print(
+                "CRITICAL: no terminal disable command could be published "
+                f"after {attempted} attempts; assert the physical E-stop and rely on "
+                "the verified sbRIO command watchdog.",
+                file=sys.stderr,
+                flush=True,
+            )
 
         def execute(self) -> None:
             try:
@@ -213,20 +232,25 @@ def _run_ros(args: argparse.Namespace) -> int:
                 if not self._runner_entered:
                     self._fallback_terminal_burst()
 
-    rclpy.init(args=None)
-    node = Sim2RealProbeNode()
+    rclpy.init(args=None, signal_handler_options=SignalHandlerOptions.NO)
+    previous_signal_handlers = install_controlled_signal_handlers()
+    node = None
     try:
+        node = Sim2RealProbeNode()
         node.execute()
         return 0
     except ProbeAbort as exc:
-        node.get_logger().error(f"Probe aborted: {exc}")
+        if node is not None:
+            node.get_logger().error(f"Probe aborted: {exc}")
         raise SystemExit(str(exc)) from exc
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         return 130
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        restore_signal_handlers(previous_signal_handlers)
 
 
 def main(argv: list[str] | None = None) -> int:

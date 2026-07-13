@@ -8,4 +8,5 @@ float64[] effort_limit_nm
 bool enable
 bool[6] main_drive_enable
 bool abad_output_enable
+bool sim2real_probe
 uint8 mode

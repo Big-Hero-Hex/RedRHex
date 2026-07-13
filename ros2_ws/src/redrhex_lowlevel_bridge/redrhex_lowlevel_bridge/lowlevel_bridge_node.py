@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import sys
+
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Bool
 
 from redrhex_msgs.msg import RedRhexMotorCommand, RedRhexMotorState
@@ -14,6 +17,7 @@ from .command_safety import FailClosedOutputGate, dispatch_command_fail_closed
 from .mock_bridge import MockLowLevelBridge
 from .rinbo_ros_backend import RinboRosBackend
 from .serial_bridge import SerialLowLevelBridge
+from .shutdown_signals import install_controlled_signal_handlers, restore_signal_handlers
 from .sbrio_udp_bridge import SbrioUdpBridge
 
 try:
@@ -211,18 +215,30 @@ class LowLevelBridgeNode(Node):
         self.diag_pub.publish(arr)
 
     def destroy_node(self) -> bool:
-        self.bridge.shutdown()
+        try:
+            self.bridge.shutdown()
+        except Exception as exc:
+            print(
+                "CRITICAL: low-level shutdown disable was not fully published; "
+                f"assert the physical E-stop and rely on the verified hardware watchdog: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
         return super().destroy_node()
 
 
 def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = LowLevelBridgeNode()
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    previous_signal_handlers = install_controlled_signal_handlers()
+    node = None
     try:
+        node = LowLevelBridgeNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException, RCLError):
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        restore_signal_handlers(previous_signal_handlers)

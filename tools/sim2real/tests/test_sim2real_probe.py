@@ -4,6 +4,7 @@ import ast
 import importlib
 import importlib.util
 import json
+import signal
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -14,12 +15,23 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CONTROLLER_ROOT = REPO_ROOT / "ros2_ws/src/redrhex_rl_controller"
 CONTROLLER_PACKAGE = CONTROLLER_ROOT / "redrhex_rl_controller"
+LOWLEVEL_PACKAGE = REPO_ROOT / "ros2_ws/src/redrhex_lowlevel_bridge/redrhex_lowlevel_bridge"
 
 
 def _load_core():
     path = CONTROLLER_PACKAGE / "sim2real_probe_core.py"
     assert path.is_file(), f"missing ROS-independent probe core: {path}"
     name = "redrhex_sim2real_probe_core_under_test"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_standalone(path: Path, name: str):
+    assert path.is_file(), f"missing ROS-independent safety module: {path}"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -191,6 +203,7 @@ def test_preview_is_machine_readable_and_reports_exact_caps() -> None:
     assert decoded["ticks"] == 990
     assert decoded["duration_s"] == 16.5
     assert decoded["command_speed_cap_rad_s"] == 0.25
+    assert decoded["physical_pwm_cap"] == 30.0
     assert decoded["max_tick_lateness_s"] == pytest.approx(1.0 / 60.0)
     assert decoded["deadline_comparison_epsilon_s"] == pytest.approx(1.0e-9)
     assert decoded["terminal_disable_packets"] >= 5
@@ -257,6 +270,7 @@ def test_normal_completion_emits_markers_and_five_terminal_disable_packets() -> 
     assert [event["event"] for event in events].count("complete") == 1
     assert [event["event"] for event in events].count("abort") == 0
     assert all(event["abad_output_enable"] is False for event in events)
+    assert all(event["physical_pwm_cap"] == 30.0 for event in events)
     segment_events = [event for event in events if event["event"] == "segment"]
     assert all("scheduled_elapsed_s" in event for event in segment_events)
     assert all("actual_elapsed_s" in event for event in segment_events)
@@ -560,6 +574,85 @@ def test_terminal_disable_burst_is_best_effort_for_every_packet() -> None:
     assert attempts == core.TERMINAL_DISABLE_PACKETS
 
 
+def test_invalidated_context_invokes_explicit_terminal_disable_fallback() -> None:
+    core = _load_core()
+    clock = FakeClock()
+    attempts = 0
+    fallbacks = []
+
+    def invalid_context(_command):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("publisher context is invalid")
+
+    runner = core.ProbeRunner(
+        publish_command=invalid_context,
+        publish_event=lambda _event: None,
+        safety_snapshot=lambda: _fresh_snapshot(core, clock),
+        monotonic=clock.monotonic,
+        wait_until=clock.wait_until,
+        poll=lambda: None,
+        terminal_pause=lambda: None,
+        terminal_disable_failure=lambda attempted: fallbacks.append(attempted),
+    )
+
+    runner.request_abort("external shutdown", immediate=True)
+
+    assert attempts == core.TERMINAL_DISABLE_PACKETS
+    assert fallbacks == [core.TERMINAL_DISABLE_PACKETS]
+
+
+@pytest.mark.parametrize(
+    ("path", "name"),
+    [
+        (CONTROLLER_PACKAGE / "shutdown_signals.py", "controller_shutdown_signals_under_test"),
+        (LOWLEVEL_PACKAGE / "shutdown_signals.py", "lowlevel_shutdown_signals_under_test"),
+    ],
+)
+def test_controlled_signal_handler_unwinds_before_caller_shuts_down_ros(
+    monkeypatch, path: Path, name: str
+) -> None:
+    module = _load_standalone(path, name)
+    installed = {}
+    restored = []
+    previous = {
+        signal.SIGINT: object(),
+        signal.SIGTERM: object(),
+    }
+    monkeypatch.setattr(module.signal, "getsignal", lambda signum: previous[signum])
+    monkeypatch.setattr(
+        module.signal,
+        "signal",
+        lambda signum, handler: installed.setdefault(signum, handler)
+        if signum not in installed
+        else restored.append((signum, handler)),
+    )
+
+    saved = module.install_controlled_signal_handlers()
+
+    assert saved == previous
+    assert set(installed) == {signal.SIGINT, signal.SIGTERM}
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        with pytest.raises(module.ControlledSignalInterrupt) as exc_info:
+            installed[signum](signum, None)
+        assert isinstance(exc_info.value, KeyboardInterrupt)
+        assert exc_info.value.signum == signum
+
+    module.restore_signal_handlers(saved)
+    assert restored == list(previous.items())
+
+
+def test_probe_and_lowlevel_disable_automatic_rclpy_shutdown_until_finalizers_run() -> None:
+    probe_source = (CONTROLLER_PACKAGE / "sim2real_probe.py").read_text(encoding="utf-8")
+    lowlevel_source = (LOWLEVEL_PACKAGE / "lowlevel_bridge_node.py").read_text(encoding="utf-8")
+
+    for source in (probe_source, lowlevel_source):
+        assert "SignalHandlerOptions.NO" in source
+        assert "install_controlled_signal_handlers" in source
+        assert "restore_signal_handlers" in source
+        assert source.index("destroy_node()") < source.index("rclpy.shutdown()")
+
+
 def test_preflight_abort_marker_is_bound_to_selected_scenario_and_hash() -> None:
     core = _load_core()
     clock = FakeClock()
@@ -578,6 +671,7 @@ def test_preflight_abort_marker_is_bound_to_selected_scenario_and_hash() -> None
             "scenario_sha256": core.scenario_sha256(2),
             "main_index": 2,
             "abad_output_enable": False,
+            "physical_pwm_cap": 30.0,
             "reason": "preflight failed",
         }
     ]
@@ -655,6 +749,16 @@ def test_ros_adapter_uses_callback_receive_time_topics_and_immediate_abort_hooks
     assert "publisher.node_name" in source
     assert "publisher.node_namespace" in source
     assert "String()" in source and "json.dumps(" in source
+    assert "command_message.sim2real_probe = True" in source
+
+
+def test_probe_and_lowlevel_share_the_same_immutable_physical_pwm_cap(monkeypatch) -> None:
+    core = _load_core()
+    from tools.sim2real.tests.test_ros_command_safety import _import_lowlevel
+
+    backend = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+
+    assert core.PHYSICAL_PWM_CAP == backend.SIM2REAL_PROBE_PWM_CAP == 30.0
 
 
 def test_setup_registers_probe_and_operator_docs_are_fail_safe() -> None:

@@ -39,6 +39,7 @@ def _base_command(enable: bool, mode: int) -> RedRhexMotorCommand:
     msg.enable = bool(enable)
     msg.main_drive_enable = [False] * 6
     msg.abad_output_enable = False
+    msg.sim2real_probe = False
     msg.mode = int(mode)
     return msg
 

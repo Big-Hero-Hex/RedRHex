@@ -16,6 +16,7 @@ MAX_TICK_LATENESS_S = 1.0 / RATE_HZ
 DEADLINE_COMPARISON_EPSILON_S = 1.0e-9
 REPEATS = 3
 COMMAND_SPEED_RAD_S = 0.25
+PHYSICAL_PWM_CAP = 30.0
 NEUTRAL_DURATION_S = 0.5
 DRIVE_DURATION_S = 1.0
 COAST_DURATION_S = 1.0
@@ -186,6 +187,7 @@ def build_preview(main_index: object) -> dict[str, Any]:
         "ticks": len(schedule),
         "duration_s": len(schedule) / RATE_HZ,
         "command_speed_cap_rad_s": COMMAND_SPEED_RAD_S,
+        "physical_pwm_cap": PHYSICAL_PWM_CAP,
         "max_tick_lateness_s": MAX_TICK_LATENESS_S,
         "deadline_comparison_epsilon_s": DEADLINE_COMPARISON_EPSILON_S,
         "terminal_disable_packets": TERMINAL_DISABLE_PACKETS,
@@ -234,6 +236,7 @@ class ProbeRunner:
         wait_until: Callable[[float], None],
         poll: Callable[[], None],
         terminal_pause: Callable[[], None],
+        terminal_disable_failure: Callable[[int], None] | None = None,
     ) -> None:
         self._publish_command = publish_command
         self._publish_event = publish_event
@@ -242,6 +245,7 @@ class ProbeRunner:
         self._wait_until = wait_until
         self._poll = poll
         self._terminal_pause = terminal_pause
+        self._terminal_disable_failure = terminal_disable_failure
         self._abort_reason: str | None = None
         self._abort_event_sent = False
         self._start_time: float | None = None
@@ -257,6 +261,7 @@ class ProbeRunner:
             "scenario_sha256": scenario_sha256(selected) if selected is not None else None,
             "main_index": selected,
             "abad_output_enable": False,
+            "physical_pwm_cap": PHYSICAL_PWM_CAP,
         }
         payload.update(values)
         return payload
@@ -272,9 +277,11 @@ class ProbeRunner:
 
     def _terminal_burst(self) -> None:
         disabled = terminal_command()
+        published = 0
         for packet in range(TERMINAL_DISABLE_PACKETS):
             try:
                 self._publish_command(disabled)
+                published += 1
             except BaseException:
                 pass
             if packet + 1 < TERMINAL_DISABLE_PACKETS:
@@ -282,6 +289,11 @@ class ProbeRunner:
                     self._terminal_pause()
                 except BaseException:
                     pass
+        if published == 0 and self._terminal_disable_failure is not None:
+            try:
+                self._terminal_disable_failure(TERMINAL_DISABLE_PACKETS)
+            except BaseException:
+                pass
 
     def request_abort(self, reason: str, *, immediate: bool) -> None:
         if self._abort_reason is None:

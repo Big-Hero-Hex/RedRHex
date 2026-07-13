@@ -28,6 +28,13 @@ from .command_safety import (
 )
 
 
+class EmergencyDisableError(RuntimeError):
+    """Not every redundant hardware-disable packet could be published."""
+
+
+SIM2REAL_PROBE_PWM_CAP = 30.0
+
+
 @dataclass(frozen=True)
 class RinboLegMapping:
     rinbo_field: str
@@ -197,6 +204,8 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.last_actual_publish_state = "never"
         self.last_block_reason = ""
         self._last_warned_block_reason = ""
+        self.publisher_conflict_latched = False
+        self.publisher_conflict_reason = ""
 
     def connect(self) -> None:
         try:
@@ -229,32 +238,52 @@ class RinboRosBackend(LowLevelBridgeBase):
         if self.publish_preview:
             self.preview_pub.publish(preview_msg)
 
+        if enabled and self.publisher_conflict_latched:
+            self._block_enabled_command(
+                "blocked_command_publisher_exclusivity_latched",
+                f"latched publisher exclusivity failure requires a safe bridge restart: "
+                f"{self.publisher_conflict_reason}",
+            )
         if enabled and not self.allow_enable:
             self._block_enabled_command("blocked_allow_enable", "rinbo.allow_enable is false")
             return
         if enabled and not self.output_state_is_fresh():
             self._block_enabled_command("blocked_no_recent_state", "no recent /motor/state")
             return
-        if enabled and self.block_if_duplicate_command_publishers:
+        if enabled and (
+            self.block_if_duplicate_command_publishers
+            or bool(getattr(cmd, "sim2real_probe", False))
+        ):
             publisher_count, endpoint_names = self._command_publisher_count()
             if publisher_count < 0:
+                if bool(getattr(cmd, "sim2real_probe", False)):
+                    self._latch_publisher_conflict(
+                        f"publisher graph query failed for {self.command_topic}: {endpoint_names}"
+                    )
                 self._block_enabled_command(
                     "blocked_publisher_graph_query",
                     f"publisher graph query failed for {self.command_topic}: {endpoint_names}",
                 )
                 return
             if publisher_count != 1:
+                reason = f"found {publisher_count} publishers on {self.command_topic}: {endpoint_names}"
+                self._latch_publisher_conflict(reason)
                 self._block_enabled_command(
                     "blocked_command_publisher_exclusivity",
-                    f"found {publisher_count} publishers on {self.command_topic}: {endpoint_names}",
+                    reason,
                 )
                 return
             own_node_name = self._own_node_fully_qualified_name()
             if own_node_name is None or endpoint_names != own_node_name:
                 expected = own_node_name or "an identifiable backend node"
+                reason = (
+                    f"expected sole publisher {expected} on {self.command_topic}; "
+                    f"found {endpoint_names}"
+                )
+                self._latch_publisher_conflict(reason)
                 self._block_enabled_command(
                     "blocked_command_publisher_exclusivity",
-                    f"expected sole publisher {expected} on {self.command_topic}; found {endpoint_names}",
+                    reason,
                 )
                 return
         if enabled and self.cmd_pub.get_subscription_count() == 0:
@@ -314,6 +343,8 @@ class RinboRosBackend(LowLevelBridgeBase):
     def is_alive(self) -> bool:
         if not self.connected:
             return False
+        if self.publisher_conflict_latched:
+            return False
         if not self.require_state:
             return True
         if self.last_state_time is None:
@@ -356,6 +387,8 @@ class RinboRosBackend(LowLevelBridgeBase):
             "rinbo_last_command_enabled": str(self.last_command_was_enabled),
             "rinbo_actual_publish_state": self.last_actual_publish_state,
             "rinbo_last_block_reason": self.last_block_reason,
+            "rinbo_publisher_conflict_latched": str(self.publisher_conflict_latched),
+            "rinbo_publisher_conflict_reason": self.publisher_conflict_reason or "none",
             "rinbo_last_pwm_l1_l2_l3_r1_r2_r3": ",".join(f"{x:.2f}" for x in self.last_pwm_rinbo_order),
             "rinbo_last_abad_sl1_sl2_sl3_sr1_sr2_sr3": ",".join(str(x) for x in self.last_abad_encoder_targets_rinbo_order),
             "rinbo_servo_state_sl1_sl2_sl3_sr1_sr2_sr3": ",".join(str(x) for x in self.latest_servo_positions_rinbo),
@@ -376,6 +409,11 @@ class RinboRosBackend(LowLevelBridgeBase):
             self.emergency_disable()
         self.last_command_was_enabled = False
         raise CommandRejectedError(reason)
+
+    def _latch_publisher_conflict(self, reason: str) -> None:
+        if not self.publisher_conflict_latched:
+            self.publisher_conflict_reason = str(reason)
+        self.publisher_conflict_latched = True
 
     def _command_publisher_count(self) -> tuple[int, str]:
         try:
@@ -413,11 +451,27 @@ class RinboRosBackend(LowLevelBridgeBase):
         msg.servo_control_mode = self.disabled_servo_control_mode
         self._disable_all_legs(msg)
         self._set_abad_neutral_targets(msg)
-        for _ in range(max(2, self.shutdown_disable_repeats)):
-            msg.header.stamp = self.node.get_clock().now().to_msg()
-            self.cmd_pub.publish(msg)
+        attempts = max(2, self.shutdown_disable_repeats)
+        failures: list[BaseException] = []
+        published = 0
+        for _ in range(attempts):
+            try:
+                msg.header.stamp = self.node.get_clock().now().to_msg()
+            except BaseException:
+                # A disable packet is safer with a stale/default stamp than not sent.
+                pass
+            try:
+                self.cmd_pub.publish(msg)
+                published += 1
+            except BaseException as exc:
+                failures.append(exc)
             if self.shutdown_disable_period_s > 0.0:
                 time.sleep(self.shutdown_disable_period_s)
+        if failures:
+            raise EmergencyDisableError(
+                f"published {published}/{attempts} emergency-disable packets; "
+                "assert the physical E-stop and rely on the verified hardware watchdog"
+            ) from failures[-1]
         self.last_command_was_enabled = False
         self.last_pwm_rinbo_order = [0.0] * 6
 
@@ -445,7 +499,10 @@ class RinboRosBackend(LowLevelBridgeBase):
                 float(cmd.target_velocity_rad_s[mapping.policy_index])
                 * self.main_velocity_sign_policy_order[mapping.policy_index]
             )
-            pwm = max(-self.main_max_pwm, min(self.main_max_pwm, target_velocity * self.main_pwm_per_rad_s))
+            pwm_cap = self.main_max_pwm
+            if bool(getattr(cmd, "sim2real_probe", False)):
+                pwm_cap = min(pwm_cap, SIM2REAL_PROBE_PWM_CAP)
+            pwm = max(-pwm_cap, min(pwm_cap, target_velocity * self.main_pwm_per_rad_s))
             selected = enabled and selection.main_drive_enable[mapping.policy_index]
             self.last_pwm_rinbo_order[rinbo_idx] = float(pwm) if selected else 0.0
             if selected:

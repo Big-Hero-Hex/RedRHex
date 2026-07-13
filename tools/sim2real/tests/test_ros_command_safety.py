@@ -82,6 +82,7 @@ def _command(
     enable: bool,
     main_drive_enable=(False, False, False, False, False, False),
     abad_output_enable: bool = False,
+    sim2real_probe: bool = False,
 ):
     names = [f"joint_{index}" for index in range(12)]
     return SimpleNamespace(
@@ -95,6 +96,7 @@ def _command(
         effort_limit_nm=[1.0] * 12,
         main_drive_enable=list(main_drive_enable),
         abad_output_enable=abad_output_enable,
+        sim2real_probe=sim2real_probe,
     )
 
 
@@ -113,6 +115,7 @@ def test_motor_command_message_declares_fixed_output_masks():
     text = (REPO_ROOT / "ros2_ws/src/redrhex_msgs/msg/RedRhexMotorCommand.msg").read_text(encoding="utf-8")
     assert "bool[6] main_drive_enable" in text
     assert "bool abad_output_enable" in text
+    assert "bool sim2real_probe" in text
 
 
 def test_disabled_command_overrides_even_malformed_masks():
@@ -513,6 +516,7 @@ def test_biorola_constructor_accepts_finite_reviewed_conversion_parameters(monke
     assert backend.main_pwm_per_rad_s == 120.0
     assert backend.main_max_pwm == 500.0
     assert backend.main_encoder_sign_rinbo_order == [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+    assert backend.publisher_conflict_latched is False
 
 
 def _configured_rinbo(module):
@@ -536,6 +540,8 @@ def _configured_rinbo(module):
     backend.last_pwm_rinbo_order = [0.0] * 6
     backend.last_abad_encoder_targets_rinbo_order = [10, 20, 30, 40, 50, 60]
     backend.last_command_was_enabled = False
+    backend.publisher_conflict_latched = False
+    backend.publisher_conflict_reason = ""
     return backend
 
 
@@ -550,6 +556,41 @@ def test_biorola_applies_individual_main_mask(monkeypatch):
     ]
     assert enabled_fields == ["r3"]
     assert msg.r3.voltage == pytest.approx(25.0)
+
+
+def test_biorola_probe_pwm_cap_is_immutable_after_configurable_mapping(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    backend.main_pwm_per_rad_s = 100_000.0
+    backend.main_max_pwm = 100_000.0
+    cmd = _command(
+        enable=True,
+        main_drive_enable=[True, False, False, False, False, False],
+        sim2real_probe=True,
+    )
+    cmd.target_velocity_rad_s[0] = 0.25
+
+    msg = backend._make_motor_cmd_msg(cmd, enabled=True, preview=False)
+
+    assert msg.r1.voltage == pytest.approx(module.SIM2REAL_PROBE_PWM_CAP)
+    assert module.SIM2REAL_PROBE_PWM_CAP == 30.0
+
+
+def test_biorola_probe_cap_does_not_change_normal_controller_mapping(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    backend.main_pwm_per_rad_s = 100_000.0
+    backend.main_max_pwm = 100_000.0
+    cmd = _command(
+        enable=True,
+        main_drive_enable=[True, False, False, False, False, False],
+        sim2real_probe=False,
+    )
+    cmd.target_velocity_rad_s[0] = 0.25
+
+    msg = backend._make_motor_cmd_msg(cmd, enabled=True, preview=False)
+
+    assert msg.r1.voltage == pytest.approx(25_000.0)
 
 
 def test_biorola_disables_aggregate_abad_output_independently(monkeypatch):
@@ -605,6 +646,48 @@ def test_biorola_emergency_disable_has_a_two_packet_minimum(monkeypatch):
     backend.shutdown_disable_period_s = 0.0
     backend.emergency_disable()
     assert len(published) >= 2
+
+
+def test_biorola_invalid_context_attempts_every_disable_then_reports_watchdog_fallback(
+    monkeypatch,
+):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    attempts = 0
+
+    def invalid_context(_message):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("publisher context is invalid")
+
+    backend.connected = True
+    backend.cmd_pub = SimpleNamespace(publish=invalid_context)
+    backend.shutdown_disable_repeats = 3
+    backend.shutdown_disable_period_s = 0.0
+
+    with pytest.raises(module.EmergencyDisableError, match="watchdog"):
+        backend.emergency_disable()
+
+    assert attempts == 3
+
+
+def test_biorola_disable_still_publishes_when_context_clock_is_invalid(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend = _configured_rinbo(module)
+    published = []
+
+    def invalid_clock():
+        raise RuntimeError("clock context is invalid")
+
+    backend.node = SimpleNamespace(get_clock=invalid_clock)
+    backend.connected = True
+    backend.cmd_pub = SimpleNamespace(publish=published.append)
+    backend.shutdown_disable_repeats = 3
+    backend.shutdown_disable_period_s = 0.0
+
+    backend.emergency_disable()
+
+    assert len(published) == 3
 
 
 def test_biorola_shutdown_disable_cannot_be_opted_out(monkeypatch):
@@ -801,6 +884,95 @@ def test_biorola_enabled_command_requires_exactly_one_self_publisher(
 
     assert published == []
     assert backend.last_actual_publish_state == "blocked_command_publisher_exclusivity"
+
+
+def test_biorola_direct_command_publisher_conflict_latches_not_ready_until_restart(
+    monkeypatch,
+):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    publisher_infos = [
+        _publisher_info("redrhex_lowlevel_bridge", "/robot"),
+        _publisher_info("rogue_controller", "/robot"),
+    ]
+    backend, published = _rinbo_with_publisher_guard(
+        module, lambda _topic: publisher_infos
+    )
+    command = _command(
+        enable=True,
+        main_drive_enable=[True, False, False, False, False, False],
+        sim2real_probe=True,
+    )
+
+    with pytest.raises(module.CommandRejectedError, match="found 2 publishers"):
+        backend.send_motor_command(command)
+
+    assert backend.publisher_conflict_latched is True
+    assert "rogue_controller" in backend.publisher_conflict_reason
+    assert backend.is_alive() is False
+
+    publisher_infos[:] = [_publisher_info("redrhex_lowlevel_bridge", "/robot")]
+    with pytest.raises(module.CommandRejectedError, match="latched"):
+        backend.send_motor_command(command)
+    backend.emergency_disable()
+    assert backend.publisher_conflict_latched is True
+    assert not any(
+        getattr(message, field).enable
+        for message in published
+        for field in backend.RINBO_LEG_ORDER
+    )
+
+
+def test_probe_cannot_disable_lowlevel_publisher_exclusivity_guard(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend, published = _rinbo_with_publisher_guard(
+        module,
+        lambda _topic: [
+            _publisher_info("redrhex_lowlevel_bridge", "/robot"),
+            _publisher_info("rogue_controller", "/robot"),
+        ],
+    )
+    backend.block_if_duplicate_command_publishers = False
+
+    with pytest.raises(module.CommandRejectedError, match="found 2 publishers"):
+        backend.send_motor_command(
+            _command(
+                enable=True,
+                main_drive_enable=[True, False, False, False, False, False],
+                sim2real_probe=True,
+            )
+        )
+
+    assert backend.publisher_conflict_latched is True
+    assert published == []
+
+
+def test_latched_lowlevel_publisher_conflict_forces_central_heartbeat_false(monkeypatch):
+    module = _import_lowlevel(monkeypatch, "rinbo_ros_backend")
+    backend, _published = _rinbo_with_publisher_guard(
+        module,
+        lambda _topic: [
+            _publisher_info("redrhex_lowlevel_bridge", "/robot"),
+            _publisher_info("rogue_controller", "/robot"),
+        ],
+    )
+    safety = _command_safety()
+    gate = safety.FailClosedOutputGate()
+    gate.on_estop(False)
+
+    with pytest.raises(module.CommandRejectedError):
+        safety.dispatch_command_fail_closed(
+            gate,
+            backend,
+            _command(
+                enable=True,
+                main_drive_enable=[True, False, False, False, False, False],
+                sim2real_probe=True,
+            ),
+        )
+
+    assert gate.ready_for_output is True
+    assert backend.is_alive() is False
+    assert bool(backend.is_alive() and backend.output_state_is_fresh() and gate.ready_for_output) is False
 
 
 def test_biorola_enabled_command_accepts_exactly_one_self_publisher(monkeypatch):
@@ -1012,7 +1184,7 @@ def test_rl_controller_explicitly_selects_all_outputs_only_when_enabled():
         and isinstance(target.value, ast.Name)
         and target.value.id == "msg"
     }
-    assert {"main_drive_enable", "abad_output_enable"} <= assigned
+    assert {"main_drive_enable", "abad_output_enable", "sim2real_probe"} <= assigned
     source = ast.unparse(publish_fn)
     assert "msg.enable" in source
 
@@ -1068,6 +1240,7 @@ def test_manual_tool_wires_estop_masks_and_fail_safe_finalization():
     source = (CONTROLLER_PACKAGE / "motor_command_tool.py").read_text(encoding="utf-8")
     assert "main_drive_enable" in source
     assert "abad_output_enable" in source
+    assert "sim2real_probe" in source
     assert '"/estop"' in source or "estop_topic" in source
     assert "run_with_terminal_disable" in source
     assert "estop_state" in source

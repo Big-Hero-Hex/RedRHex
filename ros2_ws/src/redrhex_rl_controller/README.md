@@ -892,7 +892,7 @@ redrhex_lowlevel_bridge:
 
 `require_state: true` 代表 `/redrhex/lowlevel_heartbeat` 只有在真的收到 `/motor/state` 時才會是 true。如果你只是離線測 message conversion，沒有啟動 BioRoLaROS2 bridge，可以暫時改成 false，但真機測試要改回 true。
 
-`block_if_duplicate_command_publishers: true` 代表只要 `/motor/command` 上同時有超過一個 publisher，adapter 會擋住 enabled command。這是專門防止 `rinbo_tripod`、`rinbo_standing` 或另一個 RL bridge 還活著時，兩個節點同時搶 sbRIO 控制權。
+`block_if_duplicate_command_publishers: true` 代表只要 `/motor/command` 上同時有超過一個 publisher，adapter 會擋住 enabled command。這是專門防止 `rinbo_tripod`、`rinbo_standing` 或另一個 RL bridge 還活著時，兩個節點同時搶 sbRIO 控制權。只要實際觀察到 ownership conflict，adapter 會把這個故障鎖住、讓 low-level heartbeat 保持 false；即使另一個 publisher 後來消失也不能在原 process 重新 enable，必須先確認全機 disabled 後安全重啟 adapter。固定 sim-to-real probe 即使一般設定關掉這個 guard，也仍會強制檢查 `/motor/command` ownership。
 
 請用三個 terminal 分開跑。
 
@@ -1326,7 +1326,7 @@ disabled neutral 0.5 s
 ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --dry-run
 ```
 
-preview 會列出綁定該腿的 immutable scenario ID、schema version 和 SHA-256，例如 `suspended-main-0-step-coast`。`main 0..4` 是 calibration，`main 5` 保留作 holdout。輸出若不是 60 Hz、3 repeats、990 ticks、16.5 s 或速度上限 0.25 rad/s，就不要上電。
+preview 會列出綁定該腿的 immutable scenario ID、schema version 和 SHA-256，例如 `suspended-main-0-step-coast`。`main 0..4` 是 calibration，`main 5` 保留作 holdout。輸出若不是 60 Hz、3 repeats、990 ticks、16.5 s、速度上限 0.25 rad/s，或 immutable physical PWM ceiling `30.0`，就不要上電。probe command 會帶固定 safety marker；adapter 在完成可調的 rad/s→PWM mapping 後再次 clamp 到 ±30，所以 `main_pwm_per_rad_s` 與 `main_max_pwm` 的一般 override 都不能提高這個 probe ceiling，正常 controller command 不受這個 probe-only ceiling 影響。
 
 真機執行前，以下四項全部是 mandatory，不能用軟體旗標跳過：
 
@@ -1361,7 +1361,7 @@ bag 開始後，才在另一個 terminal 明確給兩個 actuation 授權：
 ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --enable --confirm-risk
 ```
 
-事件 topic 是 machine-readable JSON `std_msgs/String`，包含 scenario、repetition、segment、abort 和 complete marker。保留原始 rosbag directory 不修改；後續可以離線反覆 import/compare，不需要再讓真機重跑。若 E-stop、heartbeat、joint state、subscriber 或程序有任何異常，先切實體急停並修正原因，不要直接重試。
+事件 topic 是 machine-readable JSON `std_msgs/String`，包含 scenario、repetition、segment、abort、complete marker 與 immutable physical PWM ceiling。保留原始 rosbag directory 不修改；後續可以離線反覆 import/compare，不需要再讓真機重跑。probe 與 low-level adapter 都停用 rclpy 自動 signal shutdown；Ctrl-C/SIGTERM 會先在 ROS context 仍有效時 unwind、重送 disabled packets，再關閉 context。若 context 已被其他程式路徑提前 invalidated，軟體仍會嘗試所有 terminal packets、輸出 CRITICAL fallback，最後只能依賴已驗證的 sbRIO watchdog 與實體急停。若 E-stop、heartbeat、joint state、subscriber 或程序有任何異常，先切實體急停並修正原因，不要直接重試。
 
 ### 13. 架空整機，先只跑 controller 的 INIT_STAND
 
