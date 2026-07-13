@@ -75,6 +75,10 @@ _build
 tests/
 !tools/sim2real/tests/
 !tools/sim2real/tests/*.py
+
+# Immutable hardware captures and generated calibration runs stay local.
+/datasets/sim2real/
+/outputs/sim2real/
 !/tools/training_panel/tests/
 !/tools/training_panel/tests/*.py
 

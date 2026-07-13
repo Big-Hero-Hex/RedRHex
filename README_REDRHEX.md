@@ -3,6 +3,8 @@
 A complete reinforcement learning training environment for the RedRhex hexapod robot, built on NVIDIA Isaac Lab and IsaacSim.
 
 > For the current Ubuntu machine setup and exact train/play commands, see [`docs/COMMANDS.md`](docs/COMMANDS.md).
+>
+> For measurement-first hardware physics calibration, bounded bench probes, and candidate-profile validation, see [`docs/sim2real_calibration.md`](docs/sim2real_calibration.md).
 
 ## Overview
 
