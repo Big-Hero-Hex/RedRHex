@@ -162,7 +162,7 @@ $ISAACLAB_ROOT/isaaclab.sh -p -m tools.sim2real run-sim \
   --headless
 ```
 
-`sensor_timing.aggregate_command_delay_s` is quantized to the 120 Hz physics clock and applied to requested versus applied targets in characterization, training, and playback. Other timing/filter fields are measurement metadata only and are rejected by simulation profile application instead of being silently treated as active physics.
+The importer binds replay to the selected joint's initial encoder position, a zero initial velocity, and the scenario's fixed/free-root fixture. The runner verifies that declaration and its hash, applies it before frame zero, and records the effective initial state in the simulator results. `sensor_timing.aggregate_command_delay_s` is quantized to the 120 Hz physics clock and applied to requested versus applied targets in characterization, training, and playback. Other timing/filter fields are measurement metadata only and are rejected by simulation profile application instead of being silently treated as active physics.
 
 ## Compare and generate bounded candidates
 
@@ -181,6 +181,7 @@ Execute a one-factor sensitivity set first. Each uncached candidate starts in a 
 ```bash
 python -m tools.sim2real sweep profiles/candidate-v1.json \
   --scenario suspended-main-0-step-coast \
+  --real-trace datasets/sim2real/main-drive-bench-v1/episodes/leg0-run1 \
   --mode one-factor \
   --space-json '{"simulation_physics.main_drive.damping":[0.8,1.0,1.2]}' \
   --seed 0 \
@@ -188,7 +189,7 @@ python -m tools.sim2real sweep profiles/candidate-v1.json \
   --output outputs/sim2real/main-drive-damping-sweep
 ```
 
-The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind scenario, profile, seed, mode, device, runner provenance, and relevant runtime settings. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
+The command uses `$ISAACLAB_ROOT/isaaclab.sh`; alternatively pass `--isaaclab-root`. Executed sweeps require a verified real episode and persist separate real, simulator, and delta metrics for every candidate. Add `--generate-only` to create immutable candidate/scenario/provenance snapshots without launching Isaac. Use a bounded two-parameter coarse grid only after sensitivity work shows correlation. Cache keys bind the real trace plus scenario, profile, seed, mode, device, Git revision, production asset/config, and runner hashes. Do not combine subsystem errors into a global RMSE, and do not introduce an optimizer until repeatability and identifiability are demonstrated.
 
 ## Enter ABAD and friction measurements
 
