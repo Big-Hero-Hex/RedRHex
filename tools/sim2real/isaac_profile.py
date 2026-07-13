@@ -5,7 +5,7 @@ from typing import Any
 import torch
 
 from .contracts import CalibrationProfileV1, ContractError
-from .physics_profile import corrected_mass_properties
+from .physics_profile import canonical_joint_name_map, corrected_mass_properties
 
 
 def runtime_robot(env: object) -> object:
@@ -77,15 +77,27 @@ def _joint_tensor(robot: object, attribute: str) -> torch.Tensor:
     return value.clone()
 
 
-def _assign_named(values: torch.Tensor, robot: object, overrides: dict[str, Any]) -> None:
+def _assign_named(
+    values: torch.Tensor,
+    robot: object,
+    overrides: dict[str, Any],
+    joint_aliases: dict[str, str],
+) -> None:
     joint_lookup = {name: index for index, name in enumerate(robot.joint_names)}
-    for name, value in overrides.items():
+    for alias, value in overrides.items():
+        name = joint_aliases[alias]
         if name not in joint_lookup:
-            raise ContractError(f"profile names unknown runtime joint: {name}")
+            raise ContractError(
+                f"canonical joint {alias} maps to absent runtime joint: {name}"
+            )
         values[:, joint_lookup[name]] = float(value)
 
 
-def _apply_joint_friction(robot: object, physics: dict[str, Any]) -> list[str]:
+def _apply_joint_friction(
+    robot: object,
+    physics: dict[str, Any],
+    joint_aliases: dict[str, str],
+) -> list[str]:
     static_values = physics.get("joint_friction", {})
     dynamic_values = physics.get("joint_dynamic_friction", {})
     viscous_values = physics.get("joint_viscous_friction", {})
@@ -94,14 +106,18 @@ def _apply_joint_friction(robot: object, physics: dict[str, Any]) -> list[str]:
     static = _joint_tensor(robot, "joint_friction_coeff")
     dynamic = _joint_tensor(robot, "joint_dynamic_friction_coeff")
     viscous = _joint_tensor(robot, "joint_viscous_friction_coeff")
-    _assign_named(static, robot, static_values)
-    _assign_named(dynamic, robot, dynamic_values)
-    _assign_named(viscous, robot, viscous_values)
+    _assign_named(static, robot, static_values, joint_aliases)
+    _assign_named(dynamic, robot, dynamic_values, joint_aliases)
+    _assign_named(viscous, robot, viscous_values, joint_aliases)
     robot.write_joint_friction_coefficient_to_sim(static, dynamic, viscous)
     return sorted(set(static_values) | set(dynamic_values) | set(viscous_values))
 
 
-def _apply_passive_springs(robot: object, springs: dict[str, Any]) -> list[str]:
+def _apply_passive_springs(
+    robot: object,
+    springs: dict[str, Any],
+    joint_aliases: dict[str, str],
+) -> list[str]:
     if not springs:
         return []
     stiffness = _joint_tensor(robot, "joint_stiffness")
@@ -110,11 +126,13 @@ def _apply_passive_springs(robot: object, springs: dict[str, Any]) -> list[str]:
         stiffness,
         robot,
         {name: spring["stiffness"] for name, spring in springs.items()},
+        joint_aliases,
     )
     _assign_named(
         damping,
         robot,
         {name: spring["damping"] for name, spring in springs.items() if "damping" in spring},
+        joint_aliases,
     )
     robot.write_joint_stiffness_to_sim(stiffness)
     robot.write_joint_damping_to_sim(damping)
@@ -169,6 +187,18 @@ def apply_profile_to_runtime_env(
     unwrapped = getattr(env, "unwrapped", env)
     robot = runtime_robot(env)
     physics = profile.simulation_physics
+    has_per_joint_physics = any(
+        physics.get(section)
+        for section in (
+            "joint_friction",
+            "joint_dynamic_friction",
+            "joint_viscous_friction",
+            "passive_spring",
+        )
+    )
+    joint_aliases = canonical_joint_name_map(
+        getattr(unwrapped, "cfg", None)
+    ) if has_per_joint_physics else {}
     mass_summary = _apply_mass(robot, physics.get("mass", {}))
     if mass_summary is not None:
         # RedrhexEnv's physical domain randomization restores this baseline on
@@ -185,8 +215,8 @@ def apply_profile_to_runtime_env(
         "contact_material": _apply_contact_material(
             robot, physics.get("ground", {})
         ),
-        "friction_joints": _apply_joint_friction(robot, physics),
+        "friction_joints": _apply_joint_friction(robot, physics, joint_aliases),
         "passive_spring_joints": _apply_passive_springs(
-            robot, physics.get("passive_spring", {})
+            robot, physics.get("passive_spring", {}), joint_aliases
         ),
     }

@@ -44,8 +44,10 @@ def _set_fields(target: object, values: Mapping[str, Any], field_map: Mapping[st
 def _apply_sensor_timing(
     env_cfg: object,
     timing: Mapping[str, float],
-) -> dict[str, float | int]:
-    supported = {"aggregate_command_delay_s"}
+) -> dict[str, Any]:
+    applied = {"aggregate_command_delay_s"}
+    inactive_metadata = {"measured_state_rate_hz", "velocity_filter_alpha"}
+    supported = applied | inactive_metadata
     unsupported = set(timing) - supported
     if unsupported:
         raise ContractError(
@@ -69,7 +71,43 @@ def _apply_sensor_timing(
         **dict(timing),
         "command_delay_steps": delay_steps,
         "effective_command_delay_s": delay_steps * physics_dt,
+        "inactive_metadata_fields": sorted(set(timing) & inactive_metadata),
     }
+
+
+def canonical_joint_name_map(env_cfg: object) -> dict[str, str]:
+    """Resolve stable profile aliases through the production joint ordering."""
+
+    groups = (
+        ("main", "main_drive_joint_names", "main drive"),
+        ("abad", "abad_joint_names", "ABAD"),
+        ("damper", "damper_joint_names", "damper"),
+    )
+    aliases: dict[str, str] = {}
+    runtime_names: list[str] = []
+    for prefix, attribute, label in groups:
+        names = getattr(env_cfg, attribute, None)
+        if (
+            not isinstance(names, (list, tuple))
+            or len(names) != 6
+            or any(not isinstance(name, str) or not name for name in names)
+        ):
+            raise ContractError(
+                f"environment configuration has no six ordered {label} joint names"
+            )
+        for index, name in enumerate(names):
+            aliases[f"{prefix}_{index}"] = name
+            runtime_names.append(name)
+    duplicates = sorted(
+        {name for name in runtime_names if runtime_names.count(name) > 1}
+    )
+    if duplicates:
+        raise ContractError(
+            "environment configuration maps more than one canonical alias to a "
+            "duplicate runtime joint: "
+            + ", ".join(duplicates)
+        )
+    return aliases
 
 
 def apply_abad_target_mapping(
@@ -140,6 +178,17 @@ def apply_profile_to_config(
     _apply_abad_mapping_config(env_cfg, profile.hardware_mapping)
     physics = profile.simulation_physics
     robot = _robot_cfg(env_cfg)
+    per_joint_sections = (
+        "joint_friction",
+        "joint_dynamic_friction",
+        "joint_viscous_friction",
+        "passive_spring",
+    )
+    joint_aliases = (
+        canonical_joint_name_map(env_cfg)
+        if any(physics.get(section) for section in per_joint_sections)
+        else {}
+    )
 
     rigid = physics.get("rigid_body", {})
     if rigid:
@@ -166,10 +215,14 @@ def apply_profile_to_config(
     springs = physics.get("passive_spring", {})
     init_state = getattr(robot, "init_state", None)
     joint_pos = getattr(init_state, "joint_pos", None) if init_state is not None else None
-    for joint_name, spring in springs.items():
+    for joint_alias, spring in springs.items():
         if "rest_position_rad" in spring:
+            joint_name = joint_aliases[joint_alias]
             if not isinstance(joint_pos, dict) or joint_name not in joint_pos:
-                raise ContractError(f"passive spring joint is absent from init state: {joint_name}")
+                raise ContractError(
+                    "passive spring joint is absent from init state: "
+                    f"{joint_alias} ({joint_name})"
+                )
             joint_pos[joint_name] = float(spring["rest_position_rad"])
 
     damper_values = physics.get("damper", {})

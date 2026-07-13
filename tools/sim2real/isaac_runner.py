@@ -435,7 +435,7 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         initial_joint_position, initial_joint_velocity
     )
     scene.reset()
-    apply_profile_to_runtime_env(SimpleNamespace(robot=robot), profile)
+    apply_profile_to_runtime_env(SimpleNamespace(robot=robot, cfg=env_cfg), profile)
 
     # Record the effective PhysX state before the experiment can alter it.
     audit = _runtime_audit(

@@ -13,6 +13,8 @@ SCHEMA_VERSION = 1
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ABAD_JOINT_RE = re.compile(r"^abad_[0-5]$")
+_CANONICAL_JOINT_RE = re.compile(r"^(?:main|abad|damper)_[0-5]$")
+_DAMPER_JOINT_RE = re.compile(r"^damper_[0-5]$")
 # 50 rad/s is about 477 rpm: well above the reviewed 4.17 rad/s bridge cap,
 # while still rejecting normalized/raw-PWM unit mistakes as physical profiles.
 _MAX_CANONICAL_PWM_CAP_RAD_S = 50.0
@@ -569,21 +571,32 @@ class CalibrationProfileV1:
                 "joint_dynamic_friction",
                 "joint_viscous_friction",
             }:
-                clean_physics[section_name] = {
-                    joint: _number(
+                friction: dict[str, float] = {}
+                for joint, value in _string_map(
+                    section, f"simulation_physics.{section_name}"
+                ).items():
+                    if not _CANONICAL_JOINT_RE.fullmatch(joint):
+                        raise ContractError(
+                            f"simulation_physics.{section_name}.{joint} must name a "
+                            "canonical joint main_0..main_5, abad_0..abad_5, or "
+                            "damper_0..damper_5"
+                        )
+                    friction[joint] = _number(
                         value,
                         f"simulation_physics.{section_name}.{joint}",
                         minimum=0.0,
                     )
-                    for joint, value in _string_map(
-                        section, f"simulation_physics.{section_name}"
-                    ).items()
-                }
+                clean_physics[section_name] = friction
             elif section_name == "passive_spring":
                 springs: dict[str, dict[str, float]] = {}
                 for joint, raw_spring in _string_map(
                     section, "simulation_physics.passive_spring"
                 ).items():
+                    if not _DAMPER_JOINT_RE.fullmatch(joint):
+                        raise ContractError(
+                            f"simulation_physics.passive_spring.{joint} must name a "
+                            "canonical joint damper_0..damper_5"
+                        )
                     spring = _mapping(
                         raw_spring, f"simulation_physics.passive_spring.{joint}"
                     )

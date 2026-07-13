@@ -22,6 +22,8 @@ def _profile() -> CalibrationProfileV1:
             },
             "sensor_timing": {
                 "aggregate_command_delay_s": 0.025,
+                "measured_state_rate_hz": 60.0,
+                "velocity_filter_alpha": 0.35,
             },
             "simulation_physics": {
                 "rigid_body": {"linear_damping": 0.11, "angular_damping": 0.22},
@@ -35,11 +37,11 @@ def _profile() -> CalibrationProfileV1:
                 },
                 "abad": {"stiffness": 42.0, "damping": 4.2},
                 "damper": {"stiffness": 190.0, "damping": 19.0},
-                "joint_friction": {"Revolute_15": 0.04},
-                "joint_dynamic_friction": {"Revolute_15": 0.03},
-                "joint_viscous_friction": {"Revolute_15": 0.02},
+                "joint_friction": {"main_0": 0.04},
+                "joint_dynamic_friction": {"main_0": 0.03},
+                "joint_viscous_friction": {"main_0": 0.02},
                 "passive_spring": {
-                    "Revolute_5": {
+                    "damper_0": {
                         "stiffness": 180.0,
                         "damping": 18.0,
                         "rest_position_rad": 0.7,
@@ -92,7 +94,30 @@ def _fake_env_cfg() -> SimpleNamespace:
         sim2real_command_delay_steps=0,
         sim2real_abad_target_scale=(1.0,) * 6,
         sim2real_abad_target_offset_rad=(0.0,) * 6,
-        abad_joint_names=[f"Revolute_{index}" for index in range(6)],
+        main_drive_joint_names=[
+            "Revolute_15",
+            "Revolute_7",
+            "Revolute_12",
+            "Revolute_18",
+            "Revolute_23",
+            "Revolute_24",
+        ],
+        abad_joint_names=[
+            "Revolute_14",
+            "Revolute_6",
+            "Revolute_11",
+            "Revolute_17",
+            "Revolute_22",
+            "Revolute_21",
+        ],
+        damper_joint_names=[
+            "Revolute_5",
+            "Revolute_8",
+            "Revolute_13",
+            "Revolute_25",
+            "Revolute_26",
+            "Revolute_27",
+        ],
     )
 
 
@@ -121,6 +146,10 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert summary["sensor_timing"]["aggregate_command_delay_s"] == 0.025
     assert summary["sensor_timing"]["command_delay_steps"] == 3
     assert summary["sensor_timing"]["effective_command_delay_s"] == pytest.approx(0.025)
+    assert summary["sensor_timing"]["inactive_metadata_fields"] == [
+        "measured_state_rate_hz",
+        "velocity_filter_alpha",
+    ]
     assert candidate.sim2real_command_delay_steps == 3
     assert candidate.sim2real_abad_target_scale == (1.2, 1.0, 1.0, 1.0, 1.0, 0.9)
     assert candidate.sim2real_abad_target_offset_rad == (-0.03, 0.0, 0.0, 0.0, 0.0, 0.04)
@@ -173,8 +202,6 @@ def test_restitution_only_profile_does_not_change_friction_combine_mode() -> Non
         "command_delay_s",
         "sensor_delay_s",
         "sample_period_s",
-        "measured_state_rate_hz",
-        "velocity_filter_alpha",
         "position_noise_std_rad",
         "velocity_filter_window_s",
     ],
@@ -192,6 +219,28 @@ def test_simulation_profile_rejects_timing_fields_without_a_physical_effect(fiel
         apply_profile_to_config(cfg, profile)
 
     assert cfg.robot_cfg.spawn.rigid_props.linear_damping == before.robot_cfg.spawn.rigid_props.linear_damping
+
+
+def test_measured_sensor_processing_loads_as_explicitly_inactive_metadata() -> None:
+    from tools.sim2real.physics_profile import apply_profile_to_config
+
+    payload = _profile().to_dict()
+    payload["sensor_timing"] = {
+        "aggregate_command_delay_s": 0.01,
+        "measured_state_rate_hz": 60.0,
+        "velocity_filter_alpha": 0.35,
+    }
+    cfg = _fake_env_cfg()
+
+    summary = apply_profile_to_config(cfg, CalibrationProfileV1.from_dict(payload))
+
+    assert cfg.sim2real_command_delay_steps == 1
+    assert summary["sensor_timing"]["measured_state_rate_hz"] == 60.0
+    assert summary["sensor_timing"]["velocity_filter_alpha"] == 0.35
+    assert summary["sensor_timing"]["inactive_metadata_fields"] == [
+        "measured_state_rate_hz",
+        "velocity_filter_alpha",
+    ]
 
 
 def test_positive_substep_delay_is_not_silently_rounded_to_zero() -> None:
@@ -349,3 +398,101 @@ def test_runtime_profile_overrides_unknown_robot_material_for_measured_pair_fric
     # effective coefficients are the measured values (never their square).
     assert max(float(view.materials[0, 0, 0]), 0.9) == pytest.approx(0.9)
     assert max(float(view.materials[0, 0, 1]), 0.8) == pytest.approx(0.8)
+
+
+def test_runtime_profile_resolves_canonical_joint_aliases_to_articulation_indices() -> None:
+    import torch
+
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {
+        "joint_friction": {"main_0": 0.4, "abad_1": 0.5},
+        "joint_dynamic_friction": {"damper_0": 0.3},
+        "joint_viscous_friction": {"main_0": 0.2},
+        "passive_spring": {
+            "damper_0": {"stiffness": 18.0, "damping": 1.8}
+        },
+    }
+    profile = CalibrationProfileV1.from_dict(payload)
+    cfg = _fake_env_cfg()
+    runtime_names = [
+        "Revolute_8",
+        "Revolute_6",
+        "Revolute_15",
+        "Revolute_5",
+    ]
+    data = SimpleNamespace(
+        joint_friction_coeff=torch.zeros((1, 4)),
+        joint_dynamic_friction_coeff=torch.zeros((1, 4)),
+        joint_viscous_friction_coeff=torch.zeros((1, 4)),
+        joint_stiffness=torch.zeros((1, 4)),
+        joint_damping=torch.zeros((1, 4)),
+    )
+
+    class FakeRobot:
+        num_instances = 1
+        device = "cpu"
+        joint_names = runtime_names
+
+        def __init__(self) -> None:
+            self.data = data
+
+        def write_joint_friction_coefficient_to_sim(self, static, dynamic, viscous):
+            self.static = static
+            self.dynamic = dynamic
+            self.viscous = viscous
+
+        def write_joint_stiffness_to_sim(self, stiffness):
+            self.stiffness = stiffness
+
+        def write_joint_damping_to_sim(self, damping):
+            self.damping = damping
+
+    robot = FakeRobot()
+
+    summary = apply_profile_to_runtime_env(
+        SimpleNamespace(robot=robot, cfg=cfg), profile
+    )
+
+    assert robot.static[0, runtime_names.index("Revolute_15")] == pytest.approx(0.4)
+    assert robot.static[0, runtime_names.index("Revolute_6")] == pytest.approx(0.5)
+    assert robot.dynamic[0, runtime_names.index("Revolute_5")] == pytest.approx(0.3)
+    assert robot.viscous[0, runtime_names.index("Revolute_15")] == pytest.approx(0.2)
+    assert robot.stiffness[0, runtime_names.index("Revolute_5")] == pytest.approx(18.0)
+    assert robot.damping[0, runtime_names.index("Revolute_5")] == pytest.approx(1.8)
+    assert summary["friction_joints"] == ["abad_1", "damper_0", "main_0"]
+    assert summary["passive_spring_joints"] == ["damper_0"]
+
+
+def test_profile_application_rejects_duplicate_runtime_joint_mapping() -> None:
+    from tools.sim2real.physics_profile import apply_profile_to_config
+
+    cfg = _fake_env_cfg()
+    cfg.damper_joint_names[0] = cfg.main_drive_joint_names[0]
+
+    with pytest.raises(ContractError, match="duplicate runtime joint"):
+        apply_profile_to_config(cfg, _profile())
+
+
+def test_runtime_profile_rejects_missing_alias_mapping() -> None:
+    import torch
+
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {"joint_friction": {"main_0": 0.4}}
+    profile = CalibrationProfileV1.from_dict(payload)
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            joint_friction_coeff=torch.zeros((1, 1)),
+            joint_dynamic_friction_coeff=torch.zeros((1, 1)),
+            joint_viscous_friction_coeff=torch.zeros((1, 1)),
+        ),
+        joint_names=["Revolute_15"],
+        num_instances=1,
+        device="cpu",
+    )
+
+    with pytest.raises(ContractError, match="ordered main drive joint names"):
+        apply_profile_to_runtime_env(SimpleNamespace(robot=robot), profile)

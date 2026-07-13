@@ -213,6 +213,37 @@ def test_profile_models_hardware_timing_friction_and_passive_spring() -> None:
     assert profile.simulation_physics["passive_spring"]["damper_0"]["stiffness"] == 12.0
 
 
+@pytest.mark.parametrize(
+    ("section", "joint"),
+    [
+        ("joint_friction", "Revolute_15"),
+        ("joint_dynamic_friction", "main_6"),
+        ("joint_viscous_friction", "unknown_0"),
+        ("passive_spring", "main_0"),
+        ("passive_spring", "Revolute_5"),
+    ],
+)
+def test_profile_rejects_noncanonical_per_joint_physics_keys(
+    section: str, joint: str
+) -> None:
+    value = (
+        {joint: {"stiffness": 12.0}}
+        if section == "passive_spring"
+        else {joint: 0.1}
+    )
+
+    with pytest.raises(ContractError, match="canonical joint"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "invalid-joint-key",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {section: value},
+            }
+        )
+
+
 def test_profile_models_measured_abad_target_mapping_and_source_hashes() -> None:
     abad_source = {
         "trace_sha256": "a" * 64,

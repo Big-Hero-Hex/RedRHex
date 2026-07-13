@@ -96,6 +96,7 @@ def test_characterization_runner_is_finite_one_env_and_direct_targeted() -> None
     assert '"Isaac Lab implicit-PD estimate' in source
     assert "sim.clear_all_callbacks()" in source
     assert "sim.clear_instance()" in source
+    assert "SimpleNamespace(robot=robot, cfg=env_cfg)" in source
 
 
 def test_characterization_trace_binds_verified_runtime_provenance() -> None:
