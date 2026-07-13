@@ -753,6 +753,13 @@ class CalibrationProfileV1:
                     key: _number(value, f"simulation_physics.ground.{key}", minimum=0.0)
                     for key, value in section.items()
                 }
+                friction_fields = {"static_friction", "dynamic_friction"}
+                present_friction = set(clean_ground).intersection(friction_fields)
+                if present_friction and present_friction != friction_fields:
+                    raise ContractError(
+                        "simulation_physics.ground static_friction and "
+                        "dynamic_friction must be provided together"
+                    )
                 if clean_ground.get("restitution", 0.0) > 1.0:
                     raise ContractError("simulation_physics.ground.restitution must be at most 1")
                 if clean_ground.get("dynamic_friction", 0.0) > clean_ground.get(

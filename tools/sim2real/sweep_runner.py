@@ -16,7 +16,7 @@ from .metrics import compute_subsystem_metrics
 from .provenance import validate_real_trace_provenance
 from .runtime_provenance import production_runtime_provenance
 from .scenarios import load_scenario
-from .sweep import candidate_cache_key
+from .sweep import candidate_cache_key, validate_sweep_candidates
 from .traces import LoadedTrace, load_trace, sha256_json
 
 
@@ -27,6 +27,10 @@ _RUNTIME_PROVENANCE_FIELDS = {
     "git_sha",
     "asset_sha256",
     "config_sha256",
+    "redrhex_module_path",
+    "redrhex_module_sha256",
+    "isaaclab_version",
+    "isaacsim_version",
     "characterization_runner_sha256",
     "sweep_runner_sha256",
     "runtime_bundle_sha256",
@@ -193,7 +197,21 @@ def _bind_runtime_provenance(
         or any(character not in "0123456789abcdef" for character in git_sha)
     ):
         raise ContractError("runtime provenance git_sha must be a Git digest")
-    for field in sorted(_RUNTIME_PROVENANCE_FIELDS - {"git_sha"}):
+    module_path = derived["redrhex_module_path"]
+    if not isinstance(module_path, str) or not Path(module_path).is_absolute():
+        raise ContractError("runtime provenance redrhex_module_path must be absolute")
+    for field in ("isaaclab_version", "isaacsim_version"):
+        if not isinstance(derived[field], str) or not derived[field]:
+            raise ContractError(f"runtime provenance {field} must be non-empty")
+    for field in sorted(
+        _RUNTIME_PROVENANCE_FIELDS
+        - {
+            "git_sha",
+            "redrhex_module_path",
+            "isaaclab_version",
+            "isaacsim_version",
+        }
+    ):
         value = derived[field]
         if (
             not isinstance(value, str)
@@ -201,6 +219,10 @@ def _bind_runtime_provenance(
             or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ContractError(f"runtime provenance {field} must be a SHA-256 digest")
+    if derived["redrhex_module_sha256"] != derived["config_sha256"]:
+        raise ContractError(
+            "runtime provenance RedRhex module hash must match config_sha256"
+        )
     return {**dict(provenance), **dict(derived)}
 
 
@@ -320,6 +342,10 @@ def _verify_artifact(
         "git_sha",
         "asset_sha256",
         "config_sha256",
+        "redrhex_module_path",
+        "redrhex_module_sha256",
+        "isaaclab_version",
+        "isaacsim_version",
         "characterization_runner_sha256",
         "runtime_bundle_sha256",
     ):
@@ -589,6 +615,9 @@ def execute_sweep(
     clean_candidates = list(candidates)
     if not all(isinstance(candidate, CalibrationProfileV1) for candidate in clean_candidates):
         raise ContractError("candidates must contain CalibrationProfileV1 values")
+    validate_sweep_candidates(
+        base_profile, clean_candidates, scenario, sweep_mode=sweep_mode
+    )
     effort_limit_changed = any(
         _main_effort_limit(candidate) != _main_effort_limit(base_profile)
         for candidate in clean_candidates
@@ -663,6 +692,13 @@ def execute_sweep(
         seed=seed,
         device=device,
     )
+    if not generate_only and any(
+        effective_provenance[field] == "unavailable-generate-only"
+        for field in ("isaaclab_version", "isaacsim_version")
+    ):
+        raise ContractError(
+            "executable sweeps require exact Isaac Lab and Isaac Sim versions"
+        )
     effective_provenance["real_trace_sha256"] = (
         reference.manifest.provenance["trace_sha256"]
         if reference is not None

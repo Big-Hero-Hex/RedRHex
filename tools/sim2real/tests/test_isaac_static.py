@@ -63,8 +63,27 @@ def test_run_sim_parser_is_available_without_importing_isaac() -> None:
 
 def test_isaac_bootstrap_launches_app_before_importing_runner() -> None:
     source = _source("tools/sim2real/isaac_main.py")
+    assert source.index("bind_redrhex_source(") < source.index("from isaaclab.app import")
     assert source.index("AppLauncher(") < source.index("from .isaac_runner import")
     assert source.index("json.dumps(") < source.index("simulation_app.close()")
+
+
+def test_isaac_bootstrap_closes_app_on_success_and_failure() -> None:
+    tree = ast.parse(_source("tools/sim2real/isaac_main.py"))
+    run = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run"
+    )
+    guarded = next(node for node in run.body if isinstance(node, ast.Try))
+
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "close"
+        for statement in guarded.finalbody
+        for node in ast.walk(statement)
+    )
 
 
 def test_characterization_runner_is_finite_one_env_and_direct_targeted() -> None:
@@ -114,6 +133,10 @@ def test_characterization_trace_binds_verified_runtime_provenance() -> None:
         "git_sha",
         "asset_sha256",
         "config_sha256",
+        "redrhex_module_path",
+        "redrhex_module_sha256",
+        "isaaclab_version",
+        "isaacsim_version",
         "characterization_runner_sha256",
         "runtime_bundle_sha256",
     ):
@@ -142,10 +165,25 @@ def test_production_implicit_actuators_use_effective_sim_limit_fields() -> None:
 def test_train_and_play_expose_opt_in_profile_and_apply_before_creation() -> None:
     for relative in ("scripts/rsl_rl/train.py", "scripts/rsl_rl/play.py"):
         source = _source(relative)
+        assert source.index("bind_redrhex_source(") < source.index("import RedRhex.tasks")
+        assert source.index("import RedRhex.tasks") < source.index(
+            "assert_redrhex_module_source("
+        )
         assert '"--physics-profile"' in source
         assert "default=None" in source
         assert source.index("apply_profile_to_config(") < source.index("gym.make(")
         assert source.index("gym.make(") < source.index("apply_profile_to_runtime_env(")
+
+
+def test_training_snapshots_explicit_profile_after_runtime_application() -> None:
+    source = _source("scripts/rsl_rl/train.py")
+
+    assert source.index("apply_profile_to_runtime_env(") < source.index(
+        "write_training_profile_snapshot("
+    )
+    assert source.index("write_training_profile_snapshot(") < source.index(
+        "runner.learn("
+    )
 
 
 def test_train_and_play_import_profile_helpers_only_inside_explicit_guard() -> None:
@@ -207,6 +245,15 @@ def test_training_environment_delays_final_actuator_targets_only_when_configured
     assert "_requested_target_drive_vel" in env_source
     assert "_requested_target_abad_pos" in env_source
     assert env_source.count("self._apply_sim2real_command_delay(") >= 2
+
+
+def test_energy_evaluation_accepts_per_joint_profiled_spring_parameters() -> None:
+    source = _source("scripts/rsl_rl/eval_command_sweep.py")
+
+    assert 'torch.as_tensor(getattr(unwrapped_env, "_spring_k"' in source
+    assert 'torch.as_tensor(getattr(unwrapped_env, "_spring_d"' in source
+    assert "spring_k * torch.square(damp_defl)" in source
+    assert "spring_d * torch.square(damp_vel)" in source
 
 
 def test_train_play_and_characterization_apply_measured_abad_target_mapping_at_boundary() -> None:

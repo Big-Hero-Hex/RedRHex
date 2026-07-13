@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from .contracts import CalibrationProfileV1, ContractError, load_profile
+from .traces import _atomic_json, sha256_json
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,39 @@ class CorrectedMassProperties:
 
 def load_optional_profile(path: str | Path | None) -> CalibrationProfileV1 | None:
     return None if path is None else load_profile(path)
+
+
+def write_training_profile_snapshot(
+    log_dir: str | Path,
+    profile: CalibrationProfileV1 | None,
+    *,
+    config_application: Mapping[str, Any] | None,
+    runtime_application: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Persist the explicit profile and both application phases with one hash."""
+
+    if profile is None:
+        return None
+    clean_profile = profile.validate()
+    if not isinstance(config_application, Mapping) or not isinstance(
+        runtime_application, Mapping
+    ):
+        raise ContractError(
+            "profile snapshot requires config and runtime application summaries"
+        )
+    params = Path(log_dir) / "params"
+    params.mkdir(parents=True, exist_ok=True)
+    payload = clean_profile.to_dict()
+    metadata = {
+        "schema_version": 1,
+        "profile_id": clean_profile.profile_id,
+        "profile_sha256": sha256_json(payload),
+        "config_application": dict(config_application),
+        "runtime_application": dict(runtime_application),
+    }
+    _atomic_json(params / "physics_profile.json", payload)
+    _atomic_json(params / "physics_profile_metadata.json", metadata)
+    return metadata
 
 
 def _robot_cfg(env_cfg: object) -> object:
@@ -211,6 +245,20 @@ def apply_profile_to_config(
         if section_name not in actuators:
             raise ContractError(f"robot configuration has no {section_name} actuator")
         _set_fields(actuators[section_name], values, actuator_field_map)
+        energy_proxy_fields = {
+            "main_drive": {
+                "damping": "main_drive_torque_estimate_damping",
+                "effort_limit": "main_drive_torque_estimate_limit",
+            },
+            "abad": {
+                "stiffness": "abad_torque_estimate_stiffness",
+                "damping": "abad_torque_estimate_damping",
+                "effort_limit": "abad_torque_estimate_limit",
+            },
+        }.get(section_name, {})
+        for profile_field, config_field in energy_proxy_fields.items():
+            if profile_field in values:
+                setattr(env_cfg, config_field, float(values[profile_field]))
 
     springs = physics.get("passive_spring", {})
     init_state = getattr(robot, "init_state", None)

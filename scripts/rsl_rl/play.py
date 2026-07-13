@@ -9,6 +9,19 @@
 
 import argparse
 import sys
+from pathlib import Path
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from tools.sim2real.repo_binding import (  # noqa: E402
+    assert_redrhex_module_source,
+    bind_redrhex_source,
+)
+
+
+bind_redrhex_source(_REPO_ROOT)
 
 from isaaclab.app import AppLauncher
 
@@ -127,7 +140,6 @@ import time
 import torch
 import threading
 import re
-from pathlib import Path
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -148,7 +160,10 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import RedRhex.tasks  # noqa: F401
+import RedRhex.tasks as _redrhex_tasks  # noqa: F401
+
+
+assert_redrhex_module_source(_redrhex_tasks, _REPO_ROOT)
 
 
 def _load_runner_checkpoint_with_policy_fallback(runner, resume_path: str, device: str) -> None:

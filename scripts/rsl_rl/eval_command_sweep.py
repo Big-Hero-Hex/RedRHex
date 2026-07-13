@@ -494,8 +494,8 @@ def collect_energy_metrics(
         damp_pos = unwrapped_env.joint_pos[:, unwrapped_env._damper_indices]
         damp_vel = unwrapped_env.joint_vel[:, unwrapped_env._damper_indices]
         damp_defl = damp_pos - unwrapped_env._damper_initial_pos
-        spring_k = float(getattr(unwrapped_env, "_spring_k", 200.0))
-        spring_d = float(getattr(unwrapped_env, "_spring_d", 20.0))
+        spring_k = torch.as_tensor(getattr(unwrapped_env, "_spring_k", 200.0), device=damp_defl.device, dtype=damp_defl.dtype)
+        spring_d = torch.as_tensor(getattr(unwrapped_env, "_spring_d", 20.0), device=damp_vel.device, dtype=damp_vel.dtype)
         spring_energy = torch.sum(0.5 * spring_k * torch.square(damp_defl), dim=1)
         spring_power = spring_k * damp_defl * damp_vel
         if hasattr(unwrapped_env, "_current_leg_in_stance") and unwrapped_env._current_leg_in_stance.shape == damp_defl.shape:
@@ -505,7 +505,7 @@ def collect_energy_metrics(
         spring_release = torch.sum(torch.clamp(-spring_power, min=0.0) * contact_mask, dim=1)
         spring_store = torch.sum(torch.clamp(spring_power, min=0.0) * contact_mask, dim=1)
         spring_recovery_ratio = spring_release / (spring_release + spring_store + 1e-6)
-        damper_dissipation = spring_d * torch.sum(torch.square(damp_vel), dim=1)
+        damper_dissipation = torch.sum(spring_d * torch.square(damp_vel), dim=1)
 
     robot_mass = float(getattr(unwrapped_env, "_robot_mass", getattr(unwrapped_env.cfg, "robot_mass_kg", 14.0)))
     dt = float(getattr(unwrapped_env, "step_dt", getattr(getattr(unwrapped_env.cfg, "sim", None), "dt", 1.0 / 60.0)))

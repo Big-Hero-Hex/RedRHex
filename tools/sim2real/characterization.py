@@ -876,4 +876,8 @@ def requires_contact_probe(
 ) -> bool:
     if mode not in SUPPORTED_MODES:
         raise ContractError(f"unsupported characterization mode: {mode}")
-    return bool(explicit or mode == "contact" or scenario.experiment_kind == "friction")
+    return bool(
+        explicit
+        or mode == "contact"
+        or scenario.experiment_kind in {"friction", "static_settle"}
+    )

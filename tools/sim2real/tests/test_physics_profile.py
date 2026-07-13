@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,7 +36,11 @@ def _profile() -> CalibrationProfileV1:
                     "armature": 0.02,
                     "friction": 0.03,
                 },
-                "abad": {"stiffness": 42.0, "damping": 4.2},
+                "abad": {
+                    "stiffness": 42.0,
+                    "damping": 4.2,
+                    "effort_limit": 7.5,
+                },
                 "damper": {"stiffness": 190.0, "damping": 19.0},
                 "joint_friction": {"main_0": 0.04},
                 "joint_dynamic_friction": {"main_0": 0.03},
@@ -137,6 +142,13 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert main.damping == 1.5
     assert main.effort_limit_sim == 12.0
     assert main.velocity_limit_sim == 14.0
+    assert candidate.main_drive_torque_estimate_damping == 1.5
+    assert candidate.main_drive_torque_estimate_limit == 12.0
+    assert candidate.abad_torque_estimate_stiffness == 42.0
+    assert candidate.abad_torque_estimate_damping == 4.2
+    assert candidate.abad_torque_estimate_limit == 7.5
+    assert candidate.damper_stiffness == 190.0
+    assert candidate.damper_damping == 19.0
     assert candidate.robot_cfg.init_state.joint_pos["Revolute_5"] == 0.7
     assert candidate.sim.physics_material.static_friction == 0.9
     assert candidate.terrain.physics_material.dynamic_friction == 0.8
@@ -287,6 +299,46 @@ def test_load_optional_profile_preserves_default_none(tmp_path: Path) -> None:
 
     path.write_text(json.dumps(_profile().to_dict()), encoding="utf-8")
     assert load_optional_profile(path).profile_id == "candidate-a"
+
+
+def test_training_profile_snapshot_records_canonical_profile_and_applications(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.physics_profile import write_training_profile_snapshot
+    from tools.sim2real.traces import sha256_json
+
+    profile = _profile()
+    result = write_training_profile_snapshot(
+        tmp_path,
+        profile,
+        config_application={"profile_id": profile.profile_id, "phase": "config"},
+        runtime_application={"profile_id": profile.profile_id, "phase": "runtime"},
+    )
+
+    profile_path = tmp_path / "params" / "physics_profile.json"
+    metadata_path = tmp_path / "params" / "physics_profile_metadata.json"
+    assert json.loads(profile_path.read_text(encoding="utf-8")) == profile.to_dict()
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata == {
+        "schema_version": 1,
+        "profile_id": profile.profile_id,
+        "profile_sha256": sha256_json(profile.to_dict()),
+        "config_application": {"profile_id": profile.profile_id, "phase": "config"},
+        "runtime_application": {"profile_id": profile.profile_id, "phase": "runtime"},
+    }
+    assert result == metadata
+
+
+def test_training_profile_snapshot_none_preserves_default_behavior(tmp_path: Path) -> None:
+    from tools.sim2real.physics_profile import write_training_profile_snapshot
+
+    assert write_training_profile_snapshot(
+        tmp_path,
+        None,
+        config_application=None,
+        runtime_application=None,
+    ) is None
+    assert not (tmp_path / "params").exists()
 
 
 def test_runtime_mass_profile_replaces_domain_randomization_baseline() -> None:
@@ -629,6 +681,67 @@ def test_runtime_profile_resolves_canonical_joint_aliases_to_articulation_indice
     assert robot.damping[0, runtime_names.index("Revolute_5")] == pytest.approx(1.8)
     assert summary["friction_joints"] == ["abad_1", "damper_0", "main_0"]
     assert summary["passive_spring_joints"] == ["damper_0"]
+
+
+def test_runtime_passive_springs_synchronize_per_joint_energy_bookkeeping() -> None:
+    import torch
+
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {
+        "passive_spring": {
+            "damper_0": {"stiffness": 18.0, "damping": 1.8},
+            "damper_5": {"stiffness": 27.0, "damping": 2.7},
+        }
+    }
+    profile = CalibrationProfileV1.from_dict(payload)
+    cfg = _fake_env_cfg()
+    runtime_names = (
+        cfg.main_drive_joint_names
+        + cfg.abad_joint_names
+        + cfg.damper_joint_names
+    )
+    data = SimpleNamespace(
+        joint_stiffness=torch.full((2, 18), 200.0),
+        joint_damping=torch.full((2, 18), 20.0),
+    )
+
+    class FakeRobot:
+        num_instances = 2
+        device = "cpu"
+        joint_names = runtime_names
+
+        def __init__(self) -> None:
+            self.data = data
+
+        def write_joint_stiffness_to_sim(self, stiffness):
+            self.data.joint_stiffness = stiffness.clone()
+
+        def write_joint_damping_to_sim(self, damping):
+            self.data.joint_damping = damping.clone()
+
+    robot = FakeRobot()
+    unwrapped = SimpleNamespace(
+        robot=robot,
+        cfg=cfg,
+        _spring_k=200.0,
+        _spring_d=20.0,
+    )
+
+    summary = apply_profile_to_runtime_env(
+        SimpleNamespace(unwrapped=unwrapped), profile
+    )
+
+    assert unwrapped._spring_k.shape == (2, 6)
+    assert unwrapped._spring_d.shape == (2, 6)
+    assert unwrapped._spring_k[0].tolist() == pytest.approx(
+        [18.0, 200.0, 200.0, 200.0, 200.0, 27.0]
+    )
+    assert unwrapped._spring_d[1].tolist() == pytest.approx(
+        [1.8, 20.0, 20.0, 20.0, 20.0, 2.7]
+    )
+    assert summary["energy_bookkeeping"]["passive_spring_per_joint"] is True
 
 
 def test_profile_application_rejects_duplicate_runtime_joint_mapping() -> None:

@@ -505,6 +505,20 @@ def test_profile_rejects_impossible_explicit_calibration_values(section, field, 
         CalibrationProfileV1.from_dict(payload)
 
 
+@pytest.mark.parametrize("field", ["static_friction", "dynamic_friction"])
+def test_profile_requires_ground_friction_coefficients_as_a_pair(field: str) -> None:
+    payload = {
+        "schema_version": 1,
+        "profile_id": "partial-ground",
+        "hardware_mapping": {},
+        "sensor_timing": {},
+        "simulation_physics": {"ground": {field: 0.8}},
+    }
+
+    with pytest.raises(ContractError, match="static_friction and dynamic_friction.*together"):
+        CalibrationProfileV1.from_dict(payload)
+
+
 def test_scenario_loader_rejects_an_unreviewed_external_file(tmp_path: Path) -> None:
     path = tmp_path / "bad.json"
     path.write_text(json.dumps({"schema_version": 9}), encoding="utf-8")

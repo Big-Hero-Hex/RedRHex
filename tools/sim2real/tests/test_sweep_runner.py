@@ -103,6 +103,10 @@ def _trace_metadata(scenario: ScenarioSpecV1, **overrides: Any) -> dict[str, Any
         "git_sha": "1" * 40,
         "asset_sha256": "a" * 64,
         "config_sha256": "b" * 64,
+        "redrhex_module_path": "/repo/source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py",
+        "redrhex_module_sha256": "b" * 64,
+        "isaaclab_version": "0.54.2",
+        "isaacsim_version": "5.1.0-test",
         "characterization_runner_sha256": "c" * 64,
         "runtime_bundle_sha256": "e" * 64,
     }
@@ -115,6 +119,10 @@ def _runtime_provenance(**overrides: Any) -> dict[str, str]:
         "git_sha": "1" * 40,
         "asset_sha256": "a" * 64,
         "config_sha256": "b" * 64,
+        "redrhex_module_path": "/repo/source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py",
+        "redrhex_module_sha256": "b" * 64,
+        "isaaclab_version": "0.54.2",
+        "isaacsim_version": "5.1.0-test",
         "characterization_runner_sha256": "c" * 64,
         "sweep_runner_sha256": "d" * 64,
         "runtime_bundle_sha256": "e" * 64,
@@ -974,7 +982,14 @@ def test_runtime_provenance_provider_hashes_production_inputs(tmp_path: Path) ->
         assert kwargs["cwd"] == tmp_path
         return subprocess.CompletedProcess(command, 0, stdout="e" * 40 + "\n", stderr="")
 
-    result = production_runtime_provenance(tmp_path, run_git=run_git)
+    result = production_runtime_provenance(
+        tmp_path,
+        run_git=run_git,
+        toolchain_provider=lambda: {
+            "isaaclab_version": "0.54.2",
+            "isaacsim_version": "5.1.0-test",
+        },
+    )
 
     assert result["git_sha"] == "e" * 40
     for field, path in paths.items():

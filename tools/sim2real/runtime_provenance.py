@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.metadata
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -7,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import ContractError
+from .repo_binding import redrhex_config_identity
 from .traces import sha256_file, sha256_json
 
 
@@ -30,16 +33,53 @@ _BEHAVIOR_INPUTS = (
     Path("tools/sim2real/isaac_runner.py"),
     Path("tools/sim2real/metrics.py"),
     Path("tools/sim2real/physics_profile.py"),
+    Path("tools/sim2real/repo_binding.py"),
     Path("tools/sim2real/runtime_provenance.py"),
     Path("tools/sim2real/scenarios.py"),
     Path("tools/sim2real/traces.py"),
 )
 
 
+def runtime_toolchain_fingerprint() -> dict[str, str]:
+    """Read exact Isaac Lab and Isaac Sim build identifiers without launching Kit."""
+
+    try:
+        isaaclab_version = importlib.metadata.version("isaaclab")
+    except importlib.metadata.PackageNotFoundError:
+        lab_root = os.environ.get("ISAACLAB_PATH")
+        version_file = (
+            Path(lab_root) / "source/isaaclab/config/extension.toml"
+            if lab_root
+            else None
+        )
+        text = version_file.read_text(encoding="utf-8") if version_file else ""
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        isaaclab_version = match.group(1) if match else ""
+
+    sim_candidates = []
+    if os.environ.get("ISAAC_PATH"):
+        sim_candidates.append(Path(os.environ["ISAAC_PATH"]) / "VERSION")
+    if os.environ.get("ISAACLAB_PATH"):
+        sim_candidates.append(Path(os.environ["ISAACLAB_PATH"]) / "_isaac_sim/VERSION")
+    sim_version = ""
+    for path in sim_candidates:
+        try:
+            sim_version = path.resolve().read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError):
+            continue
+        if sim_version:
+            break
+    return {
+        "isaaclab_version": isaaclab_version or "unavailable-generate-only",
+        "isaacsim_version": sim_version or "unavailable-generate-only",
+    }
+
+
 def production_runtime_provenance(
     repo_root: str | Path | None = None,
     *,
     run_git: Callable[..., Any] = subprocess.run,
+    toolchain_provider: Callable[[], dict[str, str]] = runtime_toolchain_fingerprint,
 ) -> dict[str, str]:
     """Hash the exact production inputs that determine characterization output."""
 
@@ -76,4 +116,18 @@ def production_runtime_provenance(
         except OSError as exc:
             raise ContractError(f"cannot hash behavior input {relative}: {exc}") from exc
     result["runtime_bundle_sha256"] = sha256_json(behavior_hashes)
+    result.update(redrhex_config_identity(root))
+    try:
+        toolchain = toolchain_provider()
+    except (OSError, ValueError) as exc:
+        raise ContractError(f"cannot fingerprint simulator toolchain: {exc}") from exc
+    expected_toolchain = {"isaaclab_version", "isaacsim_version"}
+    if set(toolchain) != expected_toolchain or any(
+        not isinstance(toolchain[field], str) or not toolchain[field]
+        for field in expected_toolchain
+    ):
+        raise ContractError(
+            "simulator toolchain fingerprint must contain exact Isaac Lab and Isaac Sim versions"
+        )
+    result.update(toolchain)
     return result

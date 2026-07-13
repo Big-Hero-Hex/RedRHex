@@ -405,6 +405,42 @@ def _apply_passive_springs(
     return sorted(springs)
 
 
+def _synchronize_spring_bookkeeping(
+    unwrapped: object,
+    robot: object,
+    joint_aliases: dict[str, str],
+    applied_joints: list[str],
+) -> dict[str, Any] | None:
+    """Make per-leg energy diagnostics use the same spring values as PhysX."""
+
+    if not applied_joints or not any(
+        hasattr(unwrapped, field) for field in ("_spring_k", "_spring_d")
+    ):
+        return None
+    runtime_lookup = {name: index for index, name in enumerate(robot.joint_names)}
+    try:
+        indices = [
+            runtime_lookup[joint_aliases[f"damper_{index}"]]
+            for index in range(6)
+        ]
+    except KeyError as exc:
+        raise ContractError(
+            "spring energy bookkeeping requires all six runtime damper joints"
+        ) from exc
+    stiffness = _joint_tensor(robot, "default_joint_stiffness")[:, indices]
+    damping = _joint_tensor(robot, "default_joint_damping")[:, indices]
+    if hasattr(unwrapped, "_spring_k"):
+        unwrapped._spring_k = stiffness.clone()
+    if hasattr(unwrapped, "_spring_d"):
+        unwrapped._spring_d = damping.clone()
+    return {
+        "passive_spring_per_joint": True,
+        "joint_order": [f"damper_{index}" for index in range(6)],
+        "stiffness": stiffness[0].detach().cpu().tolist(),
+        "damping": damping[0].detach().cpu().tolist(),
+    }
+
+
 def _apply_contact_material(
     robot: object,
     ground: dict[str, Any],
@@ -474,6 +510,9 @@ def apply_profile_to_runtime_env(
             unwrapped._default_body_masses = robot.root_physx_view.get_masses().clone()
         if hasattr(unwrapped, "_robot_mass"):
             unwrapped._robot_mass = float(mass_summary["total_mass_kg"])
+    passive_spring_joints = _apply_passive_springs(
+        robot, physics.get("passive_spring", {}), joint_aliases
+    )
     return {
         "schema_version": 1,
         "profile_id": profile.profile_id,
@@ -482,7 +521,8 @@ def apply_profile_to_runtime_env(
             robot, physics.get("ground", {})
         ),
         "friction_joints": _apply_joint_friction(robot, physics, joint_aliases),
-        "passive_spring_joints": _apply_passive_springs(
-            robot, physics.get("passive_spring", {}), joint_aliases
+        "passive_spring_joints": passive_spring_joints,
+        "energy_bookkeeping": _synchronize_spring_bookkeeping(
+            unwrapped, robot, joint_aliases, passive_spring_joints
         ),
     }

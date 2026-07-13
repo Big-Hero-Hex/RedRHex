@@ -27,13 +27,30 @@ def test_runtime_bundle_hash_tracks_dirty_behavior_defining_modules(
     tmp_path: Path,
 ) -> None:
     _repository_fixture(tmp_path)
-    first = production_runtime_provenance(tmp_path, run_git=_git)
+    toolchain = lambda: {
+        "isaaclab_version": "0.54.2",
+        "isaacsim_version": "5.1.0-rc.19+release.26219.9c81211b.gl",
+    }
+    first = production_runtime_provenance(
+        tmp_path, run_git=_git, toolchain_provider=toolchain
+    )
 
     changed = tmp_path / "tools/sim2real/metrics.py"
     changed.write_bytes(changed.read_bytes() + b"\n# dirty behavior change\n")
-    second = production_runtime_provenance(tmp_path, run_git=_git)
+    second = production_runtime_provenance(
+        tmp_path, run_git=_git, toolchain_provider=toolchain
+    )
 
     assert len(first["runtime_bundle_sha256"]) == 64
     assert first["runtime_bundle_sha256"] != second["runtime_bundle_sha256"]
     assert first["git_sha"] == second["git_sha"]
     assert first["asset_sha256"] == second["asset_sha256"]
+    assert first["redrhex_module_path"] == str(
+        (
+            tmp_path
+            / "source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py"
+        ).resolve()
+    )
+    assert first["redrhex_module_sha256"] == first["config_sha256"]
+    assert first["isaaclab_version"] == "0.54.2"
+    assert first["isaacsim_version"].startswith("5.1.0-rc.19+")

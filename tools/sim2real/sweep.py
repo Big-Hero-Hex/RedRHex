@@ -9,6 +9,16 @@ from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1
 from .traces import sha256_json
 
 
+_SWEEP_MODES = {"one-factor", "coarse-grid"}
+_MAIN_ACTUATOR_FIELDS = {
+    "damping",
+    "effort_limit",
+    "velocity_limit",
+    "armature",
+    "friction",
+}
+
+
 def _space(search_space: Mapping[str, list[float]]) -> list[tuple[str, list[float]]]:
     if not isinstance(search_space, Mapping) or not search_space:
         raise ContractError("search_space must be a non-empty mapping")
@@ -48,6 +58,97 @@ def _set(payload: dict[str, Any], path: str, value: float) -> None:
     if parts[-1] not in target:
         raise ContractError(f"profile path does not exist: {path}")
     target[parts[-1]] = value
+
+
+def _changed_paths(before: Any, after: Any, prefix: str) -> set[str]:
+    if isinstance(before, Mapping) and isinstance(after, Mapping):
+        result: set[str] = set()
+        for key in set(before) | set(after):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in before or key not in after:
+                value = after.get(key, before.get(key))
+                if isinstance(value, Mapping):
+                    result.update(_changed_paths({}, value, path))
+                else:
+                    result.add(path)
+            else:
+                result.update(_changed_paths(before[key], after[key], path))
+        return result
+    return set() if before == after else {prefix}
+
+
+def profile_parameter_changes(
+    base: CalibrationProfileV1,
+    candidate: CalibrationProfileV1,
+) -> set[str]:
+    """Return behavior-bearing candidate paths, excluding labels and prose."""
+
+    result: set[str] = set()
+    for field in (
+        "hardware_mapping",
+        "sensor_timing",
+        "simulation_physics",
+        "measurement_sources",
+    ):
+        result.update(
+            _changed_paths(getattr(base, field), getattr(candidate, field), field)
+        )
+    return result
+
+
+def _identifiable_sweep_paths(scenario: ScenarioSpecV1) -> set[str]:
+    if scenario.subsystem != "main_drive" or scenario.experiment_kind not in {
+        "step",
+        "coast",
+        "step_coast",
+    }:
+        return set()
+    allowed = {
+        f"simulation_physics.main_drive.{field}"
+        for field in _MAIN_ACTUATOR_FIELDS
+    }
+    for section in (
+        "joint_friction",
+        "joint_dynamic_friction",
+        "joint_viscous_friction",
+    ):
+        allowed.add(f"simulation_physics.{section}.{scenario.joint}")
+    return allowed
+
+
+def validate_sweep_candidates(
+    base: CalibrationProfileV1,
+    candidates: list[CalibrationProfileV1] | tuple[CalibrationProfileV1, ...],
+    scenario: ScenarioSpecV1,
+    *,
+    sweep_mode: str,
+) -> list[set[str]]:
+    """Fail closed on compensating or scenario-unidentifiable candidate changes."""
+
+    if sweep_mode not in _SWEEP_MODES:
+        raise ContractError(f"unsupported sweep_mode: {sweep_mode}")
+    allowed = _identifiable_sweep_paths(scenario)
+    changes_by_candidate: list[set[str]] = []
+    for index, candidate in enumerate(candidates, start=1):
+        changes = profile_parameter_changes(base, candidate)
+        unsupported = sorted(changes - allowed)
+        if unsupported:
+            raise ContractError(
+                f"candidate {index} change is not identifiable by {scenario.scenario_id}: "
+                + ", ".join(unsupported)
+            )
+        if sweep_mode == "one-factor" and len(changes) != 1:
+            raise ContractError(
+                f"one-factor candidate {index} must change exactly one parameter"
+            )
+        if sweep_mode == "coarse-grid" and len(changes) > 2:
+            raise ContractError(
+                f"coarse-grid candidate {index} may change at most two parameters"
+            )
+        changes_by_candidate.append(changes)
+    if sweep_mode == "coarse-grid" and len(set().union(*changes_by_candidate)) > 2:
+        raise ContractError("coarse-grid sweep may vary at most two parameter paths")
+    return changes_by_candidate
 
 
 def _candidate(

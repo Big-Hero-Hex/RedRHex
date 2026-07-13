@@ -4,6 +4,11 @@ import argparse
 import json
 from typing import Any
 
+from .repo_binding import bind_redrhex_source
+
+
+bind_redrhex_source()
+
 from isaaclab.app import AppLauncher
 
 
@@ -21,12 +26,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         from .isaac_runner import run_characterization
 
         result = run_characterization(args)
-    except BaseException:
-        # Isaac Sim's fast shutdown can terminate the interpreter before the
-        # original exception is reported. Leave exceptional teardown to the
-        # process so CLI failures retain their traceback and non-zero status.
-        raise
-    else:
         print(
             json.dumps(
                 result,
@@ -37,5 +36,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             flush=True,
         )
-        simulation_app.close()
         return result
+    finally:
+        simulation_app.close()

@@ -10,6 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
+from .repo_binding import assert_redrhex_module_source, bind_redrhex_source
+
+
+bind_redrhex_source()
+
 import numpy as np
 import torch
 
@@ -21,7 +26,11 @@ from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply_inverse
 from pxr import Usd, UsdGeom, UsdPhysics
 
+from RedRhex.tasks.direct.redrhex import redrhex_env_cfg as _redrhex_env_cfg
 from RedRhex.tasks.direct.redrhex.redrhex_env_cfg import REDRHEX_CFG, RedrhexEnvCfg
+
+
+assert_redrhex_module_source(_redrhex_env_cfg)
 
 from .characterization import (
     PHYSICS_DT,
@@ -414,6 +423,10 @@ def _trace_metadata(
         "git_sha": runtime_provenance["git_sha"],
         "asset_sha256": runtime_provenance["asset_sha256"],
         "config_sha256": runtime_provenance["config_sha256"],
+        "redrhex_module_path": runtime_provenance["redrhex_module_path"],
+        "redrhex_module_sha256": runtime_provenance["redrhex_module_sha256"],
+        "isaaclab_version": runtime_provenance["isaaclab_version"],
+        "isaacsim_version": runtime_provenance["isaacsim_version"],
         "characterization_runner_sha256": runtime_provenance["characterization_runner_sha256"],
         "runtime_bundle_sha256": runtime_provenance["runtime_bundle_sha256"],
         "calibration_constants": {

@@ -11,6 +11,19 @@
 
 import argparse
 import sys
+from pathlib import Path
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from tools.sim2real.repo_binding import (  # noqa: E402
+    assert_redrhex_module_source,
+    bind_redrhex_source,
+)
+
+
+bind_redrhex_source(_REPO_ROOT)
 
 from isaaclab.app import AppLauncher
 
@@ -113,7 +126,6 @@ import gymnasium as gym
 import os
 import torch
 from datetime import datetime
-from pathlib import Path
 
 from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
@@ -134,7 +146,10 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import RedRhex.tasks  # noqa: F401
+import RedRhex.tasks as _redrhex_tasks  # noqa: F401
+
+
+assert_redrhex_module_source(_redrhex_tasks, _REPO_ROOT)
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -289,14 +304,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
 
     physics_profile = None
+    physics_profile_config_application = None
+    physics_profile_runtime_application = None
     if args_cli.physics_profile is not None:
         repo_root = Path(__file__).resolve().parents[2]
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
-        from tools.sim2real.physics_profile import apply_profile_to_config, load_optional_profile
+        from tools.sim2real.physics_profile import (
+            apply_profile_to_config,
+            load_optional_profile,
+            write_training_profile_snapshot,
+        )
 
         physics_profile = load_optional_profile(args_cli.physics_profile)
-        apply_profile_to_config(env_cfg, physics_profile)
+        physics_profile_config_application = apply_profile_to_config(
+            env_cfg, physics_profile
+        )
         print(f"[INFO] Explicit physics profile applied to config: {physics_profile.profile_id}")
 
     # create isaac environment
@@ -305,7 +328,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.physics_profile is not None:
         from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
 
-        apply_profile_to_runtime_env(env, physics_profile)
+        physics_profile_runtime_application = apply_profile_to_runtime_env(
+            env, physics_profile
+        )
         print(f"[INFO] Explicit physics profile applied at runtime: {physics_profile.profile_id}")
 
     # convert to single-agent instance if required by the RL algorithm
@@ -387,6 +412,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    if physics_profile is not None:
+        write_training_profile_snapshot(
+            log_dir,
+            physics_profile,
+            config_application=physics_profile_config_application,
+            runtime_application=physics_profile_runtime_application,
+        )
 
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)

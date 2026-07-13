@@ -252,6 +252,14 @@ def test_contact_probe_requirement_remains_explicit_for_simulated_audits() -> No
     assert not requires_contact_probe(load_scenario("audit"), mode="free-root", explicit=False)
 
 
+def test_static_settle_intrinsically_requires_a_successful_foot_contact_probe() -> None:
+    from tools.sim2real.characterization import requires_contact_probe
+
+    scenario = load_scenario("contact-static-settle")
+
+    assert requires_contact_probe(scenario, mode="free-root", explicit=False)
+
+
 @pytest.mark.parametrize(
     ("scenario_id", "mode"),
     [("main-step", "fixed-base")],

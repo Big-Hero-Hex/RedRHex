@@ -10,6 +10,7 @@ from tools.sim2real.sweep import (
     candidate_cache_key,
     generate_coarse_grid_candidates,
     generate_one_factor_candidates,
+    validate_sweep_candidates,
 )
 
 
@@ -100,3 +101,71 @@ def test_sweep_has_no_optimizer_dependency() -> None:
     import tools.sim2real.sweep as sweep
 
     assert "optuna" not in inspect.getsource(sweep).lower()
+
+
+def test_sweep_candidate_diff_rejects_unrelated_direct_measurements() -> None:
+    candidate = generate_one_factor_candidates(
+        _profile(),
+        {"simulation_physics.ground.static_friction": [0.9]},
+    )[0]
+
+    with pytest.raises(ContractError, match="not identifiable.*ground.static_friction"):
+        validate_sweep_candidates(
+            _profile(),
+            [candidate],
+            load_scenario("main-step"),
+            sweep_mode="one-factor",
+        )
+
+
+def test_one_factor_artifact_rejects_a_candidate_with_two_changed_dimensions() -> None:
+    payload = _profile().to_dict()
+    payload["profile_id"] = "compensating-candidate"
+    payload["simulation_physics"]["main_drive"]["damping"] = 0.3
+    payload["simulation_physics"]["main_drive"]["effort_limit"] = 2.0
+    candidate = CalibrationProfileV1.from_dict(payload)
+
+    with pytest.raises(ContractError, match="one-factor.*exactly one"):
+        validate_sweep_candidates(
+            _profile(),
+            [candidate],
+            load_scenario("main-step"),
+            sweep_mode="one-factor",
+        )
+
+
+def test_coarse_grid_artifact_rejects_more_than_two_dimensions_across_candidates() -> None:
+    candidates = []
+    for index, field in enumerate(("damping", "effort_limit", "velocity_limit")):
+        payload = _profile().to_dict()
+        payload["profile_id"] = f"candidate-{index}"
+        payload["simulation_physics"]["main_drive"][field] = float(index + 1)
+        candidates.append(CalibrationProfileV1.from_dict(payload))
+
+    with pytest.raises(ContractError, match="coarse-grid.*at most two"):
+        validate_sweep_candidates(
+            _profile(),
+            candidates,
+            load_scenario("main-step"),
+            sweep_mode="coarse-grid",
+        )
+
+
+def test_sweep_candidate_diff_allows_selected_main_actuator_parameters() -> None:
+    candidates = generate_coarse_grid_candidates(
+        _profile(),
+        {
+            "simulation_physics.main_drive.damping": [0.3],
+            "sensor_timing.aggregate_command_delay_s": [0.01],
+        },
+    )
+
+    # The unchanged timing value is not a varied dimension.
+    changes = validate_sweep_candidates(
+        _profile(),
+        candidates,
+        load_scenario("main-step"),
+        sweep_mode="coarse-grid",
+    )
+
+    assert changes == [{"simulation_physics.main_drive.damping"}]
