@@ -1306,6 +1306,61 @@ encoder velocity 正負號是否符合 command
 沒有線材被捲入
 ```
 
+#### 12.1 固定 sim-to-real 物理標定 probe
+
+`sim2real_probe` 只提供一個經過審查的架空單腿測試，不能從 CLI 改振幅、時間、頻率或 waveform。它固定以 60 Hz 跑三次：
+
+```text
+disabled neutral 0.5 s
++0.25 rad/s drive 1.0 s
+disabled coast 1.0 s
+disabled neutral 0.5 s
+-0.25 rad/s drive 1.0 s
+disabled coast 1.0 s
+disabled neutral 0.5 s
+```
+
+總計固定 `990` 個 command ticks、`16.5` 秒。所有 neutral/coast 都是全域 `enable=false`、六個 main mask 全 false、ABAD false；drive 才會只開指定的一顆 main。先做完全不建立 ROS node、也不 publish 的 JSON preview：
+
+```bash
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --dry-run
+```
+
+preview 會列出綁定該腿的 immutable scenario ID、schema version 和 SHA-256，例如 `suspended-main-0-step-coast`。`main 0..4` 是 calibration，`main 5` 保留作 holdout。輸出若不是 60 Hz、3 repeats、990 ticks、16.5 s 或速度上限 0.25 rad/s，就不要上電。
+
+真機執行前，以下四項全部是 mandatory，不能用軟體旗標跳過：
+
+```text
+實體急停已實測能切斷輸出
+馬達電源/driver 已設保守限流
+機器人穩固架空，線材不會捲入
+sbRIO watchdog 已驗證會在 command 中斷時關閉馬達
+```
+
+先停止 RL controller、`motor_command_tool`、`rinbo_tripod` 等其他 command publisher，確認只有 `redrhex_lowlevel_bridge` 訂閱 `/redrhex/motor_commands`。probe 在每一個 60 Hz tick 都要求：command subscriber 可見、callback 接收時間在 0.25 秒內且值為 true 的 `/redrhex/lowlevel_heartbeat`、callback 接收時間在 0.25 秒內的 `/joint_states`，以及明確收到 `/estop=false`。任何一項消失、變 false 或過期，都會 abort 並重送 disabled packets。
+
+原始 BioRoLa topic 必須直接錄進 rosbag；不要只錄重新蓋 timestamp 的衍生 feedback：
+
+```bash
+ros2 bag record -o redrhex_probe_main0_raw \
+  /motor/command \
+  /motor/state \
+  /redrhex/motor_commands \
+  /redrhex/sim2real_probe/events \
+  /redrhex/lowlevel_heartbeat \
+  /joint_states \
+  /estop \
+  /imu/data
+```
+
+bag 開始後，才在另一個 terminal 明確給兩個 actuation 授權：
+
+```bash
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --enable --confirm-risk
+```
+
+事件 topic 是 machine-readable JSON `std_msgs/String`，包含 scenario、repetition、segment、abort 和 complete marker。保留原始 rosbag directory 不修改；後續可以離線反覆 import/compare，不需要再讓真機重跑。若 E-stop、heartbeat、joint state、subscriber 或程序有任何異常，先切實體急停並修正原因，不要直接重試。
+
 ### 13. 架空整機，先只跑 controller 的 INIT_STAND
 
 此時還不要 enable policy。先確認機器人已經架空、低階板限流、急停在手邊，再啟動完整 bringup：

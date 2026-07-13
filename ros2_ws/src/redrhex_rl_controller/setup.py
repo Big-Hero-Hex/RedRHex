@@ -27,6 +27,7 @@ setup(
             "motor_command_tool = redrhex_rl_controller.motor_command_tool:main",
             "estop_tool = redrhex_rl_controller.estop_tool:main",
             "preflight_check = redrhex_rl_controller.preflight_check:main",
+            "sim2real_probe = redrhex_rl_controller.sim2real_probe:main",
         ],
     },
 )

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "scenario_id": "suspended-main-1-step-coast",
+  "name": "Suspended main 1 step and coast",
+  "description": "Three fixed low-energy repetitions on suspended main_1, with globally disabled coast and neutral segments.",
+  "subsystem": "main_drive",
+  "experiment_kind": "step_coast",
+  "joint": "main_1",
+  "command_segments": [
+    {"duration_s": 0.5, "value": 0.0, "label": "neutral_before_positive"},
+    {"duration_s": 1.0, "value": 0.25, "label": "drive_positive"},
+    {"duration_s": 1.0, "value": 0.0, "label": "coast_positive"},
+    {"duration_s": 0.5, "value": 0.0, "label": "neutral_between"},
+    {"duration_s": 1.0, "value": -0.25, "label": "drive_negative"},
+    {"duration_s": 1.0, "value": 0.0, "label": "coast_negative"},
+    {"duration_s": 0.5, "value": 0.0, "label": "neutral_finish"}
+  ],
+  "repeats": 3,
+  "required_channels": ["command", "position"],
+  "time_bases": {"command": "command_time_s", "position": "position_time_s"},
+  "split": "calibration",
+  "scene_mode": "fixed_base",
+  "safety_class": "low_energy"
+}

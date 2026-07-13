@@ -113,6 +113,12 @@ def test_reviewed_scenario_catalog_is_complete_and_valid() -> None:
         "audit",
         "main-step",
         "main-coast",
+        "suspended-main-0-step-coast",
+        "suspended-main-1-step-coast",
+        "suspended-main-2-step-coast",
+        "suspended-main-3-step-coast",
+        "suspended-main-4-step-coast",
+        "suspended-main-5-step-coast",
         "manual-load",
         "mass-com",
         "abad-static",
@@ -129,6 +135,12 @@ def test_reviewed_scenario_catalog_is_complete_and_valid() -> None:
         assert set(scenario.required_channels) == set(scenario.time_bases)
         assert scenario.split in {"calibration", "holdout"}
         assert scenario.command_segments
+
+    for main_index in range(6):
+        scenario = load_scenario(f"suspended-main-{main_index}-step-coast")
+        expected_split = "holdout" if main_index == 5 else "calibration"
+        assert scenario.joint == f"main_{main_index}"
+        assert scenario.split == expected_split
 
 
 def test_profile_rejects_unknown_or_physically_invalid_fields() -> None:
