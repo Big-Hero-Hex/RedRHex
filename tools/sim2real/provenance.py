@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
-from .contracts import ContractError, ScenarioSpecV1
+from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1
 from .traces import LoadedTrace, sha256_json
 
 
@@ -20,18 +20,83 @@ def _measured_profile_source(value: Any) -> str | None:
     return profile_id
 
 
+def _verified_mapping_snapshot(
+    real: LoadedTrace,
+) -> tuple[str, Mapping[str, Any]]:
+    constants = real.manifest.metadata.get("calibration_constants", {})
+    snapshot = (
+        constants.get("hardware_mapping_snapshot")
+        if isinstance(constants, Mapping)
+        else None
+    )
+    if not isinstance(snapshot, Mapping):
+        raise ContractError(
+            "real main-drive trace uses provisional hardware mapping provenance or is "
+            "missing its hardware mapping snapshot"
+        )
+    expected_fields = {
+        "schema_version",
+        "profile_id",
+        "profile_sha256",
+        "hardware_mapping",
+    }
+    if set(snapshot) != expected_fields:
+        raise ContractError("hardware mapping snapshot has missing or unknown fields")
+    expected_hash = real.manifest.provenance.get("hardware_mapping_sha256")
+    if expected_hash is None or sha256_json(snapshot) != expected_hash:
+        raise ContractError("hardware mapping snapshot hash mismatch")
+    profile_hash = real.manifest.provenance.get("profile_sha256")
+    if snapshot.get("profile_sha256") != profile_hash:
+        raise ContractError("hardware mapping snapshot profile hash mismatch")
+    try:
+        profile = CalibrationProfileV1.from_dict(
+            {
+                "schema_version": snapshot["schema_version"],
+                "profile_id": snapshot["profile_id"],
+                "hardware_mapping": snapshot["hardware_mapping"],
+                "sensor_timing": {},
+                "simulation_physics": {},
+            }
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError(f"hardware mapping snapshot is invalid: {exc}") from exc
+    return profile.profile_id, profile.hardware_mapping
+
+
+def _require_joint_mapping(
+    mapping: Mapping[str, Any],
+    *,
+    joints: tuple[str, ...],
+    fields: tuple[str, ...],
+) -> None:
+    for field in fields:
+        values = mapping.get(field)
+        for joint in joints:
+            if not isinstance(values, Mapping) or joint not in values:
+                raise ContractError(
+                    f"hardware mapping snapshot is missing {field}.{joint}"
+                )
+
+
 def _validate_main_drive_mapping(
     real: LoadedTrace,
     scenario: ScenarioSpecV1,
-) -> None:
+) -> tuple[str, Mapping[str, Any]]:
     constants = real.manifest.metadata.get("calibration_constants", {})
     if not isinstance(constants, Mapping):
         raise ContractError("real main-drive trace has invalid hardware mapping provenance")
 
+    snapshot_profile_id, mapping = _verified_mapping_snapshot(real)
+    _require_joint_mapping(
+        mapping,
+        joints=(scenario.joint,),
+        fields=("encoder_counts_per_rev", "encoder_zero_count", "encoder_sign"),
+    )
+
     position_profile_id = _measured_profile_source(
         constants.get("position_mapping_source")
     )
-    if position_profile_id is None or "profile_sha256" not in real.manifest.provenance:
+    if position_profile_id is None or position_profile_id != snapshot_profile_id:
         raise ContractError(
             "real main-drive trace uses provisional or missing hardware mapping provenance "
             "for encoder position"
@@ -40,11 +105,16 @@ def _validate_main_drive_mapping(
     command_source = constants.get("requested_command_source")
     command_profile_id = _measured_profile_source(command_source)
     if command_profile_id is not None:
-        if command_profile_id != position_profile_id:
+        if command_profile_id != snapshot_profile_id:
             raise ContractError(
                 "real main-drive trace hardware mapping provenance names different profiles"
             )
-        return
+        _require_joint_mapping(
+            mapping,
+            joints=(scenario.joint,),
+            fields=("joint_direction", "pwm_scale", "pwm_cap"),
+        )
+        return snapshot_profile_id, mapping
 
     scenario_hash = sha256_json(scenario.to_dict())
     if command_source != f"{_PROBE_SOURCE_PREFIX}{scenario_hash}":
@@ -84,6 +154,7 @@ def _validate_main_drive_mapping(
         valid_evidence = False
     if not valid_evidence:
         raise ContractError("authenticated probe-event mapping provenance evidence is invalid")
+    return snapshot_profile_id, mapping
 
 
 def validate_real_trace_provenance(
@@ -103,12 +174,9 @@ def validate_real_trace_provenance(
     ):
         raise ContractError("scenario hash mismatch")
     if scenario.subsystem == "main_drive":
-        _validate_main_drive_mapping(real, scenario)
+        position_profile, mapping = _validate_main_drive_mapping(real, scenario)
         if require_all_main_positions:
             constants = real.manifest.metadata.get("calibration_constants", {})
-            position_profile = _measured_profile_source(
-                constants.get("position_mapping_source")
-            )
             all_main_profile = _measured_profile_source(
                 constants.get("all_main_position_mapping_source")
             )
@@ -116,3 +184,12 @@ def validate_real_trace_provenance(
                 raise ContractError(
                     "replay requires measured encoder mapping provenance for all six main joints"
                 )
+            _require_joint_mapping(
+                mapping,
+                joints=tuple(f"main_{index}" for index in range(6)),
+                fields=(
+                    "encoder_counts_per_rev",
+                    "encoder_zero_count",
+                    "encoder_sign",
+                ),
+            )

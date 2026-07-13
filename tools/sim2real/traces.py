@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -367,6 +368,17 @@ def write_trace(
 
     scenario_hash = sha256_json(spec.to_dict()) if spec else None
     source_hash = sha256_path(source_path) if source_path is not None else None
+    mapping_snapshot: dict[str, Any] | None = None
+    profile_hash: str | None = None
+    if profile is not None:
+        profile = profile.validate()
+        profile_hash = sha256_json(profile.to_dict())
+        mapping_snapshot = {
+            "schema_version": 1,
+            "profile_id": profile.profile_id,
+            "profile_sha256": profile_hash,
+            "hardware_mapping": copy.deepcopy(profile.hardware_mapping),
+        }
     output.mkdir(parents=True, exist_ok=True)
     trace_path = output / trace_file
     metadata_path = output / "metadata.json"
@@ -378,8 +390,9 @@ def write_trace(
             provenance["scenario_sha256"] = scenario_hash
         if source_hash is not None:
             provenance["source_sha256"] = source_hash
-        if profile is not None:
-            provenance["profile_sha256"] = sha256_json(profile.to_dict())
+        if profile_hash is not None and mapping_snapshot is not None:
+            provenance["profile_sha256"] = profile_hash
+            provenance["hardware_mapping_sha256"] = sha256_json(mapping_snapshot)
         clean_metadata = _metadata(
             arrays=clean_arrays,
             time_bases=resolved_time_bases,
@@ -387,6 +400,18 @@ def write_trace(
             source_hash=source_hash,
             supplied=metadata or base.get("metadata"),
         )
+        if mapping_snapshot is not None:
+            constants = clean_metadata.get("calibration_constants")
+            if not isinstance(constants, Mapping):
+                raise ContractError("metadata.calibration_constants must be a JSON object")
+            constants = dict(constants)
+            existing = constants.get("hardware_mapping_snapshot")
+            if existing is not None and existing != mapping_snapshot:
+                raise ContractError(
+                    "metadata hardware mapping snapshot conflicts with selected profile"
+                )
+            constants["hardware_mapping_snapshot"] = mapping_snapshot
+            clean_metadata["calibration_constants"] = constants
         payload = {
             "schema_version": 1,
             "scenario_id": scenario_id,
