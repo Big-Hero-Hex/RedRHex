@@ -30,6 +30,7 @@ _AUDIT_FIELDS = {
     "joint_sign_pass",
     "mechanical_range_pass",
     "mass_pass",
+    "mass_profile_application_pass",
     "inertia_com_pass",
     "planar_com_pass",
     "collision_geometry_pass",
@@ -258,6 +259,82 @@ def _changed_subsystems(
     return result
 
 
+def _validate_identifiable_changes(
+    baseline: CalibrationProfileV1, candidate: CalibrationProfileV1
+) -> None:
+    """Reject parameters that the implemented experiments cannot identify."""
+
+    before = baseline.simulation_physics
+    after = candidate.simulation_physics
+
+    def changed(section: str, field: str | None = None) -> bool:
+        old = before.get(section, {})
+        new = after.get(section, {})
+        if field is None:
+            return old != new
+        old_value = old.get(field) if isinstance(old, Mapping) else None
+        new_value = new.get(field) if isinstance(new, Mapping) else None
+        return old_value != new_value
+
+    unsupported: list[str] = []
+    if changed("abad"):
+        unsupported.append("simulation_physics.abad")
+    if changed("rigid_body"):
+        unsupported.append("simulation_physics.rigid_body")
+    if changed("damper"):
+        unsupported.append("simulation_physics.damper")
+    if changed("ground", "restitution"):
+        unsupported.append("simulation_physics.ground.restitution")
+    if changed("main_drive", "stiffness"):
+        unsupported.append("simulation_physics.main_drive.stiffness")
+
+    old_springs = before.get("passive_spring", {})
+    new_springs = after.get("passive_spring", {})
+    if isinstance(old_springs, Mapping) and isinstance(new_springs, Mapping):
+        for joint in set(old_springs) | set(new_springs):
+            old = old_springs.get(joint, {})
+            new = new_springs.get(joint, {})
+            for field in {"damping", "rest_position_rad"}:
+                if (
+                    isinstance(old, Mapping)
+                    and isinstance(new, Mapping)
+                    and old.get(field) != new.get(field)
+                ):
+                    unsupported.append(
+                        f"simulation_physics.passive_spring.{joint}.{field}"
+                    )
+
+    for section in (
+        "joint_friction",
+        "joint_dynamic_friction",
+        "joint_viscous_friction",
+    ):
+        old_values = before.get(section, {})
+        new_values = after.get(section, {})
+        if not isinstance(old_values, Mapping) or not isinstance(new_values, Mapping):
+            continue
+        for joint in set(old_values) | set(new_values):
+            if old_values.get(joint) != new_values.get(joint) and str(joint).startswith(
+                ("abad_", "damper_")
+            ):
+                unsupported.append(f"simulation_physics.{section}.{joint}")
+
+    old_mass = before.get("mass", {})
+    new_mass = after.get("mass", {})
+    for field in {"scale", "added_mass_kg", "com_offset_m"}:
+        if (
+            isinstance(old_mass, Mapping)
+            and isinstance(new_mass, Mapping)
+            and old_mass.get(field) != new_mass.get(field)
+        ):
+            unsupported.append(f"simulation_physics.mass.{field}")
+
+    if unsupported:
+        raise ContractError(
+            "unidentifiable profile change: " + ", ".join(sorted(unsupported))
+        )
+
+
 def _scenario_supports(subsystem: str, scenario_subsystem: str) -> bool:
     supported = {
         "main_drive": {"main_drive"},
@@ -298,6 +375,11 @@ def _mandatory_holdout_metrics(
             for direction in ("positive", "negative"):
                 result[f"{prefix}{direction}.coast_time_s"] = "s"
                 result[f"{prefix}{direction}.pre_coast_speed_rad_s"] = "rad/s"
+        if subsystem == "main_drive" and kind == "manual_load":
+            return {
+                "positive_torque_nm": "N*m",
+                "negative_torque_nm": "N*m",
+            }
         if result:
             return result
     elif subsystem == "abad" and kind == "abad_static":
@@ -311,9 +393,83 @@ def _mandatory_holdout_metrics(
             "settled.root_height_m": "m",
             "settled.contact_force_n": "N",
         }
+    elif subsystem == "rigid_body" and kind == "mass_com":
+        return {"mass_kg": "kg", "com_x_m": "m", "com_y_m": "m"}
+    elif subsystem == "spring" and kind == "spring":
+        return {"stiffness_nm_per_rad": "N*m/rad"}
     raise ContractError(
         f"no mandatory held-out metric contract for {subsystem}.{scenario.scenario_id}"
     )
+
+
+def _direct_profile_value(
+    candidate: CalibrationProfileV1,
+    subsystem: str,
+    scenario: Any,
+    metric_path: str,
+) -> float:
+    physics = candidate.simulation_physics
+    if subsystem == "rigid_body" and scenario.experiment_kind == "mass_com":
+        mass = _mapping(physics.get("mass", {}), "candidate mass profile")
+        if metric_path == "mass_kg":
+            return _number(
+                mass.get("target_total_mass_kg"), "candidate target_total_mass_kg"
+            )
+        planar = mass.get("reference_planar_com_xy_m")
+        if not isinstance(planar, list) or len(planar) != 2:
+            raise ContractError(
+                "candidate mass profile has no reference_planar_com_xy_m target"
+            )
+        index = {"com_x_m": 0, "com_y_m": 1}.get(metric_path)
+        if index is not None:
+            return _number(planar[index], f"candidate {metric_path}")
+    if subsystem == "spring" and scenario.experiment_kind == "spring":
+        springs = _mapping(
+            physics.get("passive_spring", {}), "candidate passive_spring profile"
+        )
+        spring = _mapping(
+            springs.get(scenario.joint), f"candidate spring {scenario.joint}"
+        )
+        if metric_path == "stiffness_nm_per_rad":
+            return _number(spring.get("stiffness"), "candidate spring stiffness")
+    if subsystem == "main_drive" and scenario.experiment_kind == "manual_load":
+        if metric_path in {"positive_torque_nm", "negative_torque_nm"}:
+            actuator = _mapping(
+                physics.get("main_drive", {}), "candidate main_drive profile"
+            )
+            return _number(
+                actuator.get("effort_limit"), "candidate main_drive effort_limit"
+            )
+    raise ContractError(
+        f"no direct profile target for {subsystem}.{scenario.scenario_id}.{metric_path}"
+    )
+
+
+def _validate_direct_holdout_context(
+    candidate: CalibrationProfileV1,
+    scenario: Any,
+    traces: list[LoadedTrace],
+) -> None:
+    if scenario.experiment_kind != "mass_com":
+        return
+    mass = _mapping(
+        candidate.simulation_physics.get("mass", {}), "candidate mass profile"
+    )
+    expected_joints = mass.get("reference_joint_position_rad")
+    expected_orientation = mass.get("reference_root_orientation_xyzw")
+    for trace in traces:
+        constants = _mapping(
+            trace.manifest.metadata.get("calibration_constants", {}),
+            "mass-com holdout calibration_constants",
+        )
+        if (
+            constants.get("reference_joint_position_rad") != expected_joints
+            or constants.get("reference_root_orientation_xyzw")
+            != expected_orientation
+        ):
+            raise ContractError(
+                "mass-com holdout reference pose must match the candidate profile"
+            )
 
 
 def _required_measurement_source_keys(
@@ -339,6 +495,48 @@ def _required_measurement_source_keys(
             for field in ("static_friction", "dynamic_friction")
         ):
             required.add("ground_friction")
+    before_mass = baseline.simulation_physics.get("mass", {})
+    after_mass = candidate.simulation_physics.get("mass", {})
+    absolute_mass_fields = {
+        "target_total_mass_kg",
+        "reference_planar_com_xy_m",
+        "reference_joint_position_rad",
+        "reference_root_orientation_xyzw",
+    }
+    if isinstance(before_mass, Mapping) and isinstance(after_mass, Mapping) and any(
+        before_mass.get(field) != after_mass.get(field)
+        for field in absolute_mass_fields
+    ):
+        required.add("mass_com")
+    before_springs = baseline.simulation_physics.get("passive_spring", {})
+    after_springs = candidate.simulation_physics.get("passive_spring", {})
+    if isinstance(before_springs, Mapping) and isinstance(after_springs, Mapping):
+        for joint in set(before_springs) | set(after_springs):
+            old = before_springs.get(joint, {})
+            new = after_springs.get(joint, {})
+            if (
+                isinstance(old, Mapping)
+                and isinstance(new, Mapping)
+                and old.get("stiffness") != new.get("stiffness")
+            ):
+                required.add(f"passive_spring:{joint}")
+    after_main_drive = candidate.simulation_physics.get("main_drive", {})
+    after_effort_limit = (
+        after_main_drive.get("effort_limit")
+        if isinstance(after_main_drive, Mapping)
+        else None
+    )
+    if _main_effort_limit_changed(baseline, candidate) and after_effort_limit is not None:
+        effort_sources = [
+            key
+            for key in candidate.measurement_sources
+            if key.startswith("main_drive_effort_limit:")
+        ]
+        if len(effort_sources) != 1:
+            raise ContractError(
+                "main-drive effort-limit fitting requires exactly one measured joint source"
+            )
+        required.add(effort_sources[0])
     return required
 
 
@@ -560,7 +758,6 @@ def _derive_audit(
         "audit runtime_trace",
         source="sim",
         scenario=audit_scenario,
-        profile=candidate,
     )
     runtime_path, runtime_binding = _file_binding(
         root, binding["runtime_audit"], "runtime audit"
@@ -674,6 +871,71 @@ def _derive_audit(
         "runtime audit aggregate_com_body_m",
         length=3,
     )
+    candidate_mass = candidate.simulation_physics.get("mass", {})
+    absolute_mass = isinstance(candidate_mass, Mapping) and {
+        "target_total_mass_kg",
+        "reference_planar_com_xy_m",
+        "reference_joint_position_rad",
+        "reference_root_orientation_xyzw",
+    }.issubset(candidate_mass)
+    mass_application = runtime.get("mass_profile_application")
+    if absolute_mass:
+        application = _mapping(
+            mass_application, "runtime audit mass_profile_application"
+        )
+        target_total = _number(
+            application.get("target_total_mass_kg"),
+            "runtime mass application target_total_mass_kg",
+        )
+        achieved_total = _number(
+            application.get("achieved_total_mass_kg"),
+            "runtime mass application achieved_total_mass_kg",
+        )
+        target_xy = _numeric_vector(
+            application.get("target_planar_com_xy_m"),
+            "runtime mass application target_planar_com_xy_m",
+            length=2,
+        )
+        achieved_com = _numeric_vector(
+            application.get("achieved_whole_com_root_m"),
+            "runtime mass application achieved_whole_com_root_m",
+            length=3,
+        )
+        reference_pose = _mapping(
+            application.get("reference_pose"),
+            "runtime mass application reference_pose",
+        )
+        mass_profile_application_pass = bool(
+            application.get("mode") == "absolute"
+            and math.isclose(
+                target_total,
+                float(candidate_mass["target_total_mass_kg"]),
+                rel_tol=0.0,
+                abs_tol=1.0e-6,
+            )
+            and np.allclose(
+                target_xy,
+                candidate_mass["reference_planar_com_xy_m"],
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+            and math.isclose(
+                achieved_total, runtime_mass, rel_tol=0.0, abs_tol=1.0e-6
+            )
+            and np.allclose(
+                achieved_com[:2], aggregate_com[:2], rtol=0.0, atol=1.0e-6
+            )
+            and math.isclose(
+                achieved_total, target_total, rel_tol=0.0, abs_tol=1.0e-6
+            )
+            and np.allclose(achieved_com[:2], target_xy, rtol=0.0, atol=1.0e-6)
+            and reference_pose.get("joint_position_rad")
+            == candidate_mass["reference_joint_position_rad"]
+            and reference_pose.get("root_orientation_xyzw")
+            == candidate_mass["reference_root_orientation_xyzw"]
+        )
+    else:
+        mass_profile_application_pass = mass_application is None
     body_count = len(body_names)
     inertia_com_pass = (
         masses.shape == (1, body_count)
@@ -688,8 +950,8 @@ def _derive_audit(
             rtol=0.0,
             atol=1.0e-9,
         )
-        positive_semidefinite = all(
-            float(np.min(np.linalg.eigvalsh(matrix))) >= -1.0e-9
+        positive_definite = all(
+            float(np.min(np.linalg.eigvalsh(matrix))) > 0.0
             for matrix in inertia_matrices
         )
         quaternion_norms = np.linalg.norm(com_poses[0, :, 3:7], axis=1)
@@ -699,8 +961,8 @@ def _derive_audit(
                 float(np.sum(masses)), runtime_mass, rel_tol=0.0, abs_tol=1.0e-6
             )
             and symmetric
-            and positive_semidefinite
-            and np.all(quaternion_norms > 0.0)
+            and positive_definite
+            and np.allclose(quaternion_norms, 1.0, rtol=0.0, atol=1.0e-6)
         )
 
     audit_value = runtime_trace.arrays.get("audit_value")
@@ -1042,6 +1304,7 @@ def _derive_audit(
         "joint_sign_pass": joint_sign_pass,
         "mechanical_range_pass": mechanical_range_pass,
         "mass_pass": mass_pass,
+        "mass_profile_application_pass": mass_profile_application_pass,
         "inertia_com_pass": inertia_com_pass,
         "planar_com_pass": planar_com_pass,
         "collision_geometry_pass": collision_geometry_pass,
@@ -1093,6 +1356,8 @@ def _verify_sweep_for_holdout(
     internal: Mapping[str, Any],
     effort_limit_changed: bool,
     known_load_traces: list[LoadedTrace],
+    audit_artifact_sha256: str,
+    audit_report_sha256: str,
 ) -> bool:
     binding = _mapping(raw_binding, "actuator sweep")
     _exact_fields(
@@ -1157,6 +1422,8 @@ def _verify_sweep_for_holdout(
         "real_metadata_sha256",
         "known_load_trace_sha256",
         "known_load_metadata_sha256",
+        "audit_artifact_sha256",
+        "audit_report_sha256",
         "scene_mode",
         "headless",
         "seed",
@@ -1171,8 +1438,14 @@ def _verify_sweep_for_holdout(
         "characterization_runner_sha256",
         "sweep_runner_sha256",
         "runtime_bundle_sha256",
+        "audit_artifact_sha256",
+        "audit_report_sha256",
     ):
         _sha(provenance[field], f"actuator sweep provenance {field}")
+    if provenance["audit_artifact_sha256"] != audit_artifact_sha256:
+        raise ContractError("actuator sweep pre-fit audit artifact mismatch")
+    if provenance["audit_report_sha256"] != audit_report_sha256:
+        raise ContractError("actuator sweep pre-fit audit report mismatch")
     git_sha = provenance["git_sha"]
     if not isinstance(git_sha, str) or len(git_sha) not in {40, 64}:
         raise ContractError("actuator sweep provenance git_sha is invalid")
@@ -1381,6 +1654,7 @@ def evaluate_promotion(
 
     baseline_path, _ = _file_binding(root, data["baseline_profile"], "baseline profile")
     baseline = load_profile(baseline_path)
+    _validate_identifiable_changes(baseline, candidate)
     fitted = _changed_subsystems(baseline, candidate)
     effort_limit_changed = _main_effort_limit_changed(baseline, candidate)
     if not fitted:
@@ -1514,14 +1788,76 @@ def evaluate_promotion(
                     raise ContractError(
                         "manual holdout cannot claim an Isaac simulator artifact"
                     )
-                if raw_metrics:
+                _validate_direct_holdout_context(candidate, scenario, loaded_real)
+                if not raw_metrics:
+                    raise ContractError("manual holdout metrics must be non-empty")
+                mandatory_metrics = _mandatory_holdout_metrics(subsystem, scenario)
+                supplied_metrics = set(raw_metrics)
+                missing_metrics = set(mandatory_metrics) - supplied_metrics
+                if missing_metrics:
                     raise ContractError(
-                        "manual holdout metrics must remain empty until an Isaac runner exists"
+                        "mandatory held-out metrics are missing: "
+                        + ", ".join(sorted(missing_metrics))
                     )
-                subsystem_failures.append(
-                    f"{subsystem}.{condition_id} is not Isaac-runnable and cannot "
-                    "satisfy held-out simulation validation"
-                )
+                unsupported_metrics = supplied_metrics - set(mandatory_metrics)
+                if unsupported_metrics:
+                    raise ContractError(
+                        "unsupported held-out metrics: "
+                        + ", ".join(sorted(unsupported_metrics))
+                    )
+                real_metric_sets = [
+                    compute_subsystem_metrics(scenario, trace)
+                    for trace in loaded_real
+                ]
+                for metric_path, raw_metric in sorted(raw_metrics.items()):
+                    metric = _mapping(raw_metric, f"metric {metric_path}")
+                    _exact_fields(
+                        metric,
+                        name=f"metric {metric_path}",
+                        required={"unit", "instrument_uncertainty"},
+                    )
+                    unit = metric["unit"]
+                    expected_unit = mandatory_metrics[metric_path]
+                    if unit != expected_unit:
+                        raise ContractError(
+                            f"metric {metric_path} unit must be {expected_unit}, got {unit}"
+                        )
+                    uncertainty = _number(
+                        metric["instrument_uncertainty"],
+                        f"metric {metric_path}.instrument_uncertainty",
+                        nonnegative=True,
+                    )
+                    observations = [
+                        _observation(
+                            metrics, metric_path, _repeat_count(metrics, trace)
+                        )
+                        for metrics, trace in zip(
+                            real_metric_sets, loaded_real, strict=True
+                        )
+                    ]
+                    real_mean, real_std, real_count = _pool(observations)
+                    profile_value = _direct_profile_value(
+                        candidate, subsystem, scenario, metric_path
+                    )
+                    tolerance = max(uncertainty, 2.0 * real_std)
+                    error = abs(profile_value - real_mean)
+                    passed = error <= tolerance
+                    clean_condition["metrics"][metric_path] = {
+                        "unit": unit,
+                        "real_mean": real_mean,
+                        "real_std": real_std,
+                        "real_count": real_count,
+                        "instrument_uncertainty": uncertainty,
+                        "profile_value": profile_value,
+                        "tolerance": tolerance,
+                        "absolute_error": error,
+                        "pass": passed,
+                    }
+                    if not passed:
+                        subsystem_failures.append(
+                            f"{subsystem}.{condition_id}.{metric_path} is outside "
+                            "its held-out direct-measurement envelope"
+                        )
             else:
                 sim_trace, _ = _trace_binding(
                     root,
@@ -1657,7 +1993,12 @@ def evaluate_promotion(
                 "bindings: " + ", ".join(stale_sweeps)
             )
     elif "main_drive" in fitted:
-        holdouts = grouped["main_drive"]["holdout"]
+        holdouts = [
+            condition
+            for condition in grouped["main_drive"]["holdout"]
+            if condition_internal[condition["condition_id"]]["scenario"].scene_mode
+            != "manual"
+        ]
         sweeps = raw_sweeps.get("main_drive")
         if not isinstance(sweeps, list):
             raise ContractError("main_drive actuator sweeps must be an array")
@@ -1674,6 +2015,8 @@ def evaluate_promotion(
                     internal=internal,
                     effort_limit_changed=effort_limit_changed,
                     known_load_traces=known_load_traces,
+                    audit_artifact_sha256=sha256_json(data["audit_artifact"]),
+                    audit_report_sha256=sha256_json(audit_report),
                 )
             )
         actuator_mismatch["main_drive"] = bool(holdouts) and not all(inside_by_holdout)

@@ -8,12 +8,13 @@
   "joint": "main_0",
   "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "held_out_manual_measurement"}],
   "repeats": 3,
-  "required_channels": ["load_force", "lever_arm", "command", "direction", "repeat_index"],
+  "required_channels": ["load_force", "lever_arm", "command", "direction", "saturation_confirmed", "repeat_index"],
   "time_bases": {
     "load_force": "load_force_time_s",
     "lever_arm": "lever_arm_time_s",
     "command": "command_time_s",
     "direction": "direction_time_s",
+    "saturation_confirmed": "load_force_time_s",
     "repeat_index": "load_force_time_s"
   },
   "split": "holdout",

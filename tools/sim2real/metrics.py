@@ -420,6 +420,7 @@ def torque_saturation_metrics(
     lever_arm: Any,
     command: Any,
     direction: Any,
+    saturation_confirmed: Any,
     *,
     repeat_index: Any | None = None,
     expected_repeats: int | None = None,
@@ -428,37 +429,76 @@ def torque_saturation_metrics(
     arm = _series(lever_arm, "lever_arm")
     pwm = _series(command, "command")
     sign = _series(direction, "direction")
-    if len({force.size, arm.size, pwm.size, sign.size}) != 1:
+    confirmed = _integer_series(saturation_confirmed, "saturation_confirmed")
+    if len({force.size, arm.size, pwm.size, sign.size, confirmed.size}) != 1:
         raise ContractError("manual-load channels must have matching shapes")
     if np.any(arm < 0.0) or np.any(np.abs(sign) != 1.0):
         raise ContractError("lever arms must be non-negative and direction must be -1 or 1")
+    if np.any(confirmed != 1):
+        raise ContractError(
+            "manual-load effort fitting requires every sample to confirm current-limited saturation"
+        )
     torque = np.abs(force * arm)
     result = {
-        "torque_saturation_nm": float(np.max(torque)),
         "max_command": float(np.max(np.abs(pwm))),
     }
-    for value, label in ((1.0, "positive_torque_nm"), (-1.0, "negative_torque_nm")):
-        selected = torque[sign == value]
-        if selected.size:
-            result[label] = float(np.max(selected))
     if repeat_index is not None or expected_repeats is not None:
         repeat_ids, repeats = _validated_repeats(
             repeat_index, force.size, expected_repeats, "manual-load"
         )
-        maxima = np.asarray(
-            [float(np.max(torque[repeats == repeat_id])) for repeat_id in repeat_ids]
-        )
+        repeat_results: list[dict[str, Any]] = []
+        positive: list[float] = []
+        negative: list[float] = []
+        for repeat_id in repeat_ids:
+            selected = repeats == repeat_id
+            repeat_signs = set(sign[selected].tolist())
+            if repeat_signs != {-1.0, 1.0}:
+                raise ContractError(
+                    "each manual-load repeat must contain confirmed positive and negative saturation"
+                )
+            positive_value = float(np.max(torque[selected & (sign > 0.0)]))
+            negative_value = float(np.max(torque[selected & (sign < 0.0)]))
+            positive.append(positive_value)
+            negative.append(negative_value)
+            repeat_results.append(
+                {
+                    "repeat_index": int(repeat_id),
+                    "positive_torque_nm": positive_value,
+                    "negative_torque_nm": negative_value,
+                    "torque_saturation_nm": 0.5 * (
+                        positive_value + negative_value
+                    ),
+                }
+            )
+        positive_values = np.asarray(positive)
+        negative_values = np.asarray(negative)
+        combined = np.concatenate((positive_values, negative_values))
         result.update(
             {
+                "metric_kind": "torque_saturation",
                 "repeat_count": int(repeat_ids.size),
-                "torque_saturation_nm_std": float(np.std(maxima)),
-                "repeats": [
-                    {
-                        "repeat_index": int(repeat_id),
-                        "torque_saturation_nm": float(maximum),
-                    }
-                    for repeat_id, maximum in zip(repeat_ids, maxima, strict=True)
-                ],
+                "torque_saturation_nm": float(np.mean(combined)),
+                "torque_saturation_nm_std": float(np.std(combined)),
+                "positive_torque_nm": float(np.mean(positive_values)),
+                "positive_torque_nm_std": float(np.std(positive_values)),
+                "negative_torque_nm": float(np.mean(negative_values)),
+                "negative_torque_nm_std": float(np.std(negative_values)),
+                "repeats": repeat_results,
+            }
+        )
+    else:
+        if set(sign.tolist()) != {-1.0, 1.0}:
+            raise ContractError(
+                "manual-load measurement must contain confirmed positive and negative saturation"
+            )
+        positive_value = float(np.max(torque[sign > 0.0]))
+        negative_value = float(np.max(torque[sign < 0.0]))
+        result.update(
+            {
+                "metric_kind": "torque_saturation",
+                "torque_saturation_nm": 0.5 * (positive_value + negative_value),
+                "positive_torque_nm": positive_value,
+                "negative_torque_nm": negative_value,
             }
         )
     return result
@@ -475,6 +515,15 @@ def mass_com_metrics(
     masses = _series(scale_mass, "scale_mass")
     forces = np.asarray(support_force, dtype=float)
     positions = np.asarray(support_position, dtype=float)
+    if (
+        positions.ndim != 2
+        or positions.shape[0] < 3
+        or positions.shape[1] != 2
+        or np.linalg.matrix_rank(positions[1:] - positions[0]) < 2
+    ):
+        raise ContractError(
+            "mass-com requires at least three non-collinear planar support positions"
+        )
     if forces.ndim == 1:
         representative_force = forces
     elif forces.ndim == 2:
@@ -502,7 +551,12 @@ def mass_com_metrics(
 
     com = weighted_com(representative_force)
     clean_com: Any = float(com) if np.ndim(com) == 0 else np.asarray(com).tolist()
-    result = {"mass_kg": float(np.median(masses)), "com_m": clean_com}
+    result = {
+        "mass_kg": float(np.median(masses)),
+        "com_m": clean_com,
+        "com_x_m": float(com[0]),
+        "com_y_m": float(com[1]),
+    }
     if repeat_index is not None or expected_repeats is not None:
         repeat_ids, repeats = _validated_repeats(
             repeat_index, masses.size, expected_repeats, "mass-com"
@@ -529,6 +583,8 @@ def mass_com_metrics(
                     if per_repeat_com.ndim == 1
                     else np.std(per_repeat_com, axis=0).tolist()
                 ),
+                "com_x_m_std": float(np.std(per_repeat_com[:, 0])),
+                "com_y_m_std": float(np.std(per_repeat_com[:, 1])),
                 "repeats": [
                     {
                         "repeat_index": int(repeat_id),
@@ -780,24 +836,32 @@ def compute_subsystem_metrics(
             raise ContractError(
                 "manual-load repeat_index must use the load-force clock"
             )
-        return torque_saturation_metrics(
+        result = torque_saturation_metrics(
             arrays[target],
             _interpolate(trace, "lever_arm", target),
             _interpolate(trace, "command", target),
             _interpolate(trace, "direction", target),
+            arrays["saturation_confirmed"],
             repeat_index=arrays["repeat_index"],
             expected_repeats=scenario.repeats,
         )
+        return {"schema_version": 1, "frame": scenario.joint, **result}
     if kind == "mass_com":
         if time_bases["repeat_index"] != time_bases["scale_mass"]:
             raise ContractError("mass-com repeat_index must use the scale clock")
-        return mass_com_metrics(
+        result = mass_com_metrics(
             arrays["scale_mass"],
             arrays["support_force"],
             arrays["support_position"],
             repeat_index=arrays["repeat_index"],
             expected_repeats=scenario.repeats,
         )
+        return {
+            "schema_version": 1,
+            "metric_kind": "mass_com",
+            "frame": "root",
+            **result,
+        }
     if kind == "abad_static":
         command = _interpolate(trace, "command", "position")
         position_clock = time_bases["position"]
@@ -814,13 +878,19 @@ def compute_subsystem_metrics(
     if kind == "spring":
         if time_bases["repeat_index"] != time_bases["angle"]:
             raise ContractError("spring repeat_index must use the angle clock")
-        return torsional_spring_metrics(
+        result = torsional_spring_metrics(
             angle_rad=arrays["angle"],
             load_force=_interpolate(trace, "load_force", "angle"),
             lever_arm_m=_interpolate(trace, "lever_arm", "angle"),
             repeat_index=arrays["repeat_index"],
             expected_repeats=scenario.repeats,
         )
+        return {
+            "schema_version": 1,
+            "metric_kind": "torsional_spring",
+            "frame": scenario.joint,
+            **result,
+        }
     if kind == "friction":
         static_clock = time_bases["breakaway_force"]
         dynamic_clock = time_bases["dynamic_pull_force"]

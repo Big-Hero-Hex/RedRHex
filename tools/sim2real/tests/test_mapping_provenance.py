@@ -181,24 +181,26 @@ def test_public_import_accepts_manual_load_without_encoder_provenance(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "known-load.npz"
-    time_s = np.arange(3, dtype=float)
+    time_s = np.arange(6, dtype=float)
     np.savez(
         source,
         load_force_time_s=time_s,
-        load_force=np.array([20.0, 21.0, 19.0]),
+        load_force=np.array([20.0, 20.0, 21.0, 21.0, 19.0, 19.0]),
         lever_arm_time_s=time_s,
-        lever_arm=np.full(3, 0.1),
+        lever_arm=np.full(6, 0.1),
         command_time_s=time_s,
-        command=np.full(3, 0.25),
+        command=np.full(6, 0.25),
         direction_time_s=time_s,
-        direction=np.ones(3),
-        repeat_index=np.arange(3),
+        direction=np.tile(np.array([1.0, -1.0]), 3),
+        saturation_confirmed=np.ones(6),
+        repeat_index=np.repeat(np.arange(3), 2),
     )
     units = {
         "load_force": "N",
         "lever_arm": "m",
         "command": "normalized",
         "direction": "1",
+        "saturation_confirmed": "1",
         "repeat_index": "1",
     }
     imported = import_real_dataset(

@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .contracts import CalibrationProfileV1, ContractError, ScenarioSpecV1
 from .metrics import compute_subsystem_metrics
 from .provenance import validate_real_trace_provenance
 from .scenarios import load_scenario
 from .traces import LoadedTrace, load_trace
+
+
+_CANONICAL_JOINTS = {
+    f"{group}_{index}"
+    for group in ("main", "abad", "damper")
+    for index in range(6)
+}
 
 
 def _expected_metadata(
@@ -34,6 +41,32 @@ def _expected_metadata(
         }
         frame = f"{scenario.joint}/ground"
         return units, {name: frame for name in units}
+    if scenario.experiment_kind == "mass_com":
+        units = {
+            "scale_mass": "kg",
+            "support_force": "N",
+            "support_position": "m",
+            "repeat_index": "1",
+        }
+        return units, {name: "root" for name in units}
+    if scenario.experiment_kind == "spring":
+        units = {
+            "load_force": "N",
+            "lever_arm": "m",
+            "angle": "rad",
+            "repeat_index": "1",
+        }
+        return units, {name: scenario.joint for name in units}
+    if scenario.experiment_kind == "manual_load":
+        units = {
+            "load_force": "N",
+            "lever_arm": "m",
+            "command": "normalized",
+            "direction": "1",
+            "saturation_confirmed": "1",
+            "repeat_index": "1",
+        }
+        return units, {name: scenario.joint for name in units}
     raise ContractError(
         f"scenario {scenario.scenario_id} is not a direct profile measurement"
     )
@@ -41,7 +74,13 @@ def _expected_metadata(
 
 def _load_measurement_trace(path: str | Path) -> tuple[ScenarioSpecV1, LoadedTrace]:
     discovered = load_trace(path, require_managed_dataset=True)
-    if discovered.manifest.scenario_id not in {"abad-static", "friction"}:
+    if discovered.manifest.scenario_id not in {
+        "abad-static",
+        "friction",
+        "mass-com",
+        "spring",
+        "manual-load",
+    }:
         raise ContractError(
             f"scenario {discovered.manifest.scenario_id} is not a direct profile measurement"
         )
@@ -84,6 +123,25 @@ def _source_record(
         "dataset_id": dataset.dataset_id,
         "episode_id": dataset.episode_id,
     }
+
+
+def _mass_reference_pose(trace: LoadedTrace) -> tuple[dict[str, Any], list[Any]]:
+    constants = trace.manifest.metadata.get("calibration_constants", {})
+    if not isinstance(constants, Mapping):  # pragma: no cover - trace contract guards this
+        raise ContractError("mass-com calibration constants must be an object")
+    joints = constants.get("reference_joint_position_rad")
+    orientation = constants.get("reference_root_orientation_xyzw")
+    if (
+        not isinstance(joints, Mapping)
+        or set(joints) != _CANONICAL_JOINTS
+        or not isinstance(orientation, list)
+        or len(orientation) != 4
+    ):
+        raise ContractError(
+            "mass-com measurement must record its complete reference pose in "
+            "metadata.calibration_constants"
+        )
+    return dict(joints), list(orientation)
 
 
 def apply_measurements_to_profile(
@@ -149,6 +207,73 @@ def apply_measurements_to_profile(
                 metric_kind="ground_friction",
                 frame=f"{scenario.joint}/ground",
                 repeat_count=static_count,
+            )
+        elif scenario.experiment_kind == "mass_com":
+            key = "mass_com"
+            if key in applied_keys:
+                raise ContractError("duplicate measurement source for mass_com")
+            repeat_count = int(metrics["repeat_count"])
+            if repeat_count != scenario.repeats:
+                raise ContractError("mass/CoM repeat count does not match its scenario")
+            mass = physics.setdefault("mass", {})
+            legacy_fields = {"scale", "added_mass_kg", "com_offset_m"} & set(mass)
+            if legacy_fields:
+                raise ContractError(
+                    "direct mass/CoM measurement cannot mix with legacy mass correction fields"
+                )
+            reference_joints, reference_orientation = _mass_reference_pose(trace)
+            mass.update(
+                {
+                    "target_total_mass_kg": metrics["mass_kg"],
+                    "reference_planar_com_xy_m": [
+                        metrics["com_x_m"],
+                        metrics["com_y_m"],
+                    ],
+                    "reference_joint_position_rad": reference_joints,
+                    "reference_root_orientation_xyzw": reference_orientation,
+                }
+            )
+            sources[key] = _source_record(
+                scenario,
+                trace,
+                metric_kind="mass_com",
+                frame="root",
+                repeat_count=repeat_count,
+            )
+        elif scenario.experiment_kind == "spring":
+            key = f"passive_spring:{scenario.joint}"
+            if key in applied_keys:
+                raise ContractError(f"duplicate measurement source for {key}")
+            repeat_count = int(metrics["repeat_count"])
+            if repeat_count != scenario.repeats:
+                raise ContractError("spring repeat count does not match its scenario")
+            existing = physics.setdefault("passive_spring", {}).setdefault(
+                scenario.joint, {}
+            )
+            existing["stiffness"] = metrics["stiffness_nm_per_rad"]
+            sources[key] = _source_record(
+                scenario,
+                trace,
+                metric_kind="torsional_spring",
+                frame=scenario.joint,
+                repeat_count=repeat_count,
+            )
+        elif scenario.experiment_kind == "manual_load":
+            key = f"main_drive_effort_limit:{scenario.joint}"
+            if key in applied_keys:
+                raise ContractError(f"duplicate measurement source for {key}")
+            repeat_count = int(metrics["repeat_count"])
+            if repeat_count != scenario.repeats:
+                raise ContractError("known-load repeat count does not match its scenario")
+            physics.setdefault("main_drive", {})["effort_limit"] = metrics[
+                "torque_saturation_nm"
+            ]
+            sources[key] = _source_record(
+                scenario,
+                trace,
+                metric_kind="torque_saturation",
+                frame=scenario.joint,
+                repeat_count=repeat_count,
             )
         else:  # pragma: no cover - guarded by _load_measurement_trace
             raise ContractError(f"unsupported measurement scenario: {scenario.scenario_id}")

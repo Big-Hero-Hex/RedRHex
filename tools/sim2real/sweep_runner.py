@@ -618,25 +618,42 @@ def execute_sweep(
         ):
             raise ContractError("known-load trace does not identify positive effort saturation")
         if effort_limit_changed:
-            repeat_std = known_load_metrics.get("torque_saturation_nm_std", 0.0)
-            if (
-                isinstance(repeat_std, bool)
-                or not isinstance(repeat_std, (int, float))
-                or not math.isfinite(float(repeat_std))
-                or float(repeat_std) < 0.0
-            ):
-                raise ContractError("known-load trace has invalid repeat variation")
-            tolerance_nm = max(2.0 * float(repeat_std), 1.0e-9)
+            directional_envelopes: list[tuple[float, float]] = []
+            for direction in ("positive", "negative"):
+                direction_effort = known_load_metrics.get(f"{direction}_torque_nm")
+                direction_std = known_load_metrics.get(
+                    f"{direction}_torque_nm_std", 0.0
+                )
+                if (
+                    isinstance(direction_effort, bool)
+                    or not isinstance(direction_effort, (int, float))
+                    or not math.isfinite(float(direction_effort))
+                    or float(direction_effort) <= 0.0
+                    or isinstance(direction_std, bool)
+                    or not isinstance(direction_std, (int, float))
+                    or not math.isfinite(float(direction_std))
+                    or float(direction_std) < 0.0
+                ):
+                    raise ContractError(
+                        f"known-load trace has invalid {direction} repeat envelope"
+                    )
+                directional_envelopes.append(
+                    (float(direction_effort), max(2.0 * float(direction_std), 1.0e-9))
+                )
             candidate_limits = [_main_effort_limit(item) for item in clean_candidates]
-            if not any(
+            if not all(
                 isinstance(value, (int, float))
                 and not isinstance(value, bool)
                 and math.isfinite(float(value))
-                and abs(float(value) - float(effort_nm)) <= tolerance_nm
+                and all(
+                    abs(float(value) - center) <= tolerance
+                    for center, tolerance in directional_envelopes
+                )
                 for value in candidate_limits
             ):
                 raise ContractError(
-                    "effort-limit candidates do not cover the measured known-load envelope"
+                    "effort-limit candidates must each remain inside both directional "
+                    "known-load envelopes"
                 )
     prefix = None if generate_only else _command_prefix(command_prefix)
     effective_provenance = _execution_provenance(

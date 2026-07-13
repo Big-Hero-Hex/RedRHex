@@ -335,6 +335,19 @@ def _audit_evidence(
 ) -> dict[str, object]:
     scenario = load_scenario("audit")
     run = root / "runtime-audit-run"
+    physical_path = root / "physical-audit.json"
+    if (run / "trace.npz").is_file():
+        return {
+            "runtime_trace": _trace_binding(run, root),
+            "runtime_audit": {
+                "path": (run / "runtime_audit.json").relative_to(root).as_posix(),
+                "sha256": sha256_file(run / "runtime_audit.json"),
+            },
+            "physical_measurements": {
+                "path": physical_path.relative_to(root).as_posix(),
+                "sha256": sha256_file(physical_path),
+            },
+        }
     time_s = np.array([0.0, 0.05, 0.1])
     runtime_joint_names = [
         "Revolute_15",
@@ -370,6 +383,40 @@ def _audit_evidence(
         "right_feet_2",
         "right_feet_3",
     ]
+    candidate_mass = candidate.simulation_physics.get("mass", {})
+    absolute_mass = "target_total_mass_kg" in candidate_mass
+    target_mass = (
+        float(candidate_mass["target_total_mass_kg"]) if absolute_mass else 10.0
+    )
+    target_xy = (
+        list(candidate_mass["reference_planar_com_xy_m"])
+        if absolute_mass
+        else [0.1, -0.05]
+    )
+    mass_application = (
+        {
+            "mode": "absolute",
+            "uniform_scale": 1.0,
+            "reference_total_mass_kg": target_mass,
+            "reference_whole_com_root_m": [*target_xy, 0.0],
+            "reference_pose": {
+                "joint_position_rad": dict(
+                    candidate_mass["reference_joint_position_rad"]
+                ),
+                "root_orientation_xyzw": list(
+                    candidate_mass["reference_root_orientation_xyzw"]
+                ),
+            },
+            "target_total_mass_kg": target_mass,
+            "target_planar_com_xy_m": target_xy,
+            "achieved_total_mass_kg": target_mass,
+            "achieved_whole_com_root_m": [*target_xy, 0.0],
+            "root_com_xyz_m": [*target_xy, 0.0],
+            "total_mass_kg": target_mass,
+        }
+        if absolute_mass
+        else None
+    )
     runtime_audit = {
         "schema_version": 2,
         "mode": "contact",
@@ -378,16 +425,19 @@ def _audit_evidence(
         "joint_names": runtime_joint_names,
         "body_names": collision_body_names,
         "body_properties": {
-            "mass_kg": [[4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]],
-            "total_mass_kg": 10.0,
+            "mass_kg": [
+                [0.4 * target_mass, *([0.1 * target_mass] * 6)]
+            ],
+            "total_mass_kg": target_mass,
             "inertia_kg_m2_matrix": [
                 [[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]] * 7
             ],
             "com_pose_xyz_xyzw": [
                 [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]] * 7
             ],
-            "aggregate_com_body_m": [0.1, -0.05, 0.0],
+            "aggregate_com_body_m": [*target_xy, 0.0],
         },
+        "mass_profile_application": mass_application,
         "joint_geometry": [
             {
                 "canonical_joint": canonical,
@@ -429,7 +479,7 @@ def _audit_evidence(
         run,
         {
             "audit_time_s": time_s,
-            "audit_value": np.full(3, 10.0),
+            "audit_value": np.full(3, target_mass),
             "sim_time_s": time_s,
             "contact_force_n": np.array(
                 [[0.0] * 6, [0.0] * 6, [1.0] * 6], dtype=float
@@ -437,7 +487,6 @@ def _audit_evidence(
         },
         scenario=scenario,
         source="sim",
-        profile=candidate,
         time_bases={
             "audit_value": "audit_time_s",
             "contact_force_n": "sim_time_s",
@@ -451,7 +500,6 @@ def _audit_evidence(
         },
     )
     runtime_audit_hash = _write_json(run / "runtime_audit.json", runtime_audit)
-    physical_path = root / "physical-audit.json"
     physical_hash = _write_json(
         physical_path,
         {
@@ -496,12 +544,16 @@ def _audit_evidence(
                 }
                 for index in range(6)
             ],
-            "mass_measurements_kg": [9.9, 10.0, 10.1],
+            "mass_measurements_kg": [
+                target_mass - 0.1,
+                target_mass,
+                target_mass + 0.1,
+            ],
             "mass_instrument_uncertainty_kg": 0.25,
             "planar_com_measurements_m": [
-                [0.1, -0.05],
-                [0.101, -0.049],
-                [0.099, -0.051],
+                target_xy,
+                [target_xy[0] + 0.001, target_xy[1] + 0.001],
+                [target_xy[0] - 0.001, target_xy[1] - 0.001],
             ],
             "com_instrument_uncertainty_m": 0.005,
             "collision_body_names": collision_body_names,
@@ -586,6 +638,8 @@ def _sweep_evidence(
         )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
+    audit_root = root
+    audit_artifact = _audit_evidence(audit_root, baseline)
     result = execute_sweep(
         output=sweep_root,
         scenario=scenario,
@@ -601,6 +655,8 @@ def _sweep_evidence(
         command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
         real_trace=real_holdout,
         known_load_trace=None,
+        audit_artifact=audit_artifact,
+        audit_artifact_root=audit_root,
         run_process=run_process,
     )
     run_output = sweep_root / result["candidates"][0]["run_output"]
@@ -748,6 +804,36 @@ def test_promotion_requires_every_mandatory_heldout_metric(tmp_path: Path) -> No
         evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("section", "value", "expected"),
+    [
+        ("abad", {"damping": 1.0}, "simulation_physics.abad"),
+        ("rigid_body", {"linear_damping": 0.1}, "simulation_physics.rigid_body"),
+        ("damper", {"damping": 1.0}, "simulation_physics.damper"),
+        ("ground", {"restitution": 0.1}, "ground.restitution"),
+        ("main_drive", {"damping": 1.5, "stiffness": 1.0}, "main_drive.stiffness"),
+        (
+            "passive_spring",
+            {"damper_0": {"stiffness": 10.0, "damping": 1.0}},
+            "passive_spring.damper_0.damping",
+        ),
+        ("joint_friction", {"abad_0": 0.1}, "joint_friction.abad_0"),
+        ("mass", {"scale": 1.1}, "mass.scale"),
+    ],
+)
+def test_promotion_rejects_unidentifiable_profile_changes(
+    tmp_path: Path, section: str, value: dict[str, object], expected: str
+) -> None:
+    candidate, evidence = _fixture(tmp_path)
+    payload = candidate.to_dict()
+    payload["simulation_physics"][section] = value
+    changed = CalibrationProfileV1.from_dict(payload)
+    evidence["candidate_profile_sha256"] = sha256_json(changed.to_dict())
+
+    with pytest.raises(ContractError, match=expected):
+        evaluate_promotion(changed, evidence, artifact_root=tmp_path)
+
+
 def test_promotion_resolves_artifacts_and_derives_repetitions_metrics_and_fitted_subsystems(
     tmp_path: Path,
 ) -> None:
@@ -774,6 +860,7 @@ def test_promotion_resolves_artifacts_and_derives_repetitions_metrics_and_fitted
         "joint_sign_pass": True,
         "mechanical_range_pass": True,
         "mass_pass": True,
+        "mass_profile_application_pass": True,
         "inertia_com_pass": True,
         "planar_com_pass": True,
         "collision_geometry_pass": True,
@@ -1329,24 +1416,26 @@ def test_promotion_rejects_candidate_measurement_source_not_bound_as_calibration
 def _manual_route_fixture(
     root: Path, *, subsystem: str
 ) -> tuple[CalibrationProfileV1, dict[str, object]]:
+    measured_mapping = {
+        "encoder_counts_per_rev": {
+            f"main_{index}": 54984.83 for index in range(6)
+        },
+        "encoder_zero_count": {f"main_{index}": 0.0 for index in range(6)},
+        "encoder_sign": {f"main_{index}": 1 for index in range(6)},
+    }
     if subsystem == "spring":
         baseline = CalibrationProfileV1.from_dict(
             {
                 "schema_version": 1,
                 "profile_id": "spring-baseline",
-                "hardware_mapping": {},
+                "hardware_mapping": measured_mapping,
                 "sensor_timing": {},
                 "simulation_physics": {
                     "passive_spring": {"damper_0": {"stiffness": 8.0}}
                 },
             }
         )
-        payload = baseline.to_dict()
-        payload["profile_id"] = "spring-candidate"
-        payload["simulation_physics"]["passive_spring"]["damper_0"][
-            "stiffness"
-        ] = 10.0
-        candidate = CalibrationProfileV1.from_dict(payload)
+        candidate_id = "spring-candidate"
         calibration_scenario = "spring"
         holdout_scenario = "spring-holdout"
         time_s = np.arange(9, dtype=float) * 0.1
@@ -1379,15 +1468,12 @@ def _manual_route_fixture(
             {
                 "schema_version": 1,
                 "profile_id": "mass-baseline",
-                "hardware_mapping": {},
+                "hardware_mapping": measured_mapping,
                 "sensor_timing": {},
-                "simulation_physics": {"mass": {"scale": 1.0}},
+                "simulation_physics": {},
             }
         )
-        payload = baseline.to_dict()
-        payload["profile_id"] = "mass-candidate"
-        payload["simulation_physics"]["mass"]["scale"] = 1.02
-        candidate = CalibrationProfileV1.from_dict(payload)
+        candidate_id = "mass-candidate"
         calibration_scenario = "mass-com"
         holdout_scenario = "mass-com-holdout"
         arrays = {
@@ -1395,9 +1481,11 @@ def _manual_route_fixture(
             "scale_mass": np.array([9.9, 10.0, 10.1]),
             "repeat_index": np.arange(3),
             "support_force_time_s": np.arange(3, dtype=float),
-            "support_force": np.array([[60.0, 40.0]] * 3),
-            "support_position_time_s": np.arange(2, dtype=float),
-            "support_position": np.array([0.0, 1.0]),
+            "support_force": np.array([[40.0, 30.0, 30.0]] * 3),
+            "support_position_time_s": np.arange(3, dtype=float),
+            "support_position": np.array(
+                [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
+            ),
         }
         metadata = {
             "units": {
@@ -1406,7 +1494,7 @@ def _manual_route_fixture(
                 "support_position": "m",
                 "repeat_index": "1",
             },
-            "frames": {name: "support_geometry" for name in (
+            "frames": {name: "root" for name in (
                 "scale_mass",
                 "support_force",
                 "support_position",
@@ -1426,6 +1514,17 @@ def _manual_route_fixture(
     holdout_metadata["calibration_constants"] = {
         "condition_coordinates": {"load": "held-out-load"}
     }
+    if subsystem == "rigid_body":
+        reference_pose = {
+            "reference_joint_position_rad": {
+                f"{group}_{index}": 0.0
+                for group in ("main", "abad", "damper")
+                for index in range(6)
+            },
+            "reference_root_orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+        }
+        calibration_metadata["calibration_constants"].update(reference_pose)
+        holdout_metadata["calibration_constants"].update(reference_pose)
     calibration = _write_managed_trace(
         root,
         dataset_id=f"{subsystem}-cal-data",
@@ -1433,6 +1532,11 @@ def _manual_route_fixture(
         scenario_id=calibration_scenario,
         arrays=arrays,
         metadata=calibration_metadata,
+    )
+    candidate = apply_measurements_to_profile(
+        baseline,
+        profile_id=candidate_id,
+        trace_paths=[calibration.directory],
     )
     holdout = _write_managed_trace(
         root,
@@ -1464,7 +1568,29 @@ def _manual_route_fixture(
                 "role": "holdout",
                 "held_out_by": ["load"],
                 "real_episodes": [_real_binding(holdout, root)],
-                "metrics": {},
+                "metrics": (
+                    {
+                        "stiffness_nm_per_rad": {
+                            "unit": "N*m/rad",
+                            "instrument_uncertainty": 0.1,
+                        }
+                    }
+                    if subsystem == "spring"
+                    else {
+                        "mass_kg": {
+                            "unit": "kg",
+                            "instrument_uncertainty": 0.2,
+                        },
+                        "com_x_m": {
+                            "unit": "m",
+                            "instrument_uncertainty": 0.01,
+                        },
+                        "com_y_m": {
+                            "unit": "m",
+                            "instrument_uncertainty": 0.01,
+                        },
+                    }
+                ),
             },
         ],
         "actuator_sweeps": {},
@@ -1473,16 +1599,164 @@ def _manual_route_fixture(
 
 
 @pytest.mark.parametrize("subsystem", ["spring", "rigid_body"])
-def test_manual_only_subsystem_route_is_explicitly_ineligible_until_isaac_support(
+def test_direct_manual_subsystem_route_uses_independent_holdout_measurement(
     tmp_path: Path, subsystem: str
 ) -> None:
     candidate, evidence = _manual_route_fixture(tmp_path, subsystem=subsystem)
 
     result = evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
 
-    assert result["eligible_for_review"] is False
-    assert result["subsystems"][subsystem]["pass"] is False
+    assert result["eligible_for_review"] is True
+    assert result["subsystems"][subsystem]["pass"] is True
+    assert result["subsystems"][subsystem]["holdout_conditions"][0]["metrics"]
+
+
+def test_mass_com_holdout_must_use_candidate_reference_pose(tmp_path: Path) -> None:
+    candidate, evidence = _manual_route_fixture(tmp_path, subsystem="rigid_body")
+    binding = evidence["conditions"][1]["real_episodes"][0]
+    episode = tmp_path / binding["path"]
+    metadata_path = episode / "metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["metadata"]["calibration_constants"]["reference_joint_position_rad"][
+        "main_0"
+    ] = 0.1
+    metadata_sha = _write_json(metadata_path, metadata)
+    dataset_manifest_path = episode.parent.parent / "manifest.json"
+    dataset_manifest = json.loads(dataset_manifest_path.read_text())
+    dataset_manifest["episodes"][0]["metadata_sha256"] = metadata_sha
+    _write_json(dataset_manifest_path, dataset_manifest)
+    binding["metadata_sha256"] = metadata_sha
+
+    with pytest.raises(ContractError, match="mass-com holdout reference pose"):
+        evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
+
+
+def _known_load_promotion_fixture(
+    root: Path,
+) -> tuple[CalibrationProfileV1, dict[str, object]]:
+    joints = [f"main_{index}" for index in range(6)]
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "effort-baseline",
+            "hardware_mapping": {
+                "encoder_counts_per_rev": {joint: 54984.83 for joint in joints},
+                "encoder_zero_count": {joint: 0.0 for joint in joints},
+                "encoder_sign": {joint: 1 for joint in joints},
+            },
+            "sensor_timing": {},
+            "simulation_physics": {"main_drive": {"effort_limit": 1.0}},
+        }
+    )
+    baseline_path = root / "effort-baseline.json"
+    _write_json(baseline_path, baseline.to_dict())
+    time_s = np.arange(6, dtype=float)
+    arrays = {
+        "load_force_time_s": time_s,
+        "load_force": np.array([20.0, 20.0, 21.0, 21.0, 19.0, 19.0]),
+        "lever_arm_time_s": time_s,
+        "lever_arm": np.full(6, 0.1),
+        "command_time_s": time_s,
+        "command": np.tile(np.array([0.25, -0.25]), 3),
+        "direction_time_s": time_s,
+        "direction": np.tile(np.array([1.0, -1.0]), 3),
+        "saturation_confirmed": np.ones(6),
+        "repeat_index": np.repeat(np.arange(3), 2),
+    }
+    units = {
+        "load_force": "N",
+        "lever_arm": "m",
+        "command": "normalized",
+        "direction": "1",
+        "saturation_confirmed": "1",
+        "repeat_index": "1",
+    }
+    calibration = _write_managed_trace(
+        root,
+        dataset_id="effort-cal-data",
+        episode_id="effort-cal-episode",
+        scenario_id="manual-load",
+        arrays=arrays,
+        metadata={
+            "units": units,
+            "frames": {name: "main_0" for name in units},
+            "calibration_constants": {
+                "condition_coordinates": {"load": "calibration-gauge"}
+            },
+        },
+    )
+    candidate = apply_measurements_to_profile(
+        baseline,
+        profile_id="effort-candidate",
+        trace_paths=[calibration.directory],
+    )
+    holdout = _write_managed_trace(
+        root,
+        dataset_id="effort-held-data",
+        episode_id="effort-held-episode",
+        scenario_id="manual-load-holdout",
+        arrays=arrays,
+        metadata={
+            "units": units,
+            "frames": {name: "main_0" for name in units},
+            "calibration_constants": {
+                "condition_coordinates": {"load": "held-out-weight"}
+            },
+        },
+    )
+    evidence: dict[str, object] = {
+        "schema_version": 1,
+        "candidate_profile_sha256": sha256_json(candidate.to_dict()),
+        "baseline_profile": {
+            "path": baseline_path.relative_to(root).as_posix(),
+            "sha256": sha256_file(baseline_path),
+        },
+        "audit_artifact": _audit_evidence(root, candidate),
+        "conditions": [
+            {
+                "condition_id": "effort-cal",
+                "subsystem": "main_drive",
+                "role": "calibration",
+                "real_episodes": [_real_binding(calibration, root)],
+                "metrics": {},
+            },
+            {
+                "condition_id": "effort-held",
+                "subsystem": "main_drive",
+                "role": "holdout",
+                "held_out_by": ["load"],
+                "real_episodes": [_real_binding(holdout, root)],
+                "metrics": {
+                    direction: {
+                        "unit": "N*m",
+                        "instrument_uncertainty": 0.1,
+                    }
+                    for direction in (
+                        "positive_torque_nm",
+                        "negative_torque_nm",
+                    )
+                },
+            },
+        ],
+        "actuator_sweeps": {"main_drive": []},
+    }
+    return candidate, evidence
+
+
+def test_effort_candidate_itself_must_match_confirmed_known_load_envelope(
+    tmp_path: Path,
+) -> None:
+    candidate, evidence = _known_load_promotion_fixture(tmp_path)
+    passed = evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
+    assert passed["eligible_for_review"] is True
+
+    payload = candidate.to_dict()
+    payload["profile_id"] = "effort-mismatch"
+    payload["simulation_physics"]["main_drive"]["effort_limit"] = 4.0
+    mismatch = CalibrationProfileV1.from_dict(payload)
+    evidence["candidate_profile_sha256"] = sha256_json(mismatch.to_dict())
+    failed = evaluate_promotion(mismatch, evidence, artifact_root=tmp_path)
+    assert failed["eligible_for_review"] is False
     assert any(
-        "not Isaac-runnable" in reason
-        for reason in result["subsystems"][subsystem]["failures"]
+        "direct-measurement envelope" in reason for reason in failed["failures"]
     )

@@ -199,19 +199,28 @@ def _write_standalone_real_reference(output: Path, scenario: ScenarioSpecV1) -> 
     )
 
 
-def _write_known_load_reference(output: Path, *, torque_scale: float = 2.0) -> None:
+def _write_known_load_reference(
+    output: Path,
+    *,
+    torque_scale: float = 2.0,
+    negative_torque_scale: float | None = None,
+) -> None:
     scenario = load_scenario("manual-load")
     dataset = output.parent.parent
     raw = dataset / "raw" / f"{output.name}.bin"
     raw.parent.mkdir(parents=True, exist_ok=True)
     raw.write_bytes(b"immutable known-load measurement")
     time_s = np.arange(6, dtype=float)
+    negative_scale = (
+        torque_scale if negative_torque_scale is None else negative_torque_scale
+    )
+    force_scale = np.array([torque_scale, negative_scale] * 3)
     manifest = write_trace(
         output,
         {
             "load_force_time_s": time_s,
             "load_force": np.array([10.0, 10.0, 10.5, 10.5, 9.5, 9.5])
-            * torque_scale,
+            * force_scale,
             "lever_arm_time_s": time_s,
             "lever_arm": np.full(6, 0.1),
             "command_time_s": time_s,
@@ -679,6 +688,55 @@ def test_effort_limit_sweep_must_cover_measured_known_load_envelope(
             audit_artifact_root=audit_root,
             run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
                 AssertionError("mismatched known-load evidence must fail before running")
+            ),
+        )
+
+
+def test_effort_limit_sweep_rejects_nonoverlapping_directional_envelopes(
+    tmp_path: Path,
+) -> None:
+    from tools.sim2real.sweep_runner import execute_sweep
+
+    baseline, candidate = _effort_profiles()
+    payload = candidate.to_dict()
+    payload["simulation_physics"]["main_drive"]["effort_limit"] = 2.5
+    candidate = CalibrationProfileV1.from_dict(payload)
+    scenario = load_scenario("main-step")
+    real = tmp_path / "datasets" / "sim2real" / "main" / "episodes" / "response"
+    known_load = tmp_path / "datasets" / "sim2real" / "load" / "episodes" / "known"
+    _write_real_reference(real, scenario)
+    _write_known_load_reference(
+        known_load,
+        torque_scale=2.0,
+        negative_torque_scale=3.0,
+    )
+    audit_artifact, audit_root = _passing_audit(tmp_path, baseline)
+
+    with pytest.raises(ContractError, match="directional.*known-load envelopes"):
+        execute_sweep(
+            output=tmp_path / "sweep",
+            scenario=scenario,
+            base_profile=baseline,
+            candidates=[candidate],
+            sweep_mode="one-factor",
+            scene_mode="fixed-base",
+            headless=True,
+            seed=17,
+            device="cpu",
+            provenance={},
+            provenance_provider=lambda: _runtime_provenance(),
+            command_prefix=(
+                "/opt/isaaclab/isaaclab.sh",
+                "-p",
+                "-m",
+                "tools.sim2real",
+            ),
+            real_trace=real,
+            known_load_trace=known_load,
+            audit_artifact=audit_artifact,
+            audit_artifact_root=audit_root,
+            run_process=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("direction mismatch must fail before running")
             ),
         )
 

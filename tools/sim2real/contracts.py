@@ -780,7 +780,10 @@ class CalibrationProfileV1:
         for name, raw_source in raw_sources.items():
             is_abad = name.startswith("abad_target:")
             is_ground = name == "ground_friction"
-            if not (is_abad or is_ground):
+            is_mass = name == "mass_com"
+            is_spring = name.startswith("passive_spring:")
+            is_effort = name.startswith("main_drive_effort_limit:")
+            if not (is_abad or is_ground or is_mass or is_spring or is_effort):
                 if not isinstance(raw_source, str) or not _SHA256_RE.fullmatch(raw_source):
                     raise ContractError(
                         f"measurement_sources.{name} must be a lowercase SHA-256 digest"
@@ -808,8 +811,16 @@ class CalibrationProfileV1:
                 raise ContractError(
                     f"measurement_sources.{name}.repeat_count must be an integer of at least 3"
                 )
-            expected_kind = "abad_static_mapping" if is_abad else "ground_friction"
-            expected_scenario = "abad-static" if is_abad else "friction"
+            if is_abad:
+                expected_kind, expected_scenario = "abad_static_mapping", "abad-static"
+            elif is_ground:
+                expected_kind, expected_scenario = "ground_friction", "friction"
+            elif is_mass:
+                expected_kind, expected_scenario = "mass_com", "mass-com"
+            elif is_spring:
+                expected_kind, expected_scenario = "torsional_spring", "spring"
+            else:
+                expected_kind, expected_scenario = "torque_saturation", "manual-load"
             if scenario_id != expected_scenario:
                 raise ContractError(
                     f"measurement_sources.{name}.scenario_id must be {expected_scenario}"
@@ -825,10 +836,24 @@ class CalibrationProfileV1:
                     raise ContractError(
                         f"measurement_sources.{name}.frame must match its canonical ABAD joint"
                     )
-            elif not frame.endswith("/ground"):
+            elif is_ground and not frame.endswith("/ground"):
                 raise ContractError(
                     "measurement_sources.ground_friction.frame must describe a ground pair"
                 )
+            elif is_mass and frame != "root":
+                raise ContractError("measurement_sources.mass_com.frame must be root")
+            elif is_spring:
+                joint = name.removeprefix("passive_spring:")
+                if not _DAMPER_JOINT_RE.fullmatch(joint) or frame != joint:
+                    raise ContractError(
+                        f"measurement_sources.{name}.frame must match its canonical damper joint"
+                    )
+            elif is_effort:
+                joint = name.removeprefix("main_drive_effort_limit:")
+                if not re.fullmatch(r"main_[0-5]", joint) or frame != joint:
+                    raise ContractError(
+                        f"measurement_sources.{name}.frame must match its canonical main joint"
+                    )
             measurement_sources[name] = copy.deepcopy(source_record)
         return cls(
             profile_id,

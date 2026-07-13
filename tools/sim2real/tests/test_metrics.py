@@ -64,30 +64,35 @@ def test_static_measurement_metrics() -> None:
         displacement=np.array([0.0, 0.01, 0.02]),
     )
     torque = torque_saturation_metrics(
-        load_force=np.array([10.0, 20.0, 30.0]),
-        lever_arm=np.array([0.1, 0.1, 0.1]),
-        command=np.array([0.1, 0.2, 0.25]),
-        direction=np.array([1.0, 1.0, -1.0]),
-        repeat_index=np.arange(3),
+        load_force=np.array([20.0, 20.0, 21.0, 21.0, 19.0, 19.0]),
+        lever_arm=np.full(6, 0.1),
+        command=np.full(6, 0.25),
+        direction=np.tile(np.array([1.0, -1.0]), 3),
+        saturation_confirmed=np.ones(6),
+        repeat_index=np.repeat(np.arange(3), 2),
         expected_repeats=3,
     )
     mass_com = mass_com_metrics(
         scale_mass=np.array([9.9, 10.0, 10.1]),
-        support_force=np.array([[60.0, 40.0], [60.0, 40.0], [60.0, 40.0]]),
-        support_position=np.array([0.0, 1.0]),
+        support_force=np.array([[40.0, 30.0, 30.0]] * 3),
+        support_position=np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
         repeat_index=np.arange(3),
         expected_repeats=3,
     )
 
     assert stiffness["stiffness_n_per_m"] == pytest.approx(1000.0)
-    assert torque["torque_saturation_nm"] == pytest.approx(3.0)
+    assert torque["torque_saturation_nm"] == pytest.approx(2.0)
     assert torque["repeat_count"] == 3
     assert mass_com["mass_kg"] == pytest.approx(10.0)
-    assert mass_com["com_m"] == pytest.approx(0.4)
+    assert mass_com["com_m"] == pytest.approx([0.3, 0.3])
+    assert mass_com["com_x_m"] == pytest.approx(0.3)
+    assert mass_com["com_y_m"] == pytest.approx(0.3)
     assert mass_com["repeat_count"] == 3
-    assert mass_com["com_m_std"] == pytest.approx(0.0)
-    assert [item["com_m"] for item in mass_com["repeats"]] == pytest.approx(
-        [0.4, 0.4, 0.4]
+    assert mass_com["com_m_std"] == pytest.approx([0.0, 0.0])
+    assert mass_com["com_x_m_std"] == pytest.approx(0.0)
+    assert mass_com["com_y_m_std"] == pytest.approx(0.0)
+    np.testing.assert_allclose(
+        [item["com_m"] for item in mass_com["repeats"]], [[0.3, 0.3]] * 3
     )
 
 
@@ -96,19 +101,53 @@ def test_mass_com_reports_planar_repeat_variation() -> None:
         scale_mass=np.array([10.0, 10.1, 9.9]),
         support_force=np.array(
             [
-                [60.0, 40.0],
-                [55.0, 45.0],
-                [65.0, 35.0],
+                [40.0, 40.0, 20.0],
+                [35.0, 45.0, 20.0],
+                [45.0, 35.0, 20.0],
             ]
         ),
-        support_position=np.array([[0.0, 0.0], [1.0, 0.5]]),
+        support_position=np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
         repeat_index=np.arange(3),
         expected_repeats=3,
     )
 
     np.testing.assert_allclose(result["com_m"], [0.4, 0.2])
-    np.testing.assert_allclose(result["com_m_std"], np.std([[0.4, 0.2], [0.45, 0.225], [0.35, 0.175]], axis=0))
-    assert result["repeats"][1]["com_m"] == pytest.approx([0.45, 0.225])
+    np.testing.assert_allclose(
+        result["com_m_std"],
+        np.std([[0.4, 0.2], [0.45, 0.2], [0.35, 0.2]], axis=0),
+    )
+    assert result["repeats"][1]["com_m"] == pytest.approx([0.45, 0.2])
+
+
+def test_mass_com_rejects_collinear_or_insufficient_planar_supports() -> None:
+    with pytest.raises(ContractError, match="three non-collinear"):
+        mass_com_metrics(
+            scale_mass=np.array([10.0, 10.0, 10.0]),
+            support_force=np.array([[50.0, 50.0]] * 3),
+            support_position=np.array([[0.0, 0.0], [1.0, 0.0]]),
+            repeat_index=np.arange(3),
+            expected_repeats=3,
+        )
+
+
+def test_known_load_requires_confirmed_saturation_in_both_directions() -> None:
+    common = {
+        "load_force": np.array([20.0, 20.0]),
+        "lever_arm": np.array([0.1, 0.1]),
+        "command": np.array([0.25, -0.25]),
+    }
+    with pytest.raises(ContractError, match="every sample.*confirm"):
+        torque_saturation_metrics(
+            **common,
+            direction=np.array([1.0, -1.0]),
+            saturation_confirmed=np.array([1.0, 0.0]),
+        )
+    with pytest.raises(ContractError, match="positive and negative"):
+        torque_saturation_metrics(
+            **common,
+            direction=np.ones(2),
+            saturation_confirmed=np.ones(2),
+        )
 
 
 def test_abad_static_metrics_fit_only_settled_samples_and_report_repeat_variation() -> None:
@@ -707,6 +746,7 @@ def test_metrics_reject_interpolation_without_full_clock_coverage(
             "command": np.array([0.1, 0.2]),
             "direction_time_s": other_time_s,
             "direction": np.array([1.0, 1.0]),
+            "saturation_confirmed": np.ones(2),
             "repeat_index": np.array([0.0, 1.0]),
         },
         scenario=scenario,
