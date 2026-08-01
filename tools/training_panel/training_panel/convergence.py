@@ -160,15 +160,20 @@ class ConvergenceChecker:
             return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
                                     reason=f"only {len(scalars)} iterations, need {patience * 2}")
 
-        finite = [v for _, v in scalars if not (math.isnan(v) or math.isinf(v))]
-        if not finite:
-            return DivergenceResult(detected=False, tag=config.primary_tag, reason="no finite values")
+        # Reference peak is bounded to a trailing lookback window, not the
+        # all-time max: an early fluke-high value or a legitimate curriculum
+        # step-down would otherwise poison the comparison forever.
+        reference_slice = scalars[-(patience * 4):-patience]
+        reference_finite = [v for _, v in reference_slice if not (math.isnan(v) or math.isinf(v))]
+        if not reference_finite:
+            return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
+                                    reason="no finite values in reference window")
 
-        peak = max(finite)
+        peak = max(reference_finite)
         if peak <= 0:
             # An all-negative reward curve has no meaningful "fraction of peak".
             return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
-                                    reason="peak is not positive — collapse ratio undefined")
+                                    reason="reference peak is not positive — collapse ratio undefined")
 
         window = [v for _, v in scalars[-patience:]]
         window_max = max(window)
@@ -178,7 +183,8 @@ class ConvergenceChecker:
                 detected=True, iteration=latest_step, kind="collapse", value=window_max,
                 tag=config.primary_tag,
                 reason=(f"{config.primary_tag} max {window_max:.3f} over last {patience} iters is "
-                        f"below {config.divergence_collapse_pct:.0f}% of peak {peak:.3f}"),
+                        f"below {config.divergence_collapse_pct:.0f}% of recent reference peak "
+                        f"{peak:.3f} (prior {len(reference_slice)} iters)"),
             )
         return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
                                 reason="healthy")

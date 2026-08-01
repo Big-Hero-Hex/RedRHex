@@ -75,6 +75,27 @@ class DivergenceDetectionTests(unittest.TestCase):
         result = _checker_with(scalars).check_divergence(Path("/fake"), config)
         self.assertFalse(result.detected)
 
+    def test_early_outlier_does_not_cause_collapse(self):
+        # One fluke-high spike near the start, then ~500 iterations oscillating
+        # healthily in a 5-8 band. An all-time peak of 50 would poison the
+        # collapse ratio forever; a bounded reference window should not.
+        scalars = [(0, 50.0)]
+        for i in range(1, 501):
+            scalars.append((i, 5.0 if i % 2 == 0 else 8.0))
+        result = _checker_with(scalars).check_divergence(Path("/fake"), ConvergenceConfig())
+        self.assertFalse(result.detected)
+
+    def test_curriculum_step_down_does_not_cause_collapse_once_settled(self):
+        # Climbs to ~9.0 over 900 iterations (harder terrain unlocked), then
+        # legitimately settles at a new, lower plateau of ~3.0 for 400 more
+        # iterations. Once the reference window is entirely inside the new
+        # plateau, this must read as healthy, not as a collapse.
+        climb = _healthy(900, start=1.0, end=9.0)
+        plateau = [(900 + i, 3.0) for i in range(400)]
+        scalars = climb + plateau
+        result = _checker_with(scalars).check_divergence(Path("/fake"), ConvergenceConfig())
+        self.assertFalse(result.detected)
+
 
 class DivergenceConfigTests(unittest.TestCase):
     def test_defaults(self):
