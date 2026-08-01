@@ -127,7 +127,7 @@ Git 是已移除工作文件的檔案庫；現行檔案樹不作為雜物間。
 - 多步驟實作需要計畫。
 - 內部重構必須記錄 `Docs impact: none` 的理由。
 
-根目錄 `AGENTS.md` 保存這些長期文件影響規則，並連結至治理文件而不重複其內容。
+正式治理文件保存這些長期文件影響規則。根目錄 `AGENTS.md` 連結至該治理規則，而不重複其內容。
 
 <a id="tooling"></a>
 ## 驗證與清冊工具
@@ -160,6 +160,13 @@ CI 強制要求宣告存在且格式正確，但不從原始碼路徑推論語�
 ## 儲存庫技能
 
 `.agents/skills` 下設置兩個儲存庫技能：`writing-redrhex-docs` 與 `reviewing-redrhex-docs`。它們分別引導作者與審查者，但應引用正式治理文件，不得把政策複製到技能中。
+
+<a id="cross-agent-adapters"></a>
+## 跨代理程式轉接層
+
+治理 Markdown 是文件政策的中立真實來源。根目錄 `AGENTS.md` 是 Codex 使用的廣泛開放代理程式轉接層；根目錄 `CLAUDE.md` 則為 Claude Code 匯入該檔案，不重複政策。
+
+正式技能實作維持於 `.agents/skills`。精簡的 `.claude/skills` 包裝檔提供 Claude Code 探索能力，並將其導向正式技能檔，不複製工作流程政策。文件驗證器、pre-commit hook 與 CI 是跨代理程式保證：無論使用何種撰寫工具，都會拒絕不符合規則的輸出。
 
 <a id="site"></a>
 ## 文件網站

@@ -127,7 +127,7 @@ Changes trigger documentation work as follows:
 - Multi-step implementations require a plan.
 - Internal refactors require a recorded `Docs impact: none` reason.
 
-The root `AGENTS.md` carries these durable impact rules and links to the governance documents rather than duplicating them.
+The canonical governance documents carry these durable impact rules. Root `AGENTS.md` links to that governance rather than duplicating it.
 
 <a id="tooling"></a>
 ## Validation and inventory tool
@@ -160,6 +160,13 @@ CI enforces the declaration's presence and structure. It does not infer semantic
 ## Repository skills
 
 Two repository skills live under `.agents/skills`: `writing-redrhex-docs` and `reviewing-redrhex-docs`. They guide authors and reviewers but reference the canonical governance documents instead of copying policy into the skills.
+
+<a id="cross-agent-adapters"></a>
+## Cross-agent adapters
+
+Governance Markdown is the neutral source of truth for documentation policy. Root `AGENTS.md` is the broad, open agent adapter used by Codex; root `CLAUDE.md` imports it for Claude Code rather than duplicating policy.
+
+Canonical skill implementations remain under `.agents/skills`. Thin `.claude/skills` wrappers provide Claude Code discovery and direct it to the canonical skill files without copying workflow policy. The documentation validator, pre-commit hook, and CI are the cross-agent guarantee: they reject nonconforming output independently of the authoring tool.
 
 <a id="site"></a>
 ## Documentation site

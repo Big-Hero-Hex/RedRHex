@@ -43,10 +43,12 @@ Preserve these results as checkpoint evidence; later failures must be explained 
 - [ ] Define the frontmatter schema, enums, lifecycle/location rules, naming rules, staleness policy, and documentation-impact policy in governance documents.
 - [ ] Add templates for every maintained document family and a translation guide covering meaning parity and stable explicit anchors.
 - [ ] Define the short bilingual root/component `README.md` router convention.
+- [ ] Add root `AGENTS.md` as a thin operational adapter that points agents to canonical governance.
+- [ ] Add root `CLAUDE.md` with an `@AGENTS.md` import so Claude Code receives the same repository requirements.
 - [ ] Create a heading-level migration manifest with columns for old path, old heading, disposition, replacement document or documents, and removal commit.
 - [ ] Add every heading from every source document to the manifest before migrating or deleting that source.
 
-**Phase acceptance:** portals and governance are paired and linked; schema examples pass the documented rules; router and translation conventions are unambiguous; and every in-scope old heading has a manifest row before content migration starts.
+**Phase acceptance:** portals and governance are paired and linked; schema examples pass the documented rules; router and translation conventions are unambiguous; root agent adapters point to canonical governance without policy duplication; and every in-scope old heading has a manifest row before content migration starts.
 
 <a id="phase-3-validator"></a>
 ## Phase 3 — Validator, hooks, and CI through TDD
@@ -101,12 +103,14 @@ python -m tools.documentation stage-site --output DIR
 ## Phase 6 — Repository skills, tested sequentially
 
 - [ ] Implement `writing-redrhex-docs` and `reviewing-redrhex-docs` one at a time; each references governance instead of copying it.
+- [ ] Add thin `.claude/skills` wrappers for both skills; each directs Claude Code to the canonical `.agents/skills` implementation without copying workflow policy.
 - [ ] For each skill, record a RED baseline without the skill, then a GREEN run with the skill.
 - [ ] Inspect failures and loopholes, refine the skill, and rerun the same scenario.
 - [ ] Repeat at least five micro-tests per skill with a no-guidance control.
 - [ ] Cover operator, developer, release, ADR, design, plan, experiment, and no-impact cases across the scenario suite.
+- [ ] Test that every Claude wrapper path resolves to its canonical skill file and that Claude follows the canonical workflow.
 
-**Phase acceptance:** both skills show reproducible improvement over their no-guidance controls; each has at least five recorded micro-test repetitions; every required scenario class is exercised; loophole fixes are documented; and outputs comply with governance without policy duplication.
+**Phase acceptance:** both skills show reproducible improvement over their no-guidance controls; each has at least five recorded micro-test repetitions; every required scenario class is exercised; Claude wrapper paths resolve and use the canonical implementations; loophole fixes are documented; and outputs comply with governance without policy duplication.
 
 <a id="phase-7-site"></a>
 ## Phase 7 — Bilingual site
@@ -143,4 +147,8 @@ python -m tools.documentation stage-site --output DIR
 - [ ] Skill tests cover operator, developer, release, ADR, design, plan, experiment, and no-impact scenarios, including RED/GREEN evidence, loophole refinement, at least five repetitions, and no-guidance controls.
 - [ ] Both site locales build, link, switch equivalents, and search successfully while the panel application remains unchanged at the root.
 - [ ] Pre-commit and CI gates enforce the documentation contract without excessive duplication or inferred semantic impact.
+- [ ] `AGENTS.md` points to canonical documentation governance.
+- [ ] `CLAUDE.md` imports `AGENTS.md`.
+- [ ] After Phase 6, Claude wrapper paths resolve to the canonical `.agents/skills` files.
+- [ ] Agent-independent validation rejects nonconforming output regardless of authoring tool.
 - [ ] Generated HTML, staged site output, caches, logs, videos, and other runtime artifacts are absent from Git.
