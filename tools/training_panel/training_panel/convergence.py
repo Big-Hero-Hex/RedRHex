@@ -12,6 +12,13 @@ PRESETS: dict[str, dict] = {
 }
 CONVERGENCE_MAX_EVENT_BYTES = 128 * 1024 * 1024
 CONVERGENCE_MAX_SCALARS = 2000
+# Minimum reference-peak magnitude before a percentage collapse is believed.
+# The collapse test is a ratio and therefore scale-free, so a reward curve that
+# hovers near zero — which RedRHex's shaped reward set produces for several
+# tags — turns ordinary noise into an apparent 75% collapse. Episode-summed
+# rewards for a run that is actually learning are far above this floor, so it
+# only suppresses the near-zero regime where the ratio means nothing.
+DIVERGENCE_MIN_REFERENCE_PEAK = 1.0
 
 _ALLOWED_FIELDS = {"enabled", "preset", "window_iterations", "min_improvement_pct",
                    "primary_tag", "min_iterations", "cooldown_minutes", "auto_record_video",
@@ -174,6 +181,17 @@ class ConvergenceChecker:
             # An all-negative reward curve has no meaningful "fraction of peak".
             return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
                                     reason="reference peak is not positive — collapse ratio undefined")
+        if peak < DIVERGENCE_MIN_REFERENCE_PEAK:
+            # A ratio is scale-free, so a shaped reward hovering near zero turns
+            # ordinary noise into a headline collapse: 0.4 -> 0.1 reads as -75%
+            # while being an absolute change of 0.3 reward units. Below this
+            # magnitude the run has no meaningful signal to collapse from.
+            return DivergenceResult(
+                detected=False, iteration=latest_step, tag=config.primary_tag,
+                reason=(f"reference peak {peak:.3f} is below the "
+                        f"{DIVERGENCE_MIN_REFERENCE_PEAK:g} magnitude floor — "
+                        f"collapse ratio not trusted near zero"),
+            )
 
         window = [v for _, v in scalars[-patience:]]
         window_max = max(window)

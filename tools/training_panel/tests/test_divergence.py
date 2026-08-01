@@ -69,6 +69,28 @@ class DivergenceDetectionTests(unittest.TestCase):
         result = _checker_with(scalars).check_divergence(Path("/fake"), ConvergenceConfig())
         self.assertFalse(result.detected)
 
+    def test_near_zero_reward_does_not_false_positive(self):
+        # A shaped reward that hovers just above zero: reference peak 0.4,
+        # recent window max 0.1. That is a 75% "collapse" by ratio but an
+        # absolute change of 0.3 reward units — noise, not divergence. This
+        # must not fire, or enabling auto-stop would kill healthy runs.
+        scalars = [(i, 0.4 if i % 2 == 0 else 0.3) for i in range(300)]
+        scalars += [(300 + i, 0.1 if i % 2 == 0 else 0.05) for i in range(100)]
+        config = ConvergenceConfig(divergence_patience_iterations=100, divergence_collapse_pct=40.0)
+        result = _checker_with(scalars).check_divergence(Path("/fake"), config)
+        self.assertFalse(result.detected)
+        self.assertIn("magnitude floor", result.reason)
+
+    def test_large_magnitude_collapse_still_fires(self):
+        # Same shape as the near-zero case, scaled up by 100x: here the drop is
+        # a real loss of learned reward and must still be reported.
+        scalars = [(i, 40.0 if i % 2 == 0 else 30.0) for i in range(300)]
+        scalars += [(300 + i, 10.0 if i % 2 == 0 else 5.0) for i in range(100)]
+        config = ConvergenceConfig(divergence_patience_iterations=100, divergence_collapse_pct=40.0)
+        result = _checker_with(scalars).check_divergence(Path("/fake"), config)
+        self.assertTrue(result.detected)
+        self.assertEqual(result.kind, "collapse")
+
     def test_disabled_config_never_fires(self):
         scalars = _healthy(300) + [(300, float("nan"))]
         config = ConvergenceConfig(divergence_enabled=False)
