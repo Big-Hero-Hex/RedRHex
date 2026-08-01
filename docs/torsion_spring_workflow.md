@@ -2,7 +2,7 @@
 
 This document is the operating procedure for the six passive leg torsion springs. It separates implementation verification, physical calibration, backend selection, and policy acceptance so that a provisional simulator result cannot be mistaken for a deployable model.
 
-Current status: the spring implementation and its validation tooling exist, but no physical spring calibration or production retraining has been completed. The provisional v10 characterization did not select a backend. Do not promote or deploy a checkpoint from this workflow until the calibrated physics and policy gates below both pass.
+Current status: the spring implementation and its validation tooling exist, but no physical spring calibration or production retraining has been completed. The provisional v11 characterization did not select a backend. Do not promote or deploy a checkpoint from this workflow until the calibrated physics and policy gates below both pass.
 
 ## Implemented joints and invariant policy contract
 
@@ -286,12 +286,14 @@ If the selected backend fails ForwardFast acceptance, stop the rollout. Do not s
 
 Run the existing high-gain-hold checkpoint through the same command table and report tracking, falls, spring behavior, and energy per distance, but label that comparison observational. Its training physics and spring metadata differ from the new system, so it cannot establish backend acceptance, calibrated equivalence, promotion eligibility, or deployment readiness. Preserve its results separately from the six calibrated acceptance artifacts.
 
-## Provisional v10 checkpoint
+## Provisional v11 checkpoint
 
-The v10 simulator checkpoint used the uncalibrated repository defaults (`200 N*m/rad`, zero damping, provisional neutral angles) and seed 0. Its four-run selection report is `outputs/sim2real/spring-backend-selection-v10.json`.
+The v11 simulator checkpoint was generated from branch commit `185a4fd5627ae6e8c0d33caad6ab38cea3b09e0a` with the uncalibrated repository defaults (`200 N*m/rad`, zero damping, provisional neutral angles) and seed 0. Its four-run selection report is `outputs/sim2real/spring-backend-selection-v11.json`; all four traces share runtime bundle hash `dba80874b37fb0895ac6b90d353eed375b2f90a35edc88b06cdbb89162f69ec7`.
 
 - Selection status is `blocked_uncalibrated`; `physics_passed` is false and `selected_backend` is null.
-- Explicit is a runaway at both timesteps: maximum amplitude ratios are approximately 54.98 at 120 Hz and 24.72 at 240 Hz. Its maximum energy/work residual fraction is approximately 115,329.75, and its cross-timestep peak difference is approximately 58.34%.
-- Native does not create energy and its fixture checks pass, but it loses/fails to balance far too much energy: energy/work residual fractions are 1.00 at 120 Hz and approximately 2.78 at 240 Hz versus the 0.02 limit. Its cross-timestep peak difference is approximately 80.99% versus the 0.02 limit.
+- Explicit is a severe runaway at both timesteps: maximum amplitude ratios are approximately 2,391.54 at 120 Hz and 1,767.15 at 240 Hz. It fails the energy, fixture, unwrap-ambiguity, runaway, and cross-timestep gates; the interpolated rebound peak difference is approximately 85.53%.
+- Native does not create energy, remains unambiguous, completes every rebound, and passes its fixture checks, but it loses/fails to balance far too much energy: energy/work residual fractions are 1.00 at 120 Hz and approximately 2.78 at 240 Hz versus the 0.02 limit. Its interpolated rebound peak difference is approximately 61.76% versus the 0.02 limit.
+- One-iteration ForwardFast smoke runs at seed 42 successfully instantiated both backends and wrote 12-action/56-observation checkpoints. They are `logs/rsl_rl/redrhex_forward_fast/2026-08-01_18-54-15_torsion_explicit_v11_provisional_smoke` and `logs/rsl_rl/redrhex_forward_fast/2026-08-01_18-54-31_torsion_native_v11_provisional_smoke`. Both are stamped `uncalibrated` and the deployment validator rejects them.
+- The native smoke checkpoint was also loaded through the playback entry point and rendered for 120 frames. Its visual artifact is `logs/rsl_rl/redrhex_forward_fast/2026-08-01_18-54-31_torsion_native_v11_provisional_smoke/videos/play/rl-video-step-0.mp4`.
 
-Therefore v10 is a useful implementation checkpoint, not evidence that either backend matches the real spring. The next externally blocked step is the approved physical `Revolute_5` calibration and holdout measurement; only then should the four characterization runs be repeated with the authenticated profile.
+Therefore v11 is a useful implementation checkpoint, not evidence that either backend matches the real spring. The next externally blocked step is the approved physical `Revolute_5` calibration and holdout measurement; only then should the four characterization runs be repeated with the authenticated profile.
