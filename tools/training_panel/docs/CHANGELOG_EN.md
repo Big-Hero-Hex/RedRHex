@@ -13,6 +13,23 @@ Format:
 
 Nothing yet. Nice and suspiciously calm.
 
+## V3.5.0 Training Insight
+
+### Added
+
+- Live progress bar, iteration count, ETA, and throughput on running run cards, parsed from the training process log.
+- Training curves in run details: mean reward and episode length, drawn inline from TensorBoard scalars with no external dependencies.
+- Divergence detection for NaN losses and sustained reward collapse, with a Discord notification and an opt-in auto-stop.
+- Every run now records the git commit, branch, and dirty state it was launched from.
+
+### Changed
+
+- A blank seed in the Train form now means "the panel picks one and records it" instead of "use the environment default". Runs launched from the panel are reproducible.
+
+### Notes
+
+- Divergence auto-stop is off by default. Turn it on in the Convergence view once you trust the detector on your reward scale.
+
 ## V3.4.3 History Sync Repair
 
 ### Fixed

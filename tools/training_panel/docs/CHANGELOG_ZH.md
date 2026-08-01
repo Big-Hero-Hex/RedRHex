@@ -13,6 +13,23 @@
 
 目前沒有。安靜得很可疑，但先享受一下。
 
+## V3.5.0 Training Insight
+
+### Added
+
+- 執行中的 run card 會顯示 live progress bar、iteration count、ETA 和 throughput，直接從訓練 log 解析。
+- Run details 裡有訓練曲線：mean reward 和 episode length，直接畫在頁面上，TensorBoard scalars，不靠外部服務。
+- 發散檢測：偵測 NaN loss 和 reward 持續崩塌，發生時會 Discord 通知，可自行開啟 auto-stop。
+- 每個 run 現在會紀錄啟動時的 git commit、branch 和 dirty state。
+
+### Changed
+
+- Train form 的 seed 欄位留空時，不再用環境預設值，改由 panel 自動挑選並記錄。Panel 啟動的 run 現在可重現。
+
+### Notes
+
+- Divergence auto-stop 預設是關的。信任偵測器後，在 Convergence view 打開它。
+
 ## V3.4.3 History Sync Repair
 
 ### Fixed
