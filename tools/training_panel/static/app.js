@@ -1373,10 +1373,10 @@ function renderRuns() {
                 aria-haspopup="menu" aria-expanded="false"
                 data-tooltip="More actions for this run">⋮</button>
               <div class="run-menu" role="menu" data-run-id="${escapeHtml(run.id)}" data-open="false">
-                <button type="button" role="menuitem" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)}>Resume to Train</button>
-                <button type="button" role="menuitem" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)}>Tweak</button>
+                <button type="button" role="menuitem" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)} data-tooltip="Resume training from checkpoint">Resume to Train</button>
+                <button type="button" role="menuitem" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)} data-tooltip="Copy this run into an editable reward tweak draft">Tweak</button>
                 ${state.selectedRun && state.selectedRun.id !== run.id
-                  ? `<button type="button" role="menuitem" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)}>Compare</button>`
+                  ? `<button type="button" role="menuitem" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)} data-tooltip="Compare with selected">Compare</button>`
                   : ""}
               </div>
             </div>
@@ -1402,6 +1402,7 @@ function renderRuns() {
       const button = event.target.closest("button[data-action]");
       if (button) {
         event.stopPropagation();
+        closeRunMenu();
         handleRunAction(button.dataset.action, button.dataset.runId, button.dataset.processId);
         return;
       }

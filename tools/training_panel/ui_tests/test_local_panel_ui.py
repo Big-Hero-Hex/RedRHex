@@ -508,3 +508,20 @@ def test_open_menu_survives_a_runs_refresh(panel, page):
     page.evaluate("loadRuns()")
     page.wait_for_timeout(500)
     expect(page.locator(".run-menu[data-open='true']")).to_have_count(1)
+
+
+def test_menu_closes_after_choosing_an_action(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card .run-menu-trigger").first.click()
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(1)
+    page.locator(".run-menu[data-open='true'] button[data-action='tweak']").click()
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(0)
+
+
+def test_menu_does_not_reopen_on_a_later_render(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card .run-menu-trigger").first.click()
+    page.locator(".run-menu[data-open='true'] button[data-action='tweak']").click()
+    page.evaluate("loadRuns()")
+    page.wait_for_timeout(500)
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(0)
