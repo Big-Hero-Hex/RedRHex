@@ -517,6 +517,63 @@ class DocumentationCliTests(unittest.TestCase):
                 "keep\n",
             )
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX directory permissions")
+    def test_stage_site_cli_rejects_unreadable_source_traversal(self) -> None:
+        for unreadable_kind in ("configured-root", "nested-directory"):
+            with self.subTest(unreadable_kind=unreadable_kind), tempfile.TemporaryDirectory() as directory:
+                top = Path(directory)
+                repo = top / "repo"
+                (repo / ".git").mkdir(parents=True)
+                docs = repo / "docs"
+                docs.mkdir()
+                source = repo / "source"
+                locked = source if unreadable_kind == "configured-root" else source / "locked"
+                locked.mkdir(parents=True)
+                (locked / "hidden.en.md").write_text("hidden\n", encoding="utf-8")
+                if unreadable_kind == "nested-directory":
+                    (source / "visible.en.md").write_text(
+                        "visible\n", encoding="utf-8"
+                    )
+                (docs / "site-manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "sources": [
+                                {"destination": ".", "source": "source"}
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                output = top / "staged"
+                locked.chmod(0)
+                try:
+                    try:
+                        with os.scandir(locked) as entries:
+                            list(entries)
+                    except PermissionError:
+                        pass
+                    else:
+                        self.skipTest("filesystem does not enforce unreadable directories")
+
+                    result = self.run_cli(
+                        repo,
+                        "stage-site",
+                        "--output",
+                        str(output),
+                    )
+                finally:
+                    locked.chmod(0o700)
+
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    "documentation error: unsafe documentation site source\n",
+                )
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

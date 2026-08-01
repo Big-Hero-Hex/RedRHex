@@ -106,6 +106,11 @@ _STAGING_EXCLUDED_DIRECTORIES = {
 def _canonical_copy_plan(
     repo_root: Path, sources: tuple[SiteSource, ...], output: Path
 ) -> list[tuple[Path, Path]]:
+    def reject_traversal_error(error: OSError) -> None:
+        raise DocumentationOperationError(
+            "unsafe documentation site source"
+        ) from error
+
     plan: list[tuple[Path, Path]] = []
     for site_source in sources:
         current = repo_root
@@ -119,7 +124,9 @@ def _canonical_copy_plan(
             current /= part
             if current.is_symlink():
                 raise DocumentationOperationError("unsafe documentation site source")
-        for root_string, directory_names, file_names in os.walk(site_source.source):
+        for root_string, directory_names, file_names in os.walk(
+            site_source.source, onerror=reject_traversal_error
+        ):
             root = Path(root_string)
             if any((root / name).is_symlink() for name in directory_names):
                 raise DocumentationOperationError("unsafe documentation site source")

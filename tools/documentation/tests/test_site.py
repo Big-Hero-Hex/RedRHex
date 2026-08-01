@@ -477,6 +477,46 @@ class SiteStagingTests(unittest.TestCase):
             )
             self.assertFalse(output.exists())
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX directory permissions")
+    def test_unreadable_source_traversal_fails_before_output_is_created(self) -> None:
+        from tools.documentation.errors import DocumentationOperationError
+        from tools.documentation.site import stage_site
+
+        for unreadable_kind in ("configured-root", "nested-directory"):
+            with self.subTest(unreadable_kind=unreadable_kind), tempfile.TemporaryDirectory() as directory:
+                top = Path(directory)
+                repo = top / "repo"
+                (repo / "docs").mkdir(parents=True)
+                source = repo / "source"
+                locked = source if unreadable_kind == "configured-root" else source / "locked"
+                self.write(repo, "source/locked/hidden.en.md", b"hidden\n")
+                if unreadable_kind == "nested-directory":
+                    self.write(repo, "source/visible.en.md", b"visible\n")
+                self.write_manifest(
+                    repo,
+                    [{"destination": ".", "source": "source"}],
+                )
+                output = top / "staged"
+                locked.chmod(0)
+                try:
+                    try:
+                        with os.scandir(locked) as entries:
+                            list(entries)
+                    except PermissionError:
+                        pass
+                    else:
+                        self.skipTest("filesystem does not enforce unreadable directories")
+
+                    with self.assertRaisesRegex(
+                        DocumentationOperationError,
+                        "^unsafe documentation site source$",
+                    ):
+                        stage_site(repo, output)
+                finally:
+                    locked.chmod(0o700)
+
+                self.assertFalse(output.exists())
+
     def test_staging_filesystem_failures_use_operational_errors(self) -> None:
         from tools.documentation.errors import DocumentationOperationError
         from tools.documentation.site import stage_site
