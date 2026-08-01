@@ -285,6 +285,51 @@ def test_energy_evaluation_accepts_per_joint_profiled_spring_parameters() -> Non
     assert "spring_d * torch.square(damp_vel)" in source
 
 
+def test_production_environment_exposes_two_passive_spring_backends() -> None:
+    cfg_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py")
+    env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")
+
+    assert 'spring_backend = "explicit"' in cfg_source
+    assert "spring_stiffness_nm_per_rad = (200.0,) * 6" in cfg_source
+    assert "spring_damping_nm_s_per_rad = (0.0,) * 6" in cfg_source
+    assert "velocity_limit_sim=1.0," not in cfg_source
+    assert "def _configure_torsion_spring_backend(" in env_source
+    assert "def _apply_explicit_torsion_spring(" in env_source
+    assert "restoring_torque(" in env_source
+    assert "self.robot.data.joint_pos[:, self._damper_indices]" in env_source
+    assert "self.robot.set_joint_effort_target(" in env_source
+    assert "self.robot.write_joint_stiffness_to_sim(" in env_source
+    assert "self.robot.write_joint_damping_to_sim(" in env_source
+
+
+def test_damper_hold_is_replaced_by_substep_spring_effort_and_fixed_native_target() -> None:
+    env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")
+
+    assert "_apply_damper_hold" not in env_source
+    apply_action = env_source[env_source.index("    def _apply_action(") :]
+    assert apply_action.index("self._apply_explicit_torsion_spring()") < apply_action.index(
+        'if getattr(self, "_action_targets_computed", False):'
+    )
+    assert "def _set_native_torsion_spring_target(" in env_source
+    assert "rest_target = self._spring_rest_pos" in env_source
+
+
+def test_environment_logs_passive_spring_state_without_changing_observation_contract() -> None:
+    cfg_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py")
+    env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")
+
+    assert "action_space = 12" in cfg_source
+    assert "observation_space = 56" in cfg_source
+    for metric in (
+        "diag_spring_deflection_mean",
+        "diag_spring_torque_rms",
+        "diag_spring_energy",
+        "diag_spring_power",
+        "diag_spring_passivity_residual",
+    ):
+        assert env_source.count(f'"{metric}"') >= 3
+
+
 def test_train_play_and_characterization_apply_measured_abad_target_mapping_at_boundary() -> None:
     cfg_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py")
     env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")

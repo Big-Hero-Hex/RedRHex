@@ -96,6 +96,9 @@ def _fake_env_cfg() -> SimpleNamespace:
         terrain=SimpleNamespace(physics_material=material_b),
         damper_stiffness=200.0,
         damper_damping=20.0,
+        spring_backend="explicit",
+        spring_stiffness_nm_per_rad=(200.0,) * 6,
+        spring_damping_nm_s_per_rad=(20.0,) * 6,
         sim2real_command_delay_steps=0,
         sim2real_abad_target_scale=(1.0,) * 6,
         sim2real_abad_target_offset_rad=(0.0,) * 6,
@@ -149,6 +152,24 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert candidate.abad_torque_estimate_limit == 7.5
     assert candidate.damper_stiffness == 190.0
     assert candidate.damper_damping == 19.0
+    assert candidate.spring_stiffness_nm_per_rad == (
+        180.0,
+        190.0,
+        190.0,
+        190.0,
+        190.0,
+        190.0,
+    )
+    assert candidate.spring_damping_nm_s_per_rad == (
+        18.0,
+        19.0,
+        19.0,
+        19.0,
+        19.0,
+        19.0,
+    )
+    assert candidate.robot_cfg.actuators["damper"].stiffness == 0.0
+    assert candidate.robot_cfg.actuators["damper"].damping == 0.0
     assert candidate.robot_cfg.init_state.joint_pos["Revolute_5"] == 0.7
     assert candidate.sim.physics_material.static_friction == 0.9
     assert candidate.terrain.physics_material.dynamic_friction == 0.8
@@ -165,6 +186,35 @@ def test_profile_application_updates_only_explicit_candidate_config() -> None:
     assert candidate.sim2real_command_delay_steps == 3
     assert candidate.sim2real_abad_target_scale == (1.2, 1.0, 1.0, 1.0, 1.0, 0.9)
     assert candidate.sim2real_abad_target_offset_rad == (-0.03, 0.0, 0.0, 0.0, 0.0, 0.04)
+
+
+def test_native_profile_resolves_same_effective_springs_but_configures_physx_gains() -> None:
+    from tools.sim2real.physics_profile import apply_profile_to_config
+
+    candidate = _fake_env_cfg()
+    candidate.spring_backend = "native"
+
+    summary = apply_profile_to_config(candidate, _profile())
+
+    assert candidate.spring_stiffness_nm_per_rad == (
+        180.0,
+        190.0,
+        190.0,
+        190.0,
+        190.0,
+        190.0,
+    )
+    assert candidate.spring_damping_nm_s_per_rad == (
+        18.0,
+        19.0,
+        19.0,
+        19.0,
+        19.0,
+        19.0,
+    )
+    assert candidate.robot_cfg.actuators["damper"].stiffness == 190.0
+    assert candidate.robot_cfg.actuators["damper"].damping == 19.0
+    assert summary["spring_backend"] == "native"
 
 
 def test_scalar_abad_mapping_uses_actual_equals_scale_times_requested_plus_offset() -> None:
@@ -742,6 +792,91 @@ def test_runtime_passive_springs_synchronize_per_joint_energy_bookkeeping() -> N
         [1.8, 20.0, 20.0, 20.0, 20.0, 2.7]
     )
     assert summary["energy_bookkeeping"]["passive_spring_per_joint"] is True
+
+
+@pytest.mark.parametrize("backend", ["explicit", "native"])
+def test_runtime_passive_spring_profile_is_backend_aware(backend: str) -> None:
+    import torch
+
+    from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+    payload = _profile().to_dict()
+    payload["simulation_physics"] = {
+        "passive_spring": {
+            "damper_0": {"stiffness": 18.0, "damping": 1.8},
+            "damper_5": {"stiffness": 27.0, "damping": 2.7},
+        }
+    }
+    profile = CalibrationProfileV1.from_dict(payload)
+    cfg = _fake_env_cfg()
+    runtime_names = (
+        cfg.main_drive_joint_names
+        + cfg.abad_joint_names
+        + cfg.damper_joint_names
+    )
+    data = SimpleNamespace(
+        joint_stiffness=torch.full((2, 18), 99.0),
+        joint_damping=torch.full((2, 18), 9.0),
+        default_joint_stiffness=torch.full((2, 18), 99.0),
+        default_joint_damping=torch.full((2, 18), 9.0),
+    )
+
+    class FakeRobot:
+        num_instances = 2
+        device = "cpu"
+        joint_names = runtime_names
+
+        def __init__(self) -> None:
+            self.data = data
+
+        def write_joint_stiffness_to_sim(self, stiffness):
+            self.data.joint_stiffness = stiffness.clone()
+
+        def write_joint_damping_to_sim(self, damping):
+            self.data.joint_damping = damping.clone()
+
+    robot = FakeRobot()
+    unwrapped = SimpleNamespace(
+        robot=robot,
+        cfg=cfg,
+        _spring_backend=backend,
+        _spring_k=torch.full((2, 6), 190.0),
+        _spring_d=torch.full((2, 6), 19.0),
+    )
+
+    summary = apply_profile_to_runtime_env(
+        SimpleNamespace(unwrapped=unwrapped), profile
+    )
+
+    expected_stiffness = torch.tensor(
+        [[18.0, 190.0, 190.0, 190.0, 190.0, 27.0]]
+    ).expand(2, -1)
+    expected_damping = torch.tensor(
+        [[1.8, 19.0, 19.0, 19.0, 19.0, 2.7]]
+    ).expand(2, -1)
+    torch.testing.assert_close(unwrapped._spring_k, expected_stiffness)
+    torch.testing.assert_close(unwrapped._spring_d, expected_damping)
+    damper_indices = [runtime_names.index(name) for name in cfg.damper_joint_names]
+    if backend == "explicit":
+        torch.testing.assert_close(
+            robot.data.joint_stiffness[:, damper_indices],
+            torch.zeros_like(expected_stiffness),
+        )
+        torch.testing.assert_close(
+            robot.data.joint_damping[:, damper_indices],
+            torch.zeros_like(expected_damping),
+        )
+    else:
+        torch.testing.assert_close(
+            robot.data.joint_stiffness[:, damper_indices], expected_stiffness
+        )
+        torch.testing.assert_close(
+            robot.data.joint_damping[:, damper_indices], expected_damping
+        )
+    assert summary["spring_backend"] == backend
+    assert summary["energy_bookkeeping"]["stiffness"] == pytest.approx(
+        expected_stiffness[0].tolist()
+    )
 
 
 def test_profile_application_rejects_duplicate_runtime_joint_mapping() -> None:

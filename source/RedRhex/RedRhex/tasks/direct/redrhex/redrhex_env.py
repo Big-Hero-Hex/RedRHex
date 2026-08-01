@@ -74,6 +74,7 @@ from isaaclab.markers.config import GREEN_ARROW_X_MARKER_CFG, RED_ARROW_X_MARKER
 from .redrhex_env_cfg import RedrhexEnvCfg
 from .abad_target_mapping import map_abad_targets
 from .target_delay import advance_target_delay
+from .torsion_spring import actuator_gains, mechanical_power, potential_energy, restoring_torque
 
 
 class RedrhexEnv(DirectRLEnv):
@@ -358,22 +359,49 @@ class RedrhexEnv(DirectRLEnv):
         print(f"[ABAD休止角度] {[f'{a*180/3.14159:.1f}°' for a in abad_init_angles]}")
         print(f"[ABAD限制] ±{self._abad_pos_limit_rad:.3f} rad, action scale={self._abad_action_scale:.3f} rad")
 
-        # =================================================================
-        # 避震關節的初始位置
-        # =================================================================
-        # 避震關節不被 AI 控制，需要保持在初始角度
-        # 這就像汽車的避震器，你不需要操控它，它自己會吸收震動
+        # Passive torsion-spring rest positions and effective physics parameters.
         damper_init_angles = []
         for joint_name in self.cfg.damper_joint_names:
             angle = self.cfg.robot_cfg.init_state.joint_pos.get(joint_name, 0.0)
             damper_init_angles.append(angle)
         self._damper_initial_pos = torch.tensor(damper_init_angles, device=self.device).unsqueeze(0)
         self._damper_rest_pos = self._damper_initial_pos.clone()
-        print(f"[避震關節初始角度] {[f'{a*180/3.14159:.1f}°' for a in damper_init_angles]}")
-
-        # ★ 彈簧物理常數（從 cfg 讀取，保持一致）
-        self._spring_k = float(getattr(self.cfg, 'damper_stiffness', 200.0))
-        self._spring_d = float(getattr(self.cfg, 'damper_damping', 20.0))
+        self._spring_rest_pos = self._damper_rest_pos
+        self._spring_backend = str(getattr(self.cfg, "spring_backend", "explicit"))
+        actuator_gains(self._spring_backend, stiffness=1.0, damping=1.0)
+        stiffness_values = tuple(
+            getattr(
+                self.cfg,
+                "spring_stiffness_nm_per_rad",
+                (float(getattr(self.cfg, "damper_stiffness", 200.0)),) * self.num_damper_joints,
+            )
+        )
+        damping_values = tuple(
+            getattr(
+                self.cfg,
+                "spring_damping_nm_s_per_rad",
+                (float(getattr(self.cfg, "damper_damping", 0.0)),) * self.num_damper_joints,
+            )
+        )
+        if len(stiffness_values) != self.num_damper_joints or len(damping_values) != self.num_damper_joints:
+            raise ValueError("torsion-spring stiffness and damping must match damper_joint_names")
+        self._spring_k = torch.tensor(stiffness_values, device=self.device).unsqueeze(0).expand(
+            self.num_envs, -1
+        ).clone()
+        self._spring_d = torch.tensor(damping_values, device=self.device).unsqueeze(0).expand(
+            self.num_envs, -1
+        ).clone()
+        if not torch.isfinite(self._spring_k).all() or torch.any(self._spring_k < 0.0):
+            raise ValueError("torsion-spring stiffness must be finite and non-negative")
+        if not torch.isfinite(self._spring_d).all() or torch.any(self._spring_d < 0.0):
+            raise ValueError("torsion-spring damping must be finite and non-negative")
+        self._spring_calibrated = bool(getattr(self.cfg, "spring_calibrated", False))
+        self._configure_torsion_spring_backend()
+        print(f"[扭轉彈簧中性角度] {[f'{a*180/3.14159:.1f}°' for a in damper_init_angles]}")
+        print(
+            f"[扭轉彈簧] backend={self._spring_backend}, calibrated={self._spring_calibrated}, "
+            f"k={stiffness_values}, c={damping_values}"
+        )
         self._robot_mass = float(getattr(self.cfg, 'robot_mass_kg', 14.0))
         self._energy_per_distance_max = float(getattr(self.cfg, "energy_per_distance_max", 500.0))
         self._energy_distance_eps = float(getattr(self.cfg, "energy_distance_eps", 1e-4))
@@ -585,6 +613,11 @@ class RedrhexEnv(DirectRLEnv):
             "diag_damper_pos_error": torch.zeros(self.num_envs, device=self.device),
             "diag_damper_vel_rms": torch.zeros(self.num_envs, device=self.device),
             "diag_damper_pos_mean": torch.zeros(self.num_envs, device=self.device),
+            "diag_spring_deflection_mean": torch.zeros(self.num_envs, device=self.device),
+            "diag_spring_torque_rms": torch.zeros(self.num_envs, device=self.device),
+            "diag_spring_energy": torch.zeros(self.num_envs, device=self.device),
+            "diag_spring_power": torch.zeros(self.num_envs, device=self.device),
+            "diag_spring_passivity_residual": torch.zeros(self.num_envs, device=self.device),
         }
 
         # 初始化目標速度緩衝
@@ -614,9 +647,7 @@ class RedrhexEnv(DirectRLEnv):
             self._abad_command_delay_history = None
         self._command_delay_cursor = 0
         self.robot.set_joint_position_target(self._target_abad_pos, joint_ids=self._abad_indices)
-        self._damper_pos_target = self._damper_rest_pos.expand(self.num_envs, -1).clone()
-        self._damper_vel_target = torch.zeros(self.num_envs, self.num_damper_joints, device=self.device)
-        self._apply_damper_hold()
+        self._reset_torsion_spring_backend()
         self._base_velocity = torch.zeros(self.num_envs, self.num_main_drive_joints, device=self.device)  # 基礎速度（未經AI調節）
         
         # 模式與 gating 狀態緩衝
@@ -1683,31 +1714,93 @@ class RedrhexEnv(DirectRLEnv):
             return env_ids.to(device=self.device, dtype=torch.long)
         return torch.tensor(env_ids, device=self.device, dtype=torch.long)
 
-    def _apply_damper_hold(self, env_ids: Sequence[int] | torch.Tensor | None = None) -> None:
-        """Hold passive damper joints at their init-state rest pose with zero velocity target."""
-        if self.num_damper_joints == 0:
-            return
+    def _configure_torsion_spring_backend(self) -> None:
+        """Configure PhysX gains without changing the shared physical parameters."""
+        native_scale, _ = actuator_gains(self._spring_backend, stiffness=1.0, damping=1.0)
+        stiffness = self._spring_k * native_scale
+        damping = self._spring_d * native_scale
+        self.robot.write_joint_stiffness_to_sim(stiffness, joint_ids=self._damper_indices)
+        self.robot.write_joint_damping_to_sim(damping, joint_ids=self._damper_indices)
+        self.robot.data.default_joint_stiffness[:, self._damper_indices] = stiffness
+        self.robot.data.default_joint_damping[:, self._damper_indices] = damping
 
+    def _set_native_torsion_spring_target(
+        self, env_ids: Sequence[int] | torch.Tensor | None = None
+    ) -> None:
+        """Set the native backend's immutable neutral pose target."""
+        if self._spring_backend != "native" or self.num_damper_joints == 0:
+            return
         env_ids_tensor = self._as_env_id_tensor(env_ids)
-        if env_ids_tensor is None:
-            pos_target, vel_target = self._compute_damper_targets(self.num_envs)
-            self._damper_pos_target.copy_(pos_target)
-            self._damper_vel_target.copy_(vel_target)
-            self.robot.set_joint_position_target(self._damper_pos_target, joint_ids=self._damper_indices)
-            self.robot.set_joint_velocity_target(self._damper_vel_target, joint_ids=self._damper_indices)
+        env_count = self.num_envs if env_ids_tensor is None else int(env_ids_tensor.numel())
+        rest_target = self._spring_rest_pos.expand(env_count, -1)
+        zero_target = torch.zeros_like(rest_target)
+        self.robot.set_joint_position_target(
+            rest_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor
+        )
+        self.robot.set_joint_velocity_target(
+            zero_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor
+        )
+        self.robot.set_joint_effort_target(
+            zero_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor
+        )
+
+    def _reset_torsion_spring_backend(
+        self, env_ids: Sequence[int] | torch.Tensor | None = None
+    ) -> None:
+        """Reset persistent native targets or stale explicit efforts."""
+        if self._spring_backend == "native":
+            self._set_native_torsion_spring_target(env_ids)
             return
+        env_ids_tensor = self._as_env_id_tensor(env_ids)
+        env_count = self.num_envs if env_ids_tensor is None else int(env_ids_tensor.numel())
+        self.robot.set_joint_effort_target(
+            torch.zeros(env_count, self.num_damper_joints, device=self.device),
+            joint_ids=self._damper_indices,
+            env_ids=env_ids_tensor,
+        )
 
-        rest_target, zero_vel_target = self._compute_damper_targets(env_ids_tensor.numel())
-        self._damper_pos_target[env_ids_tensor] = rest_target
-        self._damper_vel_target[env_ids_tensor] = zero_vel_target
-        self.robot.set_joint_position_target(rest_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor)
-        self.robot.set_joint_velocity_target(zero_vel_target, joint_ids=self._damper_indices, env_ids=env_ids_tensor)
+    def _apply_explicit_torsion_spring(self) -> None:
+        """Apply passive torque from fresh simulator state on each physics substep."""
+        if self._spring_backend != "explicit" or self.num_damper_joints == 0:
+            return
+        spring_position = self.robot.data.joint_pos[:, self._damper_indices]
+        spring_velocity = self.robot.data.joint_vel[:, self._damper_indices]
+        spring_torque = restoring_torque(
+            spring_position,
+            spring_velocity,
+            self._spring_rest_pos,
+            self._spring_k,
+            self._spring_d,
+        )
+        self.robot.set_joint_effort_target(spring_torque, joint_ids=self._damper_indices)
 
-    def _compute_damper_targets(self, env_count: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Damper targets are fixed rest-pose position hold plus zero velocity."""
-        pos_target = self._damper_rest_pos.expand(env_count, -1)
-        vel_target = torch.zeros(env_count, self.num_damper_joints, device=self.device)
-        return pos_target, vel_target
+    def _compute_torsion_spring_diagnostics(self) -> dict[str, torch.Tensor]:
+        spring_position = self.joint_pos[:, self._damper_indices]
+        spring_velocity = self.joint_vel[:, self._damper_indices]
+        spring_deflection = spring_position - self._spring_rest_pos
+        spring_torque = restoring_torque(
+            spring_position,
+            spring_velocity,
+            self._spring_rest_pos,
+            self._spring_k,
+            self._spring_d,
+        )
+        spring_energy = potential_energy(
+            spring_position, self._spring_rest_pos, self._spring_k
+        )
+        spring_power = mechanical_power(spring_torque, spring_velocity)
+        conservative_rate = self._spring_k * spring_deflection * spring_velocity
+        dissipated_power = self._spring_d * torch.square(spring_velocity)
+        passivity_residual = torch.abs(
+            spring_power + conservative_rate + dissipated_power
+        ).sum(dim=1)
+        return {
+            "deflection_mean": torch.abs(spring_deflection).mean(dim=1),
+            "torque_rms": torch.sqrt(torch.square(spring_torque).mean(dim=1).clamp(min=0.0)),
+            "energy": spring_energy.sum(dim=1),
+            "power": spring_power.sum(dim=1),
+            "passivity_residual": passivity_residual,
+        }
 
     def _compute_damper_diagnostics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         damper_pos = self.joint_pos[:, self._damper_indices]
@@ -2080,12 +2173,12 @@ class RedrhexEnv(DirectRLEnv):
         目標計算（含時間累積的 LAT FSM / lateral CPG）只在第一個 substep 執行，
         其餘 substep 直接重寫入快取的目標，避免計時器以 decimation 倍速前進。
         """
+        self._apply_explicit_torsion_spring()
         if getattr(self, "_action_targets_computed", False):
             self._apply_sim2real_command_delay(
                 self._requested_target_drive_vel,
                 self._requested_target_abad_pos,
             )
-            self._apply_damper_hold()
             return
         raw_drive_actions = self.actions[:, self._main_action_slice].clone()
         main_drive_pos = self.joint_pos[:, self._main_drive_indices]
@@ -2409,8 +2502,6 @@ class RedrhexEnv(DirectRLEnv):
         )
         self._apply_sim2real_command_delay(final_drive_vel, target_abad_pos)
 
-        # Damper/spring-leg joints are passive supports: fixed rest pose + zero velocity target.
-        self._apply_damper_hold()
         self._action_targets_computed = True
 
     def _get_observations(self) -> dict:
@@ -2874,6 +2965,7 @@ class RedrhexEnv(DirectRLEnv):
         energy_per_distance = energy_terms["energy_per_distance"]
         total_reward += rew_energy_per_distance
         damper_pos_error, damper_vel_rms, damper_pos_mean = self._compute_damper_diagnostics()
+        spring_diag = self._compute_torsion_spring_diagnostics()
         (
             abad_target_max_abs,
             abad_pos_max_abs,
@@ -2968,6 +3060,13 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_damper_pos_error"] += damper_pos_error
         self.episode_sums["diag_damper_vel_rms"] += damper_vel_rms
         self.episode_sums["diag_damper_pos_mean"] += damper_pos_mean
+        self.episode_sums["diag_spring_deflection_mean"] += spring_diag["deflection_mean"]
+        self.episode_sums["diag_spring_torque_rms"] += spring_diag["torque_rms"]
+        self.episode_sums["diag_spring_energy"] += spring_diag["energy"]
+        self.episode_sums["diag_spring_power"] += spring_diag["power"]
+        self.episode_sums["diag_spring_passivity_residual"] += spring_diag[
+            "passivity_residual"
+        ]
         self.episode_sums["diag_abad_target_max_abs"] += abad_target_max_abs
         self.episode_sums["diag_abad_pos_max_abs"] += abad_pos_max_abs
         self.episode_sums["diag_abad_pos_limit_violation"] += abad_pos_limit_violation
@@ -3294,6 +3393,7 @@ class RedrhexEnv(DirectRLEnv):
         energy_per_distance = energy_terms["energy_per_distance"]
         total_reward += rew_energy_per_distance
         damper_pos_error, damper_vel_rms, damper_pos_mean = self._compute_damper_diagnostics()
+        spring_diag = self._compute_torsion_spring_diagnostics()
         (
             abad_target_max_abs,
             abad_pos_max_abs,
@@ -3919,6 +4019,13 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_damper_pos_error"] += damper_pos_error
         self.episode_sums["diag_damper_vel_rms"] += damper_vel_rms
         self.episode_sums["diag_damper_pos_mean"] += damper_pos_mean
+        self.episode_sums["diag_spring_deflection_mean"] += spring_diag["deflection_mean"]
+        self.episode_sums["diag_spring_torque_rms"] += spring_diag["torque_rms"]
+        self.episode_sums["diag_spring_energy"] += spring_diag["energy"]
+        self.episode_sums["diag_spring_power"] += spring_diag["power"]
+        self.episode_sums["diag_spring_passivity_residual"] += spring_diag[
+            "passivity_residual"
+        ]
         self.episode_sums["diag_abad_target_max_abs"] += abad_target_max_abs
         self.episode_sums["diag_abad_pos_max_abs"] += abad_pos_max_abs
         self.episode_sums["diag_abad_pos_limit_violation"] += abad_pos_limit_violation
@@ -4261,7 +4368,7 @@ class RedrhexEnv(DirectRLEnv):
             env_ids=env_ids_tensor,
         )
         self.robot.set_joint_position_target(abad_rest_reset, joint_ids=self._abad_indices, env_ids=env_ids_tensor)
-        self._apply_damper_hold(env_ids_tensor)
+        self._reset_torsion_spring_backend(env_ids_tensor)
         self._base_velocity[env_ids] = 0.0
         
         # 重置模式與側移 state machine 狀態
