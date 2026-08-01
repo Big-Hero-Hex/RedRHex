@@ -22,9 +22,21 @@ def parse_name_status(data: bytes) -> set[Path]:
     while index < len(fields):
         status = fields[index]
         index += 1
-        path_count = 2 if status.startswith((b"R", b"C")) else 1
-        if not status or status[:1] not in {b"A", b"M", b"T", b"D", b"R", b"C"}:
+        single_path_status = status in {b"A", b"M", b"T", b"D"}
+        score = status[1:]
+        normalized_score = score.lstrip(b"0") or b"0"
+        scored_status = (
+            len(status) > 1
+            and status[:1] in {b"R", b"C"}
+            and score.isdigit()
+            and (
+                len(normalized_score) < 3
+                or normalized_score == b"100"
+            )
+        )
+        if not single_path_status and not scored_status:
             raise DocumentationOperationError("invalid Git name-status output")
+        path_count = 2 if scored_status else 1
         if index + path_count > len(fields):
             raise DocumentationOperationError("invalid Git name-status output")
         record_paths = fields[index : index + path_count]

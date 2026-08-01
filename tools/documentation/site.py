@@ -23,7 +23,7 @@ class SiteSource:
 
 
 def _relative_posix_path(raw: object) -> Path:
-    if not isinstance(raw, str) or not raw or "\\" in raw:
+    if not isinstance(raw, str) or not raw or "\0" in raw or "\\" in raw:
         raise DocumentationOperationError("invalid documentation site manifest")
     path = PurePosixPath(raw)
     if (
@@ -164,18 +164,35 @@ def _safe_output_path(
         resolved = output.resolve(strict=False)
         repo_resolved = repo_root.resolve(strict=True)
         source_resolved = [source.source.resolve(strict=True) for source in sources]
-    except (OSError, RuntimeError) as error:
+        output_is_symlink = output.is_symlink()
+        existing_ancestor = resolved
+        while True:
+            try:
+                ancestor_mode = existing_ancestor.stat().st_mode
+            except FileNotFoundError:
+                parent = existing_ancestor.parent
+                if parent == existing_ancestor:
+                    raise
+                existing_ancestor = parent
+                continue
+            break
+    except (OSError, RuntimeError, ValueError) as error:
         raise DocumentationOperationError(
             "unsafe or nonempty site staging output"
         ) from error
-    if output.is_symlink() or _is_within(resolved, repo_resolved) or any(
-        _is_within(resolved, source) for source in source_resolved
+    if (
+        output_is_symlink
+        or not stat.S_ISDIR(ancestor_mode)
+        or _is_within(resolved, repo_resolved)
+        or any(
+            _is_within(resolved, source) for source in source_resolved
+        )
     ):
         raise DocumentationOperationError("unsafe or nonempty site staging output")
     if output.exists():
         try:
             empty_directory = output.is_dir() and next(output.iterdir(), None) is None
-        except OSError as error:
+        except (OSError, ValueError) as error:
             raise DocumentationOperationError(
                 "unsafe or nonempty site staging output"
             ) from error
@@ -202,8 +219,18 @@ def stage_site(repo_root: Path, output: Path) -> int:
                 raise DocumentationOperationError(
                     "site staging plan has destination collisions"
                 )
-    safe_output.mkdir(parents=True, exist_ok=True)
-    for source, destination in plan:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+    try:
+        safe_output.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError) as error:
+        raise DocumentationOperationError(
+            "unsafe or nonempty site staging output"
+        ) from error
+    try:
+        for source, destination in plan:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+    except (OSError, ValueError) as error:
+        raise DocumentationOperationError(
+            "unable to stage documentation site"
+        ) from error
     return len(plan)

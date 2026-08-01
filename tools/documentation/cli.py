@@ -16,6 +16,21 @@ from .site import stage_site
 from .validator import _discover_candidates, validate_repository
 
 
+class _StoreOnce(argparse.Action):
+    """Store an option value while rejecting repeated occurrences."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error(f"argument {option_string}: may not be repeated")
+        setattr(namespace, self.dest, self.const if self.nargs == 0 else values)
+
+
 def _find_repository_root(start: Path) -> Path:
     resolved = start.resolve()
     for candidate in (resolved, *resolved.parents):
@@ -33,13 +48,23 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     validate = commands.add_parser("validate", allow_abbrev=False)
     selector = validate.add_mutually_exclusive_group(required=True)
-    selector.add_argument("--all", action="store_true")
-    selector.add_argument("--staged", action="store_true")
-    selector.add_argument("--changed-from", metavar="REF")
+    selector.add_argument("--all", action=_StoreOnce, nargs=0, const=True)
+    selector.add_argument("--staged", action=_StoreOnce, nargs=0, const=True)
+    selector.add_argument("--changed-from", action=_StoreOnce, metavar="REF")
     inventory = commands.add_parser("inventory", allow_abbrev=False)
-    inventory.add_argument("--format", choices=("json",), required=True)
+    inventory.add_argument(
+        "--format",
+        action=_StoreOnce,
+        choices=("json",),
+        required=True,
+    )
     stage_site = commands.add_parser("stage-site", allow_abbrev=False)
-    stage_site.add_argument("--output", metavar="DIR", required=True)
+    stage_site.add_argument(
+        "--output",
+        action=_StoreOnce,
+        metavar="DIR",
+        required=True,
+    )
     return parser
 
 

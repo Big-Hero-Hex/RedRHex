@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -188,6 +189,27 @@ class SiteManifestTests(unittest.TestCase):
                 "^invalid documentation site manifest$",
             ):
                 load_site_sources(repo)
+
+    def test_manifest_rejects_nul_source_and_destination_strings(self) -> None:
+        from tools.documentation.errors import DocumentationOperationError
+        from tools.documentation.site import load_site_sources
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "docs").mkdir()
+            for field in ("source", "destination"):
+                with self.subTest(field=field):
+                    entry = {"destination": ".", "source": "docs"}
+                    entry[field] = "\0"
+                    self.write_manifest(
+                        repo,
+                        {"schema_version": 1, "sources": [entry]},
+                    )
+                    with self.assertRaisesRegex(
+                        DocumentationOperationError,
+                        "^invalid documentation site manifest$",
+                    ):
+                        load_site_sources(repo)
 
 
 class SiteStagingTests(unittest.TestCase):
@@ -426,6 +448,68 @@ class SiteStagingTests(unittest.TestCase):
             output.mkdir()
             self.assertEqual(stage_site(repo, output), 1)
             self.assertEqual((output / "guide.en.md").read_bytes(), b"guide\n")
+
+    def test_missing_output_below_file_ancestor_is_rejected_before_staging(self) -> None:
+        from tools.documentation.errors import DocumentationOperationError
+        from tools.documentation.site import stage_site
+
+        with tempfile.TemporaryDirectory() as directory:
+            top = Path(directory)
+            repo = top / "repo"
+            self.write(repo, "docs/guide.en.md", b"guide\n")
+            self.write_manifest(
+                repo,
+                [{"destination": ".", "source": "docs"}],
+            )
+            blocking_ancestor = top / "regular-parent"
+            blocking_ancestor.write_text("keep\n", encoding="utf-8")
+            output = blocking_ancestor / "child"
+
+            with self.assertRaisesRegex(
+                DocumentationOperationError,
+                "^unsafe or nonempty site staging output$",
+            ):
+                stage_site(repo, output)
+
+            self.assertEqual(
+                blocking_ancestor.read_text(encoding="utf-8"),
+                "keep\n",
+            )
+            self.assertFalse(output.exists())
+
+    def test_staging_filesystem_failures_use_operational_errors(self) -> None:
+        from tools.documentation.errors import DocumentationOperationError
+        from tools.documentation.site import stage_site
+
+        failure_cases = (
+            (
+                "output-mkdir",
+                "pathlib.Path.mkdir",
+                OSError("injected mkdir failure"),
+                "unsafe or nonempty site staging output",
+            ),
+            (
+                "copy",
+                "tools.documentation.site.shutil.copy2",
+                ValueError("injected copy failure"),
+                "unable to stage documentation site",
+            ),
+        )
+        for label, target, error, message in failure_cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                top = Path(directory)
+                repo = top / "repo"
+                self.write(repo, "docs/guide.en.md", b"guide\n")
+                self.write_manifest(
+                    repo,
+                    [{"destination": ".", "source": "docs"}],
+                )
+                with mock.patch(target, side_effect=error):
+                    with self.assertRaisesRegex(
+                        DocumentationOperationError,
+                        f"^{message}$",
+                    ):
+                        stage_site(repo, top / "staged")
 
 if __name__ == "__main__":
     unittest.main()

@@ -142,6 +142,30 @@ class DocumentationCliTests(unittest.TestCase):
                         _parser().parse_args(arguments)
                 self.assertEqual(raised.exception.code, 2)
 
+    def test_repeated_stable_options_are_invalid_argparse_shapes(self) -> None:
+        repeated_shapes = (
+            ("validate", "--all", "--all"),
+            ("validate", "--staged", "--staged"),
+            (
+                "validate",
+                "--changed-from",
+                "base",
+                "--changed-from",
+                "other",
+            ),
+            ("validate", "--changed-from=base", "--changed-from=other"),
+            ("inventory", "--format", "json", "--format", "json"),
+            ("inventory", "--format=json", "--format=json"),
+            ("stage-site", "--output", "first", "--output", "second"),
+            ("stage-site", "--output=first", "--output=second"),
+        )
+        for arguments in repeated_shapes:
+            with self.subTest(arguments=arguments):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        _parser().parse_args(arguments)
+                self.assertEqual(raised.exception.code, 2)
+
     def test_nested_directory_finds_git_directory_and_git_file_roots(self) -> None:
         for marker_kind in ("directory", "file"):
             with self.subTest(marker_kind=marker_kind):
@@ -417,6 +441,80 @@ class DocumentationCliTests(unittest.TestCase):
             self.assertEqual(
                 sorted(path.name for path in nonempty_output.iterdir()),
                 ["keep.txt"],
+            )
+
+    def test_stage_site_cli_rejects_nul_destination_without_partial_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            top = Path(directory)
+            repo = top / "repo"
+            (repo / ".git").mkdir(parents=True)
+            docs = repo / "docs"
+            docs.mkdir()
+            (docs / "site-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sources": [{"destination": "\0", "source": "docs"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (docs / "guide.en.md").write_text("english\n", encoding="utf-8")
+            output = top / "nul-output"
+
+            result = self.run_cli(
+                repo,
+                "stage-site",
+                "--output",
+                str(output),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(
+                result.stderr,
+                "documentation error: invalid documentation site manifest\n",
+            )
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_stage_site_cli_preflights_missing_output_below_a_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            top = Path(directory)
+            repo = top / "repo"
+            (repo / ".git").mkdir(parents=True)
+            docs = repo / "docs"
+            docs.mkdir()
+            (docs / "site-manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sources": [{"destination": ".", "source": "docs"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (docs / "guide.en.md").write_text("english\n", encoding="utf-8")
+            blocking_ancestor = top / "regular-parent"
+            blocking_ancestor.write_text("keep\n", encoding="utf-8")
+
+            result = self.run_cli(
+                repo,
+                "stage-site",
+                "--output",
+                str(blocking_ancestor / "child"),
+            )
+
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(
+                result.stderr,
+                "documentation error: unsafe or nonempty site staging output\n",
+            )
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertEqual(
+                blocking_ancestor.read_text(encoding="utf-8"),
+                "keep\n",
             )
 
 

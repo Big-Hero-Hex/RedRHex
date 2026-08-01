@@ -59,6 +59,36 @@ class NameStatusParsingTests(unittest.TestCase):
                 ):
                     parse_name_status(data)
 
+    def test_status_tokens_follow_the_locked_git_grammar(self) -> None:
+        from tools.documentation.errors import DocumentationOperationError
+        from tools.documentation.selection import parse_name_status
+
+        malformed_statuses = (
+            b"R\0old\0new\0",
+            b"Cfoo\0old\0new\0",
+            b"R101\0old\0new\0",
+            b"M100\0path\0",
+            b"AA\0path\0",
+        )
+        for data in malformed_statuses:
+            with self.subTest(data=data):
+                with self.assertRaisesRegex(
+                    DocumentationOperationError,
+                    "^invalid Git name-status output$",
+                ):
+                    parse_name_status(data)
+
+    def test_oversized_decimal_score_uses_the_operational_boundary(self) -> None:
+        from tools.documentation.errors import DocumentationOperationError
+        from tools.documentation.selection import parse_name_status
+
+        data = b"R" + (b"9" * 5_000) + b"\0old\0new\0"
+        with self.assertRaisesRegex(
+            DocumentationOperationError,
+            "^invalid Git name-status output$",
+        ):
+            parse_name_status(data)
+
 
 class ChangedPairTests(unittest.TestCase):
     def test_paired_change_forms_pass_and_noncanonical_paths_are_ignored(self) -> None:
@@ -154,6 +184,35 @@ class SelectionGitTests(unittest.TestCase):
             self.assertEqual(
                 select_staged_paths(repo),
                 {Path("docs/guide.en.md"), Path("docs/空 白.zh-TW.md")},
+            )
+
+    def test_staged_paths_preserve_a_real_git_rename_record(self) -> None:
+        from tools.documentation.selection import select_staged_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            self.git(repo, "init", "--quiet")
+            self.git(repo, "config", "user.email", "docs@example.com")
+            self.git(repo, "config", "user.name", "Docs Tests")
+            (repo / "docs").mkdir()
+            old_path = repo / "docs/old guide.en.md"
+            old_path.write_text("unchanged rename content\n", encoding="utf-8")
+            self.git(repo, "add", "docs/old guide.en.md")
+            self.git(repo, "commit", "--quiet", "-m", "base")
+
+            self.git(
+                repo,
+                "mv",
+                "docs/old guide.en.md",
+                "docs/renamed guide.en.md",
+            )
+
+            self.assertEqual(
+                select_staged_paths(repo),
+                {
+                    Path("docs/old guide.en.md"),
+                    Path("docs/renamed guide.en.md"),
+                },
             )
 
     def test_changed_from_uses_real_committed_diff_and_rejects_invalid_ref(self) -> None:
