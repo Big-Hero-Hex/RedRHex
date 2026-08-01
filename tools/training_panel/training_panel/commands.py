@@ -15,6 +15,11 @@ DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
 SPRING_BACKENDS = ("explicit", "native")
 
 
+def validate_spring_backend(spring_backend: str) -> None:
+    if spring_backend not in SPRING_BACKENDS:
+        raise ValueError(f"spring_backend must be one of: {', '.join(SPRING_BACKENDS)}")
+
+
 @dataclass(frozen=True)
 class VideoParams:
     preset: str
@@ -96,7 +101,7 @@ class TrainingParams:
             num_envs=int(data.get("num_envs") or 4),
             max_iterations=int(data.get("max_iterations") or 1),
             device=str(data.get("device") or "cuda:0"),
-            spring_backend=str(data.get("spring_backend") or "explicit"),
+            spring_backend=data["spring_backend"] if "spring_backend" in data else "explicit",
             headless=bool(data.get("headless", True)),
             seed=int(data["seed"]) if data.get("seed") not in (None, "") else None,
             resume=bool(data.get("resume", False)),
@@ -125,8 +130,7 @@ class TrainingParams:
             raise ValueError("max_iterations must be between 1 and 100000")
         if not (self.device == "cpu" or self.device.startswith("cuda")):
             raise ValueError("device must be cpu or cuda[:index]")
-        if self.spring_backend not in SPRING_BACKENDS:
-            raise ValueError(f"spring_backend must be one of: {', '.join(SPRING_BACKENDS)}")
+        validate_spring_backend(self.spring_backend)
         if self.resume and not self.checkpoint:
             raise ValueError("checkpoint is required when resume is enabled")
         if self.display_name and len(self.display_name) > 120:
@@ -186,6 +190,7 @@ def play_argv(
     camera_lookat: tuple[float, float, float] | None = None,
     export_policy_only: bool = False,
 ) -> list[str]:
+    validate_spring_backend(spring_backend)
     argv = [
         "scripts/rsl_rl/play.py",
         "--task",

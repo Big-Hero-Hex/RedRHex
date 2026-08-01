@@ -105,6 +105,17 @@ class CommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TrainingParams.from_dict({"spring_backend": "unsupported"})
 
+    def test_training_params_reject_present_falsey_spring_backend_values(self):
+        for backend in ("", None, False, 0):
+            with self.subTest(backend=backend), self.assertRaises(ValueError):
+                TrainingParams.from_dict({"spring_backend": backend})
+
+    def test_direct_play_and_export_argv_reject_unknown_spring_backend(self):
+        with self.assertRaises(ValueError):
+            play_argv("/tmp/model_10.pt", spring_backend="unsupported")
+        with self.assertRaises(ValueError):
+            export_onnx_argv("/tmp/model_10.pt", spring_backend="unsupported")
+
     def test_training_argv_includes_requested_spring_backend(self):
         argv = training_argv(TrainingParams.from_dict({"spring_backend": "native"}))
 
