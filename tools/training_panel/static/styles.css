@@ -2650,3 +2650,30 @@ pre {
   max-height: 220px;
   overflow: auto;
 }
+
+/* ── Live training progress (V3.5) ── */
+.run-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.run-progress-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.run-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--blue);
+  transition: width 0.4s ease;
+}
+
+.run-progress-label {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

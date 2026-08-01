@@ -80,3 +80,13 @@ def parse_progress(log_text: str) -> dict | None:
         return result
 
     return None
+
+
+def progress_snapshot(log_text: str) -> dict | None:
+    """parse_progress() plus the wall-clock time the reading was taken."""
+    from datetime import datetime
+
+    parsed = parse_progress(log_text)
+    if parsed is None:
+        return None
+    return {**parsed, "updated_at": datetime.now().isoformat(timespec="seconds")}

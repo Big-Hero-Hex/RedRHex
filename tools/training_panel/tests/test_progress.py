@@ -1,6 +1,6 @@
 import unittest
 
-from tools.training_panel.training_panel.progress import parse_progress
+from tools.training_panel.training_panel.progress import parse_progress, progress_snapshot
 
 
 FULL_BLOCK = (
@@ -82,6 +82,17 @@ class ParseProgressTests(unittest.TestCase):
         result = parse_progress(text)
         self.assertEqual(result["iteration"], 0)
         self.assertNotIn("percent", result)
+
+
+class ProgressSnapshotTests(unittest.TestCase):
+    def test_snapshot_adds_updated_at(self):
+        snapshot = progress_snapshot(FULL_BLOCK)
+        self.assertEqual(snapshot["iteration"], 8)
+        self.assertIn("updated_at", snapshot)
+        self.assertRegex(snapshot["updated_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+    def test_snapshot_returns_none_without_block(self):
+        self.assertIsNone(progress_snapshot("nothing here"))
 
 
 if __name__ == "__main__":

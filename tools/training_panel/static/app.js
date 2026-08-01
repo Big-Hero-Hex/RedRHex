@@ -982,6 +982,51 @@ function filteredRuns() {
   return runs;
 }
 
+const PROGRESS_STALE_MS = 5 * 60 * 1000;
+
+function liveProgress(run) {
+  const progress = run?.progress;
+  if (!progress || typeof progress.iteration !== "number") return null;
+  if (!["running", "stopping"].includes(String(run.status || "").toLowerCase())) return null;
+  const updated = Date.parse(progress.updated_at || "");
+  if (!Number.isFinite(updated) || Date.now() - updated > PROGRESS_STALE_MS) return null;
+  return progress;
+}
+
+function formatEta(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const pad = (value) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(secs)}` : `${minutes}:${pad(secs)}`;
+}
+
+function formatSteps(stepsPerSecond) {
+  if (typeof stepsPerSecond !== "number" || !Number.isFinite(stepsPerSecond)) return "";
+  return stepsPerSecond >= 1000
+    ? `${Math.round(stepsPerSecond / 1000)}k steps/s`
+    : `${Math.round(stepsPerSecond)} steps/s`;
+}
+
+function progressBarHtml(run) {
+  const progress = liveProgress(run);
+  if (!progress) return "";
+  const percent = typeof progress.percent === "number" ? progress.percent : 0;
+  const parts = [];
+  if (progress.total_iterations) parts.push(`${progress.iteration}/${progress.total_iterations}`);
+  const eta = formatEta(progress.eta_seconds);
+  if (eta) parts.push(`ETA ${eta}`);
+  const steps = formatSteps(progress.steps_per_second);
+  if (steps) parts.push(steps);
+  return `
+    <div class="run-progress" role="progressbar" aria-valuenow="${escapeHtml(String(Math.round(percent)))}" aria-valuemin="0" aria-valuemax="100">
+      <div class="run-progress-track"><div class="run-progress-fill" style="width:${escapeHtml(String(percent))}%"></div></div>
+      <small class="run-progress-label">${escapeHtml(parts.join(" · "))}</small>
+    </div>
+  `;
+}
+
 function renderRuns() {
   const runs = filteredRuns();
   const badge = $("#run-count-badge");
@@ -1043,6 +1088,7 @@ function renderRuns() {
             : run.terrain_diff_count > 0
               ? `<small><span class="terrain-diff-badge">${escapeHtml(String(run.terrain_diff_count))} terrain override${run.terrain_diff_count !== 1 ? "s" : ""}</span></small>`
               : ""}
+          ${progressBarHtml(run)}
           ${queued ? `<small>waiting for GPU queue</small>` : ""}
           ${moving ? `<small>moving to folder...</small>` : ""}
           ${compacting ? `<small>compacting checkpoints...</small>` : ""}
@@ -1223,6 +1269,16 @@ function renderRunDetails() {
     if (run.params?.task) rows.push(["Task", run.params.task]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
     if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
+    const progress = liveProgress(run);
+    if (progress) {
+      if (progress.total_iterations)
+        rows.push(["Progress", `${progress.iteration}/${progress.total_iterations} (${Math.round(progress.percent || 0)}%)`]);
+      const etaText = formatEta(progress.eta_seconds);
+      if (etaText) rows.push(["ETA", etaText]);
+      const stepsText = formatSteps(progress.steps_per_second);
+      if (stepsText) rows.push(["Throughput", stepsText]);
+      if (typeof progress.mean_reward === "number") rows.push(["Mean reward", progress.mean_reward.toFixed(2)]);
+    }
     const ckptIter = checkpointIteration(run.latest_checkpoint);
     if (ckptIter !== null) rows.push(["Checkpoint", `iter ${ckptIter}`]);
     const onnxText = onnxProcessId ? "exporting" : (run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing"));

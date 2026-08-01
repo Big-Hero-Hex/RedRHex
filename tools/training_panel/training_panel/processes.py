@@ -2007,6 +2007,8 @@ class ProcessRegistry:
         log_poll_interval = 2.0
         convergence_poll_interval = 60.0
         next_convergence_check = 0.0
+        progress_poll_interval = 5.0
+        next_progress_check = 0.0
 
         # Poll while training is running, checking for convergence each cycle.
         while proc.poll() is None:
@@ -2046,6 +2048,17 @@ class ProcessRegistry:
                                     self.history.update_run(run_id, queue_video_on_completion=True)
                 except Exception:
                     pass  # never let convergence logic crash the monitor thread
+            if now >= next_progress_check:
+                next_progress_check = now + progress_poll_interval
+                try:
+                    from .progress import progress_snapshot
+
+                    process_log = self.paths.process_log_dir / f"{run_id}.log"
+                    snapshot = progress_snapshot(tail_file(process_log, max_chars=20000))
+                    if snapshot:
+                        self.history.update_run(run_id, progress=snapshot)
+                except Exception:
+                    pass  # progress display must never kill the monitor thread
             time.sleep(log_poll_interval)
 
         returncode = proc.wait()
