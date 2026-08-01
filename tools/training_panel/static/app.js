@@ -1269,6 +1269,8 @@ function renderRunDetails() {
     if (run.params?.task) rows.push(["Task", run.params.task]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
     if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
+    if (run.params?.seed != null) rows.push(["Seed", run.params.seed]);
+    if (run.git?.short) rows.push(["Commit", `${run.git.short}${run.git.dirty ? " (dirty)" : ""}`]);
     const progress = liveProgress(run);
     if (progress) {
       if (progress.total_iterations)

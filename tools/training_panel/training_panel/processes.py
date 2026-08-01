@@ -29,6 +29,7 @@ from .commands import (
     tensorboard_argv,
     training_argv,
 )
+from .provenance import git_provenance
 from .config import PanelPaths, timestamp_id
 from .deploy import latest_deploy_report
 from .history import HistoryStore, latest_checkpoint, latest_onnx, latest_video, tail_file
@@ -182,6 +183,7 @@ class ProcessRegistry:
             "updated_at": queued_at,
             "queued_at": queued_at,
             "params": params.to_dict(),
+            "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
             "log_dir": None,
@@ -225,6 +227,7 @@ class ProcessRegistry:
             "started_at": started_at,
             "queued_at": (existing_record or {}).get("queued_at"),
             "params": params.to_dict(),
+            "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
             "log_dir": None,
