@@ -26,8 +26,11 @@ def validate_spring_backend(spring_backend: str) -> None:
 def _spring_backend_from_yaml(path: Path) -> str | None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise OSError(f"Could not read spring backend metadata: {path}") from exc
+    values = []
     for line in lines:
         match = _TOP_LEVEL_SPRING_BACKEND_RE.match(line)
         if not match:
@@ -35,8 +38,12 @@ def _spring_backend_from_yaml(path: Path) -> str | None:
         value = match.group(1).split("#", 1)[0].strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
-        validate_spring_backend(value)
-        return value
+        values.append(value)
+    if len(values) > 1:
+        raise ValueError(f"Duplicate top-level spring_backend entries in {path}")
+    if values:
+        validate_spring_backend(values[0])
+        return values[0]
     return None
 
 

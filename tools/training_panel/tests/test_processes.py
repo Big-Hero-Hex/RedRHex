@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tools.training_panel.training_panel.commands import TrainingParams, VideoParams
+from tools.training_panel.training_panel.commands import TrainingParams, VideoParams, resolve_spring_backend
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.history import HistoryStore
 from tools.training_panel.training_panel.processes import (
@@ -677,6 +677,71 @@ class ProcessRegistryTests(unittest.TestCase):
             with patch.object(registry, "_spawn_shell") as spawn:
                 with self.assertRaisesRegex(ValueError, "spring_backend"):
                     registry.start_play("invalid_yaml_run", str(checkpoint), device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_unreadable_yaml_backend_raises_with_path_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            yaml_path = Path(tmp) / "params" / "torsion_spring.yaml"
+            yaml_path.parent.mkdir()
+            yaml_path.write_text("spring_backend: native\n", encoding="utf-8")
+
+            with patch("tools.training_panel.training_panel.commands.Path.read_text", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(OSError, str(yaml_path)):
+                    resolve_spring_backend({"log_dir": str(yaml_path.parent.parent)})
+
+    def test_yaml_backend_path_directory_raises_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "directory_yaml_run"
+            (log_dir / "params" / "torsion_spring.yaml").mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "directory_yaml_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(OSError, "torsion_spring.yaml"):
+                    registry.start_play("directory_yaml_run", str(checkpoint), device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_duplicate_top_level_yaml_backends_raise_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "duplicate_yaml_run"
+            params_dir = log_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text(
+                "spring_backend: native\nspring_backend: unsupported\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "duplicate_yaml_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(ValueError, "Duplicate"):
+                    registry.start_play("duplicate_yaml_run", str(checkpoint), device="cpu")
 
             spawn.assert_not_called()
 
