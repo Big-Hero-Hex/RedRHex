@@ -23,6 +23,8 @@ The root `README.md` must:
 - offer English and Traditional Chinese links for both operator and developer entry paths;
 - avoid volatile commands, versions, configuration values, and maintained procedural detail.
 
+The established English destinations are the [documentation home](../index.en.md), [Operator Documentation](../operators/index.en.md), and [Developer Documentation](../developers/index.en.md); the root router also links their Traditional Chinese equivalents.
+
 <a id="component-router"></a>
 ## Component router
 

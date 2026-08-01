@@ -14,6 +14,13 @@ last_reviewed: 2026-08-01
 
 這些治理文件是人員與代理程式使用的 RedRHex 文件規則唯一真實來源。英文與繁體中文均為同等正式來源。
 
+<a id="documentation-portals"></a>
+## 文件入口
+
+- [文件首頁](../index.zh-TW.md)
+- [操作人員文件](../operators/index.zh-TW.md)
+- [開發人員文件](../developers/index.zh-TW.md)
+
 <a id="governance-documents"></a>
 ## 治理文件
 

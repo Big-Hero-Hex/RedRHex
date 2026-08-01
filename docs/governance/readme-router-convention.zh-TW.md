@@ -23,6 +23,8 @@ last_reviewed: 2026-08-01
 - 分別提供英文與繁體中文的操作人員及開發人員入口連結；
 - 避免容易變動的命令、版本、設定值及持續維護的程序細節。
 
+既定繁體中文目的地為[文件首頁](../index.zh-TW.md)、[操作人員文件](../operators/index.zh-TW.md)及[開發人員文件](../developers/index.zh-TW.md)；根目錄路由也會連結其英文對等頁面。
+
 <a id="component-router"></a>
 ## 元件路由
 

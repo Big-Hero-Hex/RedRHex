@@ -14,6 +14,13 @@ last_reviewed: 2026-08-01
 
 These governance documents are the single source of truth for RedRHex documentation rules for humans and agents. English and Traditional Chinese are equal canonical sources.
 
+<a id="documentation-portals"></a>
+## Documentation portals
+
+- [Documentation home](../index.en.md)
+- [Operator Documentation](../operators/index.en.md)
+- [Developer Documentation](../developers/index.en.md)
+
 <a id="governance-documents"></a>
 ## Governance documents
 
