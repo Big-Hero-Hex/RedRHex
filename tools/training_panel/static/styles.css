@@ -2781,3 +2781,53 @@ pre {
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
 }
+
+/* ── Run card overflow menu (V3.6) ── */
+.run-menu-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.run-menu-trigger {
+  padding: 4px 9px;
+  line-height: 1;
+  font-size: 1rem;
+}
+
+.run-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: none;
+  flex-direction: column;
+  min-width: 170px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.run-menu[data-open="true"] {
+  display: flex;
+}
+
+.run-menu button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  padding: 7px 9px;
+  border-radius: 6px;
+}
+
+.run-menu button:not(:disabled):hover {
+  background: var(--surface-hover);
+  transform: none;
+}
+
+.run-menu button:disabled {
+  color: var(--muted);
+}

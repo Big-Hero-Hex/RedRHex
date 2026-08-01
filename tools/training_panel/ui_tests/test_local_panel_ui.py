@@ -470,3 +470,41 @@ def test_tooltip_is_reachable_by_keyboard(panel, page):
     assert float(click_opacity) == 0, (
         f"tooltip should not appear on mouse click focus (opacity={click_opacity})"
     )
+
+
+def test_stop_controls_are_never_inside_the_menu(panel, page):
+    open_history(page, panel["url"])
+    menu_text = page.evaluate(
+        "Array.from(document.querySelectorAll('.run-menu')).map((m) => m.textContent).join(' ')"
+    )
+    assert "Stop Training" not in menu_text
+    assert "Stop Recording" not in menu_text
+    assert "Cancel Queue" not in menu_text
+
+
+def test_overflow_menu_opens_and_closes_on_escape(panel, page):
+    open_history(page, panel["url"])
+    trigger = page.locator(".run-card .run-menu-trigger").first
+    trigger.click()
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(1)
+    expect(trigger).to_have_attribute("aria-expanded", "true")
+    page.keyboard.press("Escape")
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(0)
+    expect(trigger).to_be_focused()
+
+
+def test_overflow_menu_holds_secondary_actions(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card .run-menu-trigger").first.click()
+    menu = page.locator(".run-menu[data-open='true']")
+    expect(menu).to_contain_text("Resume to Train")
+    expect(menu).to_contain_text("Tweak")
+
+
+def test_open_menu_survives_a_runs_refresh(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card .run-menu-trigger").first.click()
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(1)
+    page.evaluate("loadRuns()")
+    page.wait_for_timeout(500)
+    expect(page.locator(".run-menu[data-open='true']")).to_have_count(1)

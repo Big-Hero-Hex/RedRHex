@@ -16,6 +16,7 @@ const state = {
   lastDebug: null,
   debugTimer: null,
   runsRefreshTimer: null,
+  openMenuRunId: null,
   renameDirty: false,
   renameDraftRunId: null,
   // Search / filter / sort (Module 5)
@@ -1249,6 +1250,45 @@ function progressBarHtml(run) {
   `;
 }
 
+function closeRunMenu({ restoreFocus = false } = {}) {
+  const runId = state.openMenuRunId;
+  state.openMenuRunId = null;
+  document.querySelectorAll(".run-menu[data-open='true']").forEach((menu) => {
+    menu.dataset.open = "false";
+  });
+  document.querySelectorAll(".run-menu-trigger[aria-expanded='true']").forEach((trigger) => {
+    trigger.setAttribute("aria-expanded", "false");
+  });
+  if (restoreFocus && runId) {
+    const trigger = document.querySelector(`.run-menu-trigger[data-run-id="${CSS.escape(runId)}"]`);
+    if (trigger) trigger.focus();
+  }
+}
+
+function toggleRunMenu(runId) {
+  const alreadyOpen = state.openMenuRunId === runId;
+  closeRunMenu();
+  if (alreadyOpen) return;
+  state.openMenuRunId = runId;
+  syncRunMenuState();
+  const menu = document.querySelector(`.run-menu[data-run-id="${CSS.escape(runId)}"]`);
+  const firstItem = menu?.querySelector("button[role='menuitem']:not([disabled])");
+  if (firstItem) firstItem.focus();
+}
+
+// The runs list re-renders on every poll; without this the open menu would vanish mid-click.
+function syncRunMenuState() {
+  if (!state.openMenuRunId) return;
+  const menu = document.querySelector(`.run-menu[data-run-id="${CSS.escape(state.openMenuRunId)}"]`);
+  const trigger = document.querySelector(`.run-menu-trigger[data-run-id="${CSS.escape(state.openMenuRunId)}"]`);
+  if (!menu || !trigger) {
+    state.openMenuRunId = null;  // the run left the list
+    return;
+  }
+  menu.dataset.open = "true";
+  trigger.setAttribute("aria-expanded", "true");
+}
+
 function renderRuns() {
   const runs = filteredRuns();
   const badge = $("#run-count-badge");
@@ -1318,8 +1358,6 @@ function renderRuns() {
           <div class="run-actions">
             <button type="button" data-action="tensorboard" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canTensorboard)} data-tooltip="Open metrics">TensorBoard</button>
             <button type="button" data-action="${playAction}" data-run-id="${escapeHtml(run.id)}" ${playProcessAttr} ${runButtonDisabled(busy || playDisabled)} data-tooltip="${playProcessId ? "Stop Isaac playback" : "Play checkpoint"}">${escapeHtml(playLabel)}</button>
-            <button type="button" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)} data-tooltip="Resume training from checkpoint">Resume to Train</button>
-            <button type="button" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)} data-tooltip="Copy this run into an editable reward tweak draft">Tweak</button>
             <button type="button" data-action="console" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting)} data-tooltip="Show Process Console">Console</button>
             ${queued
               ? `<button type="button" data-action="cancel-queue" data-run-id="${escapeHtml(run.id)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Cancel this queued training run">Cancel Queue</button>`
@@ -1330,9 +1368,18 @@ function renderRuns() {
             ${trainingProcessId
               ? `<button type="button" data-action="stop-process" data-run-id="${escapeHtml(run.id)}" data-process-id="${escapeHtml(trainingProcessId)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Stop the active training process">Stop Training</button>`
               : ""}
-            ${state.selectedRun && state.selectedRun.id !== run.id
-              ? `<button type="button" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)} data-tooltip="Compare with selected">Compare</button>`
-              : ""}
+            <div class="run-menu-wrap">
+              <button type="button" class="run-menu-trigger" data-run-id="${escapeHtml(run.id)}"
+                aria-haspopup="menu" aria-expanded="false"
+                data-tooltip="More actions for this run">⋮</button>
+              <div class="run-menu" role="menu" data-run-id="${escapeHtml(run.id)}" data-open="false">
+                <button type="button" role="menuitem" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)}>Resume to Train</button>
+                <button type="button" role="menuitem" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)}>Tweak</button>
+                ${state.selectedRun && state.selectedRun.id !== run.id
+                  ? `<button type="button" role="menuitem" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)}>Compare</button>`
+                  : ""}
+              </div>
+            </div>
           </div>
         </article>
       `;
@@ -1346,6 +1393,12 @@ function renderRuns() {
         toggleRunSelection(checkbox.dataset.runId, checkbox.checked);
         return;
       }
+      const menuTrigger = event.target.closest(".run-menu-trigger");
+      if (menuTrigger) {
+        event.stopPropagation();
+        toggleRunMenu(menuTrigger.dataset.runId);
+        return;
+      }
       const button = event.target.closest("button[data-action]");
       if (button) {
         event.stopPropagation();
@@ -1356,6 +1409,7 @@ function renderRuns() {
     });
   });
   updateBulkToolbar();
+  syncRunMenuState();
 }
 
 function videoUrl(run) {
@@ -4803,6 +4857,16 @@ document.querySelectorAll("#convergence-presets .segment-button").forEach((btn) 
     const hint = $("#convergence-preset-hint");
     if (hint) hint.textContent = CONVERGENCE_PRESET_HINTS[btn.dataset.preset] || "";
   });
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.openMenuRunId) closeRunMenu({ restoreFocus: true });
+});
+
+document.addEventListener("click", (event) => {
+  if (!state.openMenuRunId) return;
+  if (event.target.closest(".run-menu-wrap")) return;
+  closeRunMenu();
 });
 
 window.addEventListener("hashchange", () => {
