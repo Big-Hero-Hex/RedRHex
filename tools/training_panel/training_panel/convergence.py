@@ -14,7 +14,9 @@ CONVERGENCE_MAX_EVENT_BYTES = 128 * 1024 * 1024
 CONVERGENCE_MAX_SCALARS = 2000
 
 _ALLOWED_FIELDS = {"enabled", "preset", "window_iterations", "min_improvement_pct",
-                   "primary_tag", "min_iterations", "cooldown_minutes", "auto_record_video"}
+                   "primary_tag", "min_iterations", "cooldown_minutes", "auto_record_video",
+                   "divergence_enabled", "divergence_action", "divergence_patience_iterations",
+                   "divergence_collapse_pct"}
 
 
 @dataclass
@@ -27,6 +29,10 @@ class ConvergenceConfig:
     min_iterations: int = 100
     cooldown_minutes: int = 60
     auto_record_video: bool = True
+    divergence_enabled: bool = True
+    divergence_action: str = "notify"  # "notify" | "stop"
+    divergence_patience_iterations: int = 100
+    divergence_collapse_pct: float = 40.0
 
 
 @dataclass
@@ -38,6 +44,16 @@ class ConvergenceResult:
     improvement_pct: float = 0.0
     tag: str = "Train/mean_reward"
     reason: str = ""
+
+
+@dataclass
+class DivergenceResult:
+    detected: bool
+    iteration: int = 0
+    kind: str = ""  # "nan" | "collapse"
+    value: float = 0.0
+    reason: str = ""
+    tag: str = "Train/mean_reward"
 
 
 class ConvergenceChecker:
@@ -114,6 +130,59 @@ class ConvergenceChecker:
             reason=reason,
         )
 
+    def check_divergence(self, log_dir: Path, config: ConvergenceConfig) -> DivergenceResult:
+        """Detect a dead or collapsed run. Safe — never raises.
+
+        Two signals, deliberately conservative because the action may be to
+        kill a run: a NaN/inf latest value (training is already dead), or a
+        recent window whose maximum has stayed below a fraction of the run's
+        all-time peak for at least the patience window.
+        """
+        import math
+
+        if not config.divergence_enabled:
+            return DivergenceResult(detected=False, tag=config.primary_tag, reason="disabled")
+
+        scalars = self.read_scalars(log_dir, config.primary_tag)
+        if not scalars:
+            return DivergenceResult(detected=False, tag=config.primary_tag, reason="no data for tag")
+
+        latest_step, latest_value = scalars[-1]
+        if math.isnan(latest_value) or math.isinf(latest_value):
+            return DivergenceResult(
+                detected=True, iteration=latest_step, kind="nan", value=latest_value,
+                tag=config.primary_tag,
+                reason=f"{config.primary_tag} is {latest_value} at iteration {latest_step}",
+            )
+
+        patience = max(config.divergence_patience_iterations, 1)
+        if len(scalars) < patience * 2:
+            return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
+                                    reason=f"only {len(scalars)} iterations, need {patience * 2}")
+
+        finite = [v for _, v in scalars if not (math.isnan(v) or math.isinf(v))]
+        if not finite:
+            return DivergenceResult(detected=False, tag=config.primary_tag, reason="no finite values")
+
+        peak = max(finite)
+        if peak <= 0:
+            # An all-negative reward curve has no meaningful "fraction of peak".
+            return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
+                                    reason="peak is not positive — collapse ratio undefined")
+
+        window = [v for _, v in scalars[-patience:]]
+        window_max = max(window)
+        threshold = peak * config.divergence_collapse_pct / 100.0
+        if window_max < threshold:
+            return DivergenceResult(
+                detected=True, iteration=latest_step, kind="collapse", value=window_max,
+                tag=config.primary_tag,
+                reason=(f"{config.primary_tag} max {window_max:.3f} over last {patience} iters is "
+                        f"below {config.divergence_collapse_pct:.0f}% of peak {peak:.3f}"),
+            )
+        return DivergenceResult(detected=False, iteration=latest_step, tag=config.primary_tag,
+                                reason="healthy")
+
 
 def _apply_preset(config: ConvergenceConfig) -> ConvergenceConfig:
     """If preset is a named preset, overwrite window/threshold with preset values."""
@@ -132,6 +201,8 @@ def load_convergence_config(config_file: Path) -> ConvergenceConfig:
         cfg = ConvergenceConfig(**safe)
     except Exception:
         cfg = ConvergenceConfig()
+    if cfg.divergence_action not in {"notify", "stop"}:
+        cfg.divergence_action = "notify"
     return _apply_preset(cfg)
 
 
@@ -168,6 +239,14 @@ def apply_settings(updates: dict, config_file: Path) -> ConvergenceConfig:
             cfg.min_iterations = max(1, int(value))
         elif key == "cooldown_minutes":
             cfg.cooldown_minutes = max(0, int(value))
+        elif key == "divergence_enabled":
+            cfg.divergence_enabled = bool(value)
+        elif key == "divergence_action":
+            cfg.divergence_action = "stop" if str(value) == "stop" else "notify"
+        elif key == "divergence_patience_iterations":
+            cfg.divergence_patience_iterations = max(10, int(value))
+        elif key == "divergence_collapse_pct":
+            cfg.divergence_collapse_pct = min(max(float(value), 1.0), 99.0)
     _apply_preset(cfg)
     save_convergence_config(cfg, config_file)
     return cfg

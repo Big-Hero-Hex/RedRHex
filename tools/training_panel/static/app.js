@@ -1366,6 +1366,8 @@ function renderRunDetails() {
       rows.push(["Terrain preset", run.terrain_preset_id]);
     if (run.convergence_detected)
       rows.push(["Converged", `iter ${run.convergence_iteration} (Δ ${run.convergence_improvement_pct?.toFixed(1)}%)`]);
+    if (run.divergence_detected)
+      rows.push(["Diverged", `${run.divergence_kind || "unknown"} at iter ${run.divergence_iteration}`]);
     infoGrid.innerHTML = rows
       .map(([k, v]) => `<span class="info-key">${escapeHtml(k)}</span><span class="info-val">${escapeHtml(String(v))}</span>`)
       .join("");
@@ -4337,6 +4339,13 @@ function renderConvergenceCard(config, presets) {
   const autoRecEl = $("#convergence-auto-record");
   if (autoRecEl) autoRecEl.checked = Boolean(config.auto_record_video);
 
+  const divEnabledEl = $("#divergence-enabled");
+  if (divEnabledEl) divEnabledEl.checked = config.divergence_enabled !== false;
+  const divStopEl = $("#divergence-auto-stop");
+  if (divStopEl) divStopEl.checked = config.divergence_action === "stop";
+  const divPatienceEl = $("#divergence-patience");
+  if (divPatienceEl) divPatienceEl.value = config.divergence_patience_iterations ?? 100;
+
   const badge = $("#convergence-badge");
   if (badge) {
     if (!config.enabled) {
@@ -4359,6 +4368,9 @@ async function saveConvergenceSettings() {
     if (!Number.isNaN(w)) updates.window_iterations = w;
     if (!Number.isNaN(t)) updates.min_improvement_pct = t;
   }
+  updates.divergence_enabled = Boolean($("#divergence-enabled")?.checked);
+  updates.divergence_action = $("#divergence-auto-stop")?.checked ? "stop" : "notify";
+  updates.divergence_patience_iterations = parseInt($("#divergence-patience")?.value || "100", 10);
   const data = await api("/api/convergence/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

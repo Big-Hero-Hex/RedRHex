@@ -2006,6 +2006,7 @@ class ProcessRegistry:
         checker = ConvergenceChecker()
         convergence_detected = False
         convergence_notified_at: float | None = None
+        divergence_detected = False
         log_dir: str | None = None
         log_poll_interval = 2.0
         convergence_poll_interval = 60.0
@@ -2051,6 +2052,29 @@ class ProcessRegistry:
                                     self.history.update_run(run_id, queue_video_on_completion=True)
                 except Exception:
                     pass  # never let convergence logic crash the monitor thread
+            if log_dir and not divergence_detected and should_check_convergence:
+                try:
+                    cfg = load_convergence_config(self.paths.convergence_config_file)
+                    divergence = checker.check_divergence(Path(log_dir), cfg)
+                    if divergence.detected:
+                        divergence_detected = True
+                        self.history.update_run(
+                            run_id,
+                            divergence_detected=True,
+                            divergence_iteration=divergence.iteration,
+                            divergence_kind=divergence.kind,
+                            divergence_reason=divergence.reason,
+                        )
+                        try:
+                            from .notifications import send_divergence_notification
+
+                            send_divergence_notification(self.history.get_run(run_id) or {}, divergence)
+                        except Exception:
+                            pass  # notification failure must not affect the run
+                        if cfg.divergence_action == "stop":
+                            self.stop(run_id)
+                except Exception:
+                    pass  # never let divergence logic crash the monitor thread
             if now >= next_progress_check:
                 next_progress_check = now + progress_poll_interval
                 try:
