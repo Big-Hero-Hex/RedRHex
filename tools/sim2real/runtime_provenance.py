@@ -37,6 +37,7 @@ _BEHAVIOR_INPUTS = (
     Path("tools/sim2real/isaac_runner.py"),
     Path("tools/sim2real/metrics.py"),
     Path("tools/sim2real/physics_profile.py"),
+    Path("tools/sim2real/profile_measurements.py"),
     Path("tools/sim2real/repo_binding.py"),
     Path("tools/sim2real/runtime_provenance.py"),
     Path("tools/sim2real/scenarios.py"),

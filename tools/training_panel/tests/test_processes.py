@@ -593,6 +593,29 @@ class ProcessRegistryTests(unittest.TestCase):
 
             self.assertEqual(registry._log_dir_from_process_log("forward_fast"), str(log_dir))
 
+    def test_explicit_experiment_root_rejects_symlinked_candidate_outside_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            outside_log = root / "outside" / f"{timestamp}_forward_fast_reform_v1"
+            outside_log.mkdir(parents=True)
+            experiment_root.mkdir(parents=True)
+            (experiment_root / outside_log.name).symlink_to(outside_log, target_is_directory=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "forward_fast", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("forward_fast"))
+
     def test_out_of_tree_experiment_root_is_not_used_or_legacy_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -64,3 +64,24 @@ def test_runtime_bundle_hash_tracks_dirty_behavior_defining_modules(
     )
     assert second["runtime_bundle_sha256"] != third["runtime_bundle_sha256"]
     assert second["torsion_spring_model_sha256"] != third["torsion_spring_model_sha256"]
+
+
+def test_runtime_bundle_hash_tracks_profile_measurement_changes(tmp_path: Path) -> None:
+    _repository_fixture(tmp_path)
+    profile_measurements = tmp_path / "tools/sim2real/profile_measurements.py"
+    profile_measurements.parent.mkdir(parents=True, exist_ok=True)
+    profile_measurements.write_text("calibration = 1\n", encoding="utf-8")
+    toolchain = lambda: {
+        "isaaclab_version": "0.54.2",
+        "isaacsim_version": "5.1.0-rc.19+release.26219.9c81211b.gl",
+    }
+
+    first = production_runtime_provenance(
+        tmp_path, run_git=_git, toolchain_provider=toolchain
+    )
+    profile_measurements.write_text("calibration = 2\n", encoding="utf-8")
+    second = production_runtime_provenance(
+        tmp_path, run_git=_git, toolchain_provider=toolchain
+    )
+
+    assert first["runtime_bundle_sha256"] != second["runtime_bundle_sha256"]

@@ -7,6 +7,7 @@ import signal
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -1620,9 +1621,22 @@ class ProcessRegistry:
                 root_path = Path(root_matches[-1].group(1).strip()).resolve()
                 if not root_path.is_relative_to(rsl_rl_root):
                     return None, True
-                candidates = [path for path in root_path.glob(f"{name}*") if path.is_dir()]
+                candidates = []
+                for path in root_path.glob(f"{name}*"):
+                    try:
+                        candidate = path.resolve()
+                        candidate_stat = candidate.stat()
+                    except OSError:
+                        continue
+                    if (
+                        not stat.S_ISDIR(candidate_stat.st_mode)
+                        or not candidate.is_relative_to(rsl_rl_root)
+                        or not candidate.is_relative_to(root_path)
+                    ):
+                        continue
+                    candidates.append((candidate, candidate_stat.st_mtime))
                 if candidates:
-                    return str(max(candidates, key=lambda path: path.stat().st_mtime)), True
+                    return str(max(candidates, key=lambda item: item[1])[0]), True
                 return None, True
             candidates = [path for path in self.paths.rsl_rl_log_root.glob(f"{name}*") if path.is_dir()]
             if candidates:
