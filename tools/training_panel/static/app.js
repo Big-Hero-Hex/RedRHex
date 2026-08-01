@@ -3,6 +3,8 @@ const RUNS_POLL_ACTIVE_MS = 10000;
 const RUNS_POLL_IDLE_MS = 30000;
 
 const state = {
+  applyingRoute: false,
+  currentView: "train",
   selectedRun: null,
   runs: [],
   activeProcessMap: {},
@@ -70,6 +72,35 @@ const state = {
   curvesInFlight: null,
   curvesTimer: null,
 };
+
+const ROUTE_VIEWS = ["train", "rewards", "terrain", "history", "deploy", "convergence", "activity", "access"];
+
+function writeHashRoute() {
+  if (state.applyingRoute) return;
+  const view = state.currentView || "train";
+  const runId = view === "history" && state.selectedRun ? state.selectedRun.id : "";
+  const next = runId ? `#/history/${encodeURIComponent(runId)}` : `#/${view}`;
+  if (location.hash !== next) history.replaceState(null, "", next);
+}
+
+function parseHashRoute() {
+  const raw = (location.hash || "").replace(/^#\/?/, "");
+  if (!raw) return { view: "train", runId: "" };
+  const [view, encodedRun] = raw.split("/");
+  if (!ROUTE_VIEWS.includes(view)) return { view: "train", runId: "" };
+  return { view, runId: encodedRun ? decodeURIComponent(encodedRun) : "" };
+}
+
+async function applyHashRoute() {
+  const route = parseHashRoute();
+  state.applyingRoute = true;
+  try {
+    setView(route.view);
+    if (route.runId && findRun(route.runId)) await selectRun(route.runId);
+  } finally {
+    state.applyingRoute = false;
+  }
+}
 
 const $ = (selector) => document.querySelector(selector);
 const THEME_KEY = "redrhex-training-panel-theme";
@@ -401,6 +432,7 @@ function confirmAction({
 }
 
 function setView(name) {
+  state.currentView = name;
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === name);
   });
@@ -423,6 +455,7 @@ function setView(name) {
     syncDeploySelection();
     loadDeployForSelectedRun().catch(handleActionError);
   }
+  writeHashRoute();
 }
 
 function rewardPresetsForRender() {
@@ -2064,6 +2097,7 @@ async function selectRun(runId) {
     state.renameDraftRunId = null;
   }
   state.selectedRun = run;
+  writeHashRoute();
   markHistoryRead(runId);
   renderRunDetails();
   syncRunCurves();
@@ -4766,9 +4800,15 @@ document.querySelectorAll("#convergence-presets .segment-button").forEach((btn) 
   });
 });
 
+window.addEventListener("hashchange", () => {
+  applyHashRoute().catch(handleActionError);
+});
+
 loadNotificationState();
 renderNotificationBadges();
 renderRunDetails();
 updateBulkToolbar();
 startCurvesPolling();
-refreshAll().catch((error) => setStatus(error.message));
+refreshAll()
+  .catch((error) => setStatus(error.message))
+  .then(() => applyHashRoute().catch(handleActionError));

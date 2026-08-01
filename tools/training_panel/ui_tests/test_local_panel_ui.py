@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -377,3 +378,33 @@ def test_repeated_message_collapses_with_counter(panel, page):
     page.evaluate("setStatus('Same message.'); setStatus('Same message.'); setStatus('Same message.')")
     expect(page.locator("#panel-status .toast")).to_have_count(1)
     expect(page.locator("#panel-status .toast-count")).to_contain_text("3")
+
+
+def test_view_switch_updates_hash(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.click('.nav-button[data-view="terrain"]')
+    expect(page).to_have_url(re.compile(r"#/terrain$"))
+
+
+def test_run_selection_updates_hash_and_deep_link_restores(panel, page):
+    open_history(page, panel["url"])
+    page.click(".run-card")
+    page.wait_for_function("location.hash.startsWith('#/history/')")
+    deep_link = page.evaluate("location.href")
+
+    page.goto(deep_link)
+    page.wait_for_selector("#history.view.active")
+    expect(page.locator("#details-subtitle")).not_to_contain_text("Select a run")
+
+
+def test_unknown_hash_falls_back_to_train(panel, page):
+    page.goto(f"{panel['url']}#/not-a-view")
+    page.wait_for_selector("#train.view.active")
+    expect(page.locator("#view-title")).to_contain_text("Train")
+
+
+def test_dead_run_id_in_hash_opens_history_without_error(panel, page):
+    page.goto(f"{panel['url']}#/history/run_that_does_not_exist")
+    page.wait_for_selector("#history.view.active")
+    expect(page.locator("#panel-status .toast")).to_have_count(0)
