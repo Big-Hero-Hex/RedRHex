@@ -1609,17 +1609,21 @@ class ProcessRegistry:
 
     def _log_dir_from_process_log_text(self, text: str) -> tuple[str | None, bool]:
         experiment_roots = list(
-            re.finditer(r"\[INFO\]\s+Logging experiment in directory:\s*(\S+)", text)
+            re.finditer(r"\[INFO\][ \t]+Logging experiment in directory:[ \t]*([^\r\n]+)", text)
         )
         exact_names = list(re.finditer(r"Exact experiment name requested from command line:\s*(\S+)", text))
+        rsl_rl_root = (self.paths.repo_root / "logs" / "rsl_rl").resolve()
         for name_match in reversed(exact_names):
             name = name_match.group(1)
             root_matches = [root_match for root_match in experiment_roots if root_match.start() < name_match.start()]
-            for root_match in reversed(root_matches):
-                root_path = Path(root_match.group(1))
+            if root_matches:
+                root_path = Path(root_matches[-1].group(1).strip()).resolve()
+                if not root_path.is_relative_to(rsl_rl_root):
+                    return None, True
                 candidates = [path for path in root_path.glob(f"{name}*") if path.is_dir()]
                 if candidates:
                     return str(max(candidates, key=lambda path: path.stat().st_mtime)), True
+                return None, True
             candidates = [path for path in self.paths.rsl_rl_log_root.glob(f"{name}*") if path.is_dir()]
             if candidates:
                 return str(max(candidates, key=lambda path: path.stat().st_mtime)), True
