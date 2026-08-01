@@ -66,6 +66,9 @@ const state = {
   comparisonMode: false,
   // Training curves (V3.5)
   curvesRunId: null,
+  curvesLoadedAt: 0,
+  curvesInFlight: null,
+  curvesTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -801,9 +804,17 @@ function runParamSummary(run) {
   return parts.join(" · ");
 }
 
+// End of a run's elapsed window. A running run has no completion time, so it
+// falls back to the progress heartbeat's own timestamp — the record-level
+// `updated_at` is deliberately not bumped by progress writes (it arbitrates
+// mother/child metadata sync), so it would freeze the displayed duration.
+function runEndTime(run) {
+  return run.completed_at || run.finished_at || run.progress?.updated_at || run.updated_at;
+}
+
 function runTimeSummary(run) {
   const relative = formatRelativeTime(run.created_at);
-  const duration = formatDuration(run.started_at || run.created_at, run.completed_at || run.finished_at || run.updated_at);
+  const duration = formatDuration(run.started_at || run.created_at, runEndTime(run));
   if (relative && duration) return `${relative} · duration ${duration}`;
   return relative || duration || "";
 }
@@ -1054,18 +1065,52 @@ function renderRunCurves(data) {
   block.hidden = false;
 }
 
+// Scalar requests re-parse the whole TensorBoard event directory server-side and
+// never hit the cache while a run is live, so they are driven by their own timer
+// — never by a render pass — and only one may be in flight per run at a time.
+const CURVES_REFRESH_MS = 30000;
+
 async function loadRunCurves(runId) {
   if (!runId) {
+    state.curvesRunId = null;
+    state.curvesLoadedAt = 0;
     renderRunCurves(null);
     return;
   }
+  if (state.curvesInFlight === runId) return;  // request already outstanding for this run
+  state.curvesInFlight = runId;
+  state.curvesRunId = runId;
   try {
     const data = await api(`/api/runs/${encodeURIComponent(runId)}/scalars?points=200`);
     if (state.selectedRun?.id !== runId) return;  // selection changed while loading
+    state.curvesLoadedAt = Date.now();
     renderRunCurves(data);
   } catch (error) {
-    renderRunCurves(null);  // curves are informational — never surface an error banner
+    state.curvesLoadedAt = Date.now();  // back off; the timer retries live runs
+    if (state.selectedRun?.id === runId) renderRunCurves(null);  // informational — no error banner
+  } finally {
+    if (state.curvesInFlight === runId) state.curvesInFlight = null;
   }
+}
+
+// Decides whether the selected run's curves need (re)loading. Safe to call often.
+function syncRunCurves() {
+  const run = state.selectedRun;
+  if (!run) {
+    if (state.curvesRunId !== null) loadRunCurves(null);
+    return;
+  }
+  if (state.curvesRunId !== run.id) {
+    loadRunCurves(run.id);
+    return;
+  }
+  const stale = !state.curvesLoadedAt || Date.now() - state.curvesLoadedAt > CURVES_REFRESH_MS;
+  if (liveProgress(run) && stale) loadRunCurves(run.id);
+}
+
+function startCurvesPolling() {
+  if (state.curvesTimer) return;
+  state.curvesTimer = setInterval(syncRunCurves, CURVES_REFRESH_MS);
 }
 
 function formatEta(seconds) {
@@ -1339,7 +1384,7 @@ function renderRunDetails() {
   if (infoBlock && infoGrid && run) {
     const rows = [];
     if (run.created_at) rows.push(["Created", formatRelativeTime(run.created_at)]);
-    const dur = formatDuration(run.started_at || run.created_at, run.completed_at || run.finished_at || run.updated_at);
+    const dur = formatDuration(run.started_at || run.created_at, runEndTime(run));
     if (dur) rows.push(["Duration", dur]);
     if (run.params?.task) rows.push(["Task", run.params.task]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
@@ -1427,12 +1472,10 @@ function renderRunDetails() {
   $("#copy-command").disabled = !hasCommand;
   $("#open-process-log-folder").disabled = !state.lastDebug || !(state.lastDebug.process_log || state.lastDebug.log_file);
 
-  if (!run) {
-    renderRunCurves(null);
-  } else if (state.curvesRunId !== run.id || liveProgress(run)) {
-    state.curvesRunId = run.id;
-    loadRunCurves(run.id);
-  }
+  // Curves are fetched by syncRunCurves() on selection change and on their own
+  // timer. renderRunDetails() stays synchronous and side-effect-free — it is
+  // called from ~14 places, including three times per debug poll.
+  if (!run) renderRunCurves(null);
   renderVideoPanel(run);
 }
 
@@ -1937,6 +1980,7 @@ async function loadRuns() {
   }
   renderRuns();
   renderRunDetails();
+  syncRunCurves();
   renderGpuLockStatus();
   renderFolderSidebar();
   renderFolderOptions();
@@ -1958,6 +2002,7 @@ async function selectRun(runId) {
   state.selectedRun = run;
   markHistoryRead(runId);
   renderRunDetails();
+  syncRunCurves();
   renderRuns();
   // Hide reward panel until loaded
   const rewardPanel = $("#reward-config-panel");
@@ -2236,6 +2281,8 @@ function clearRunDetailState({ render = true } = {}) {
   state.lastDebug = null;
   state.renameDirty = false;
   state.renameDraftRunId = null;
+  state.curvesRunId = null;
+  state.curvesLoadedAt = 0;
   stopDebugPolling();
   const notesEditor = $("#notes-editor");
   if (notesEditor) notesEditor.value = "";
@@ -4660,4 +4707,5 @@ loadNotificationState();
 renderNotificationBadges();
 renderRunDetails();
 updateBulkToolbar();
+startCurvesPolling();
 refreshAll().catch((error) => setStatus(error.message));
