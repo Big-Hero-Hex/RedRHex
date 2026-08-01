@@ -18,13 +18,14 @@ ALLOWED_IMPACTS = (
     "release",
     "experiment",
 )
-HTML_COMMENT = re.compile(r"<!--.*?-->")
+HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 
 
 def validate_declaration(body: str) -> list[str]:
     """Return deterministic human-readable declaration errors."""
 
     errors: list[str] = []
+    body = HTML_COMMENT.sub("", body)
     impact_values = [
         line.removeprefix("Docs impact:").strip()
         for line in body.splitlines()
@@ -88,7 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _report_failure(["unable to read GitHub event JSON"])
     try:
         event = json.loads(event_text)
-    except json.JSONDecodeError:
+    except ValueError:
         return _report_failure(["GitHub event JSON is malformed"])
     pull_request = event.get("pull_request") if isinstance(event, dict) else None
     if not isinstance(pull_request, dict):

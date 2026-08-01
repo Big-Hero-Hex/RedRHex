@@ -129,6 +129,39 @@ class PullRequestDeclarationTests(unittest.TestCase):
             [],
         )
 
+    def test_multiline_and_unclosed_html_comments_cannot_hide_declarations(
+        self,
+    ) -> None:
+        from tools.documentation.pr_declaration import validate_declaration
+
+        cases = (
+            (
+                "Docs impact: none\nDocs reason: <!--\nonly comment\n-->\n",
+                ["Docs reason must contain non-whitespace prose"],
+            ),
+            (
+                "Docs impact: none\nDocs reason: <!-- placeholder\n",
+                ["Docs reason must contain non-whitespace prose"],
+            ),
+            (
+                "<!--\nDocs impact: none\n"
+                "Docs reason: Hidden declaration.\n-->\n",
+                ["missing Docs impact field", "missing Docs reason field"],
+            ),
+        )
+        for body, expected in cases:
+            with self.subTest(body=body):
+                self.assertEqual(validate_declaration(body), expected)
+
+        self.assertEqual(
+            validate_declaration(
+                "<!-- introductory context\ninside a complete comment -->\n"
+                "Docs impact: shared\n"
+                "Docs reason: <!-- hidden\ncontext --> Visible explanation.\n"
+            ),
+            [],
+        )
+
     def test_rejects_the_required_explanation_placeholder(self) -> None:
         from tools.documentation.pr_declaration import validate_declaration
 
@@ -237,6 +270,41 @@ class PullRequestDeclarationCliTests(unittest.TestCase):
         )
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_html_comment_bypasses_fail_cleanly_without_tracebacks(self) -> None:
+        cases = (
+            (
+                "Docs impact: none\nDocs reason: <!--\nonly comment\n-->\n",
+                "Docs reason must contain non-whitespace prose\n"
+                "documentation impact declaration failed (1 errors)\n",
+            ),
+            (
+                "Docs impact: none\nDocs reason: <!-- placeholder\n",
+                "Docs reason must contain non-whitespace prose\n"
+                "documentation impact declaration failed (1 errors)\n",
+            ),
+            (
+                "<!--\nDocs impact: none\n"
+                "Docs reason: Hidden declaration.\n-->\n",
+                "missing Docs impact field\n"
+                "missing Docs reason field\n"
+                "documentation impact declaration failed (2 errors)\n",
+            ),
+        )
+        for body, expected_stderr in cases:
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as directory:
+                event_path = Path(directory) / "event.json"
+                event_path.write_text(
+                    json.dumps({"pull_request": {"body": body}}),
+                    encoding="utf-8",
+                )
+
+                result = self.run_cli("--event-json", str(event_path))
+
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, expected_stderr)
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_missing_event_file_fails_cleanly_without_a_traceback(self) -> None:
         result = self.run_cli(
             "--event-json",
@@ -272,6 +340,25 @@ class PullRequestDeclarationCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             event_path = Path(directory) / "event.json"
             event_path.write_text("{invalid", encoding="utf-8")
+
+            result = self.run_cli("--event-json", str(event_path))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(
+            result.stderr,
+            "GitHub event JSON is malformed\n"
+            "documentation impact declaration failed (1 errors)\n",
+        )
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_oversized_numeric_body_uses_json_operational_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(
+                '{"pull_request":{"body":' + "9" * 5000 + "}}",
+                encoding="utf-8",
+            )
 
             result = self.run_cli("--event-json", str(event_path))
 
