@@ -6,7 +6,7 @@ audience: developer
 type: plan
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-02
 ---
 
 <a id="objective"></a>
@@ -53,8 +53,8 @@ last_reviewed: 2026-08-01
 <a id="phase-3-validator"></a>
 ## 階段 3 — 以 TDD 建立驗證器、hooks 與 CI
 
-- [ ] 每項驗證器行為都先撰寫失敗單元測試，再實作功能。
-- [ ] 完全依照下列介面實作：
+- [x] 每項驗證器行為都先撰寫失敗單元測試，再實作功能。
+- [x] 完全依照下列介面實作：
 
 ```text
 python -m tools.documentation validate --all
@@ -64,14 +64,14 @@ python -m tools.documentation inventory --format json
 python -m tools.documentation stage-site --output DIR
 ```
 
-- [ ] 成功時回傳結束碼 `0`，驗證失敗時回傳 `1`。
-- [ ] 驗證檔名、必要 frontmatter 與列舉值、ID 唯一性、生命週期與位置相容性、雙語配對是否存在及中繼資料是否一致、連結與錨點，以及變更配對一致性。
-- [ ] 加入適合遷移、擁有權、過時情況及 CI 證據使用的清冊報告。
-- [ ] Pre-commit 執行 `validate --staged`，CI 執行 `validate --all`。
-- [ ] 要求結構化 PR 欄位 `Docs impact: none | operator | developer | shared | release | experiment` 與 `Docs reason: <required explanation>`。
-- [ ] 強制宣告存在且格式正確，但不從原始碼路徑推論語意影響。
+- [x] 成功時回傳結束碼 `0`，驗證失敗時回傳 `1`。
+- [x] 驗證檔名、必要 frontmatter 與列舉值、ID 唯一性、生命週期與位置相容性、雙語配對是否存在及中繼資料是否一致、連結與錨點，以及變更配對一致性。
+- [x] 加入適合遷移、擁有權、過時情況及 CI 證據使用的清冊報告。
+- [x] Pre-commit 執行 `validate --staged`，CI 執行 `validate --all`。
+- [x] 要求結構化 PR 欄位 `Docs impact: none | operator | developer | shared | release | experiment` 與 `Docs reason: <required explanation>`。
+- [x] 強制宣告存在且格式正確，但不從原始碼路徑推論語意影響。
 
-**階段驗收：** 測試證明錯誤檔名、缺少或無效 frontmatter、重複 ID、生命週期與位置不相容、缺少配對、配對中繼資料偏移、只改一種語言、損壞連結、缺少錨點及錨點不一致時均會失敗；所有正向 fixture 通過；CLI 結束碼符合契約；清冊輸出可由機器讀取；pre-commit 與 CI 關卡快速且均衡，不重複執行高成本且無關的測試套件。
+- [x] **階段驗收：** 測試證明錯誤檔名、缺少或無效 frontmatter、重複 ID、生命週期與位置不相容、缺少配對、配對中繼資料偏移、只改一種語言、損壞連結、缺少錨點及錨點不一致時均會失敗；所有正向 fixture 通過；CLI 結束碼符合契約；清冊輸出可由機器讀取；pre-commit 與 CI 關卡快速且均衡，不重複執行高成本且無關的測試套件。
 
 <a id="phase-4-central-migration"></a>
 ## 階段 4 — 中央文件遷移

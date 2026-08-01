@@ -6,7 +6,7 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-02
 ---
 
 <a id="change-triggers"></a>
@@ -45,7 +45,7 @@ Docs reason: <required explanation>
 <a id="stable-tool-interface"></a>
 ## 穩定工具介面
 
-階段 3 將實作下列穩定介面。這些命令是未來工具的契約，在目前檢查點尚不可用：
+階段 3 已實作下列穩定介面。這些命令是穩定的文件工具契約：
 
 ```text
 python -m tools.documentation validate --all
@@ -55,4 +55,4 @@ python -m tools.documentation inventory --format json
 python -m tools.documentation stage-site --output DIR
 ```
 
-成功時命令結束碼為 `0`，驗證失敗時為 `1`。Pre-commit 將使用 `validate --staged`，CI 將使用 `validate --all`。
+成功時命令結束碼為 `0`，驗證失敗時為 `1`。Pre-commit 使用 `validate --staged`，CI 使用 `validate --all`。

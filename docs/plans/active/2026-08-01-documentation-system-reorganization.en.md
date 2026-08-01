@@ -6,7 +6,7 @@ audience: developer
 type: plan
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-02
 ---
 
 <a id="objective"></a>
@@ -53,8 +53,8 @@ Preserve these results as checkpoint evidence; later failures must be explained 
 <a id="phase-3-validator"></a>
 ## Phase 3 — Validator, hooks, and CI through TDD
 
-- [ ] Write failing unit tests before each validator behavior is implemented.
-- [ ] Implement these interfaces exactly:
+- [x] Write failing unit tests before each validator behavior is implemented.
+- [x] Implement these interfaces exactly:
 
 ```text
 python -m tools.documentation validate --all
@@ -64,14 +64,14 @@ python -m tools.documentation inventory --format json
 python -m tools.documentation stage-site --output DIR
 ```
 
-- [ ] Return exit `0` on success and exit `1` on validation failure.
-- [ ] Validate names, required frontmatter and enums, unique IDs, lifecycle/location compatibility, bilingual pair presence and metadata parity, links and anchors, and changed-pair parity.
-- [ ] Add inventory reports suitable for migration, ownership, staleness, and CI evidence.
-- [ ] Run `validate --staged` in pre-commit and `validate --all` in CI.
-- [ ] Require the structured PR fields `Docs impact: none | operator | developer | shared | release | experiment` and `Docs reason: <required explanation>`.
-- [ ] Enforce declaration presence and shape without inferring semantic impact from source paths.
+- [x] Return exit `0` on success and exit `1` on validation failure.
+- [x] Validate names, required frontmatter and enums, unique IDs, lifecycle/location compatibility, bilingual pair presence and metadata parity, links and anchors, and changed-pair parity.
+- [x] Add inventory reports suitable for migration, ownership, staleness, and CI evidence.
+- [x] Run `validate --staged` in pre-commit and `validate --all` in CI.
+- [x] Require the structured PR fields `Docs impact: none | operator | developer | shared | release | experiment` and `Docs reason: <required explanation>`.
+- [x] Enforce declaration presence and shape without inferring semantic impact from source paths.
 
-**Phase acceptance:** tests demonstrate failure for bad names, missing or invalid frontmatter, duplicate IDs, invalid lifecycle/location combinations, missing pairs, pair metadata drift, changed-only-one-locale edits, broken links, missing anchors, and mismatched anchors; all positive fixtures pass; CLI exit codes match the contract; inventory output is machine-readable; and pre-commit/CI gates are fast and balanced rather than duplicating costly unrelated test suites.
+- [x] **Phase acceptance:** tests demonstrate failure for bad names, missing or invalid frontmatter, duplicate IDs, invalid lifecycle/location combinations, missing pairs, pair metadata drift, changed-only-one-locale edits, broken links, missing anchors, and mismatched anchors; all positive fixtures pass; CLI exit codes match the contract; inventory output is machine-readable; and pre-commit/CI gates are fast and balanced rather than duplicating costly unrelated test suites.
 
 <a id="phase-4-central-migration"></a>
 ## Phase 4 — Central documentation migration

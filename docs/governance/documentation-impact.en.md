@@ -6,7 +6,7 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-02
 ---
 
 <a id="change-triggers"></a>
@@ -45,7 +45,7 @@ Automation validates declaration presence and shape. Semantic correctness remain
 <a id="stable-tool-interface"></a>
 ## Stable tool interface
 
-Phase 3 will implement the following stable interface. These commands are a contract for future tooling and are not yet available at this checkpoint:
+Phase 3 implements the following stable interface. These commands are the stable documentation-tool contract:
 
 ```text
 python -m tools.documentation validate --all
@@ -55,4 +55,4 @@ python -m tools.documentation inventory --format json
 python -m tools.documentation stage-site --output DIR
 ```
 
-Commands exit `0` on success; validation exits `1` on failure. Pre-commit will use `validate --staged`, and CI will use `validate --all`.
+Commands exit `0` on success; validation exits `1` on failure. Pre-commit uses `validate --staged`, and CI uses `validate --all`.

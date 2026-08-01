@@ -1,0 +1,27 @@
+name: Documentation contracts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test documentation tooling
+        run: python -m unittest discover tools/documentation/tests -v
+      - name: Validate all documentation
+        run: python -m tools.documentation validate --all
+      - name: Validate pull-request declaration
+        if: github.event_name == 'pull_request'
+        run: python -m tools.documentation.pr_declaration --event-json "$GITHUB_EVENT_PATH"
