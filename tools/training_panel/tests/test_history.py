@@ -851,5 +851,59 @@ class HistoryDurabilityTests(unittest.TestCase):
             self.assertEqual(list(paths.history_file.parent.glob("*.tmp")), [])
 
 
+class HistoryVolatileFieldTests(unittest.TestCase):
+    """Progress heartbeats must not win the mother/child last-write-wins arbiter."""
+
+    OLD = "2020-01-01T00:00:00"
+
+    def make_paths(self, root: Path) -> PanelPaths:
+        return PanelPaths(
+            repo_root=root,
+            isaaclab_root=root / "IsaacLab",
+            isaacsim_root=root / "isaacsim",
+            conda_sh=root / "conda.sh",
+            conda_env="env",
+        )
+
+    def make_store(self, tmp: str) -> HistoryStore:
+        store = HistoryStore(self.make_paths(Path(tmp)))
+        store.add_run(
+            {
+                "id": "panel_20260801_120000",
+                "source": "training_panel",
+                "status": "running",
+                "created_at": self.OLD,
+                "updated_at": self.OLD,
+            }
+        )
+        return store
+
+    def test_progress_only_update_does_not_bump_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            store.update_run(
+                "panel_20260801_120000",
+                progress={"iteration": 12, "percent": 3.0, "updated_at": "2026-08-01T14:00:05"},
+            )
+            record = store.get_run("panel_20260801_120000")
+            self.assertEqual(record["updated_at"], self.OLD)
+            self.assertEqual(record["progress"]["iteration"], 12)
+
+    def test_real_state_change_still_bumps_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            store.update_run("panel_20260801_120000", status="completed", returncode=0)
+            record = store.get_run("panel_20260801_120000")
+            self.assertNotEqual(record["updated_at"], self.OLD)
+            self.assertEqual(record["status"], "completed")
+
+    def test_mixed_update_with_progress_still_bumps_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            store.update_run("panel_20260801_120000", progress={"iteration": 3}, status="stopping")
+            record = store.get_run("panel_20260801_120000")
+            self.assertNotEqual(record["updated_at"], self.OLD)
+
+
 if __name__ == "__main__":
     unittest.main()

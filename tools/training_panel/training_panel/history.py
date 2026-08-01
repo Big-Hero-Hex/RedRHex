@@ -20,6 +20,13 @@ PANEL_RUN_TIME_RE = re.compile(r"^panel_(\d{8})_(\d{6})")
 ACTIVE_PANEL_LOG_CLAIM_GRACE_SECONDS = 5
 ACTIVE_PANEL_LOG_CLAIM_WINDOW_SECONDS = 10 * 60
 
+# Display-only fields written on a short heartbeat while a run trains. An update
+# that touches only these must not bump the record's `updated_at`: mother/child
+# metadata sync resolves conflicts by last-write-wins on that field, and a
+# 5-second heartbeat would make the local record permanently "newer" and block
+# every incoming pull. `progress` carries its own `updated_at` for display.
+VOLATILE_RUN_FIELDS = frozenset({"progress"})
+
 
 class HistoryCorruptError(RuntimeError):
     """Raised when the history file exists but does not parse.
@@ -539,10 +546,12 @@ class HistoryStore:
                 updates = dict(updates)
                 updates.pop("source", None)
             records = self._load_records()
+            touch = bool(updates) and not set(updates).issubset(VOLATILE_RUN_FIELDS)
             for record in records:
                 if record.get("id") == run_id:
                     record.update(updates)
-                    record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    if touch:
+                        record["updated_at"] = datetime.now().isoformat(timespec="seconds")
                     break
             self._save_records(records)
 
