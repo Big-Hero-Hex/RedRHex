@@ -12,6 +12,7 @@ DEFAULT_TASK = "Template-Redrhex-Direct-v0"
 DEFAULT_VIDEO_PRESET = "high"
 DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
+SPRING_BACKENDS = ("explicit", "native")
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class TrainingParams:
     num_envs: int = 4
     max_iterations: int = 1
     device: str = "cuda:0"
+    spring_backend: str = "explicit"
     headless: bool = True
     seed: int | None = None
     resume: bool = False
@@ -94,6 +96,7 @@ class TrainingParams:
             num_envs=int(data.get("num_envs") or 4),
             max_iterations=int(data.get("max_iterations") or 1),
             device=str(data.get("device") or "cuda:0"),
+            spring_backend=str(data.get("spring_backend") or "explicit"),
             headless=bool(data.get("headless", True)),
             seed=int(data["seed"]) if data.get("seed") not in (None, "") else None,
             resume=bool(data.get("resume", False)),
@@ -122,6 +125,8 @@ class TrainingParams:
             raise ValueError("max_iterations must be between 1 and 100000")
         if not (self.device == "cpu" or self.device.startswith("cuda")):
             raise ValueError("device must be cpu or cuda[:index]")
+        if self.spring_backend not in SPRING_BACKENDS:
+            raise ValueError(f"spring_backend must be one of: {', '.join(SPRING_BACKENDS)}")
         if self.resume and not self.checkpoint:
             raise ValueError("checkpoint is required when resume is enabled")
         if self.display_name and len(self.display_name) > 120:
@@ -146,6 +151,8 @@ def training_argv(params: TrainingParams) -> list[str]:
         str(params.max_iterations),
         "--device",
         params.device,
+        "--spring-backend",
+        params.spring_backend,
     ]
     # train.py only applies active_*_override.json when this flag is present.
     argv.append("--panel_overrides")
@@ -165,6 +172,7 @@ def play_argv(
     num_envs: int = 1,
     device: str = "cuda:0",
     *,
+    spring_backend: str = "explicit",
     headless: bool = False,
     video: bool = False,
     video_length: int | None = None,
@@ -186,6 +194,8 @@ def play_argv(
         str(num_envs),
         "--device",
         device,
+        "--spring-backend",
+        spring_backend,
     ]
     if headless:
         argv.append("--headless")
@@ -220,12 +230,15 @@ def export_onnx_argv(
     task: str = DEFAULT_TASK,
     num_envs: int = 1,
     device: str = "cuda:0",
+    *,
+    spring_backend: str = "explicit",
 ) -> list[str]:
     return play_argv(
         checkpoint=checkpoint,
         task=task,
         num_envs=num_envs,
         device=device,
+        spring_backend=spring_backend,
         headless=True,
         export_policy_only=True,
     )

@@ -74,8 +74,41 @@ class CommandTests(unittest.TestCase):
         self.assertIn("scripts/rsl_rl/play.py", argv)
         self.assertIn("--headless", argv)
         self.assertIn("--export_policy_only", argv)
+        self.assertEqual(argv[argv.index("--spring-backend") + 1], "explicit")
         self.assertEqual(argv[argv.index("--device") + 1], "cuda:0")
         self.assertEqual(argv[argv.index("--checkpoint") + 1], "/tmp/model_10.pt")
+
+    def test_export_onnx_argv_forwards_requested_spring_backend(self):
+        argv = export_onnx_argv("/tmp/model_10.pt", spring_backend="native")
+
+        self.assertEqual(argv[argv.index("--spring-backend") + 1], "native")
+
+    def test_play_argv_uses_and_overrides_explicit_spring_backend(self):
+        default_argv = play_argv("/tmp/model_10.pt")
+        native_argv = play_argv("/tmp/model_10.pt", spring_backend="native")
+
+        self.assertEqual(default_argv[default_argv.index("--spring-backend") + 1], "explicit")
+        self.assertEqual(native_argv[native_argv.index("--spring-backend") + 1], "native")
+
+    def test_training_params_store_and_serialize_requested_spring_backend(self):
+        params = TrainingParams.from_dict({"spring_backend": "native"})
+
+        self.assertEqual(params.spring_backend, "native")
+        self.assertEqual(params.to_dict()["spring_backend"], "native")
+
+    def test_training_params_default_spring_backend_is_explicit(self):
+        params = TrainingParams.from_dict({})
+
+        self.assertEqual(params.to_dict()["spring_backend"], "explicit")
+
+    def test_training_params_reject_unknown_spring_backend_before_queuing(self):
+        with self.assertRaises(ValueError):
+            TrainingParams.from_dict({"spring_backend": "unsupported"})
+
+    def test_training_argv_includes_requested_spring_backend(self):
+        argv = training_argv(TrainingParams.from_dict({"spring_backend": "native"}))
+
+        self.assertEqual(argv[argv.index("--spring-backend") + 1], "native")
 
     def test_training_params_accept_terrain_overrides(self):
         params = TrainingParams.from_dict(
