@@ -791,12 +791,16 @@ function statusLabel(kind, status, context) {
 }
 
 function runParamSummary(run) {
-  if (!run.params) return "";
   const parts = [];
-  if (run.params.task) parts.push(`task: ${run.params.task}`);
-  if (run.params.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params.max_iterations !== undefined) parts.push(`iters: ${run.params.max_iterations}`);
+  if (run.params?.task) parts.push(`task: ${run.params.task}`);
+  if (run.params?.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
+  if (run.params?.max_iterations !== undefined) parts.push(`iters: ${run.params.max_iterations}`);
+  parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
+}
+
+function runSpringBackend(run) {
+  return run.effective_spring_backend || run.params?.spring_backend || "explicit";
 }
 
 function runTimeSummary(run) {
@@ -1223,6 +1227,7 @@ function renderRunDetails() {
     if (run.params?.task) rows.push(["Task", run.params.task]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
     if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
+    rows.push(["Spring Backend", runSpringBackend(run)]);
     const ckptIter = checkpointIteration(run.latest_checkpoint);
     if (ckptIter !== null) rows.push(["Checkpoint", `iter ${ckptIter}`]);
     const onnxText = onnxProcessId ? "exporting" : (run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing"));
@@ -2318,6 +2323,7 @@ function resumeRun(runId) {
   }
   const form = $("#train-form");
   form.elements.checkpoint.value = run.latest_checkpoint;
+  form.elements.spring_backend.value = runSpringBackend(run);
   setView("train");
   $("#train-status").textContent = `Resume selected from ${run.display_name || run.id}. Choose iterations/envs, then start training.`;
 }
@@ -2594,7 +2600,7 @@ async function handleRunAction(action, runId, processId = "") {
       await cancelQueuedRun(runId);
       return;
     }
-    if (!state.selectedRun || state.selectedRun.id !== runId) {
+    if (action !== "compare" && (!state.selectedRun || state.selectedRun.id !== runId)) {
       await selectRun(runId);
     }
     if (action === "tensorboard") await startTensorBoardForRun(runId, pendingWindow);
@@ -2644,6 +2650,7 @@ function applyTrainingParamsToForm(params) {
   form.elements.num_envs.value = params.num_envs ?? 4;
   form.elements.max_iterations.value = params.max_iterations ?? 1;
   form.elements.device.value = params.device || "cuda:0";
+  form.elements.spring_backend.value = params.spring_backend || "explicit";
   form.elements.seed.value = params.seed ?? "";
   form.elements.checkpoint.value = "";
   form.elements.headless.checked = params.headless !== false;
@@ -3492,6 +3499,7 @@ function renderComparisonPanel(runA, runB) {
     comparisonRowHtml("Task", runA.params?.task, runB.params?.task),
     comparisonRowHtml("Environments", runA.params?.num_envs, runB.params?.num_envs),
     comparisonRowHtml("Max Iterations", runA.params?.max_iterations, runB.params?.max_iterations),
+    comparisonRowHtml("Spring Backend", runSpringBackend(runA), runSpringBackend(runB)),
     comparisonRowHtml("Checkpoint iter", iterA !== null ? iterA : "—", iterB !== null ? iterB : "—"),
     comparisonRowHtml("Reward preset", runA.reward_preset_id || "baseline", runB.reward_preset_id || "baseline"),
     comparisonRowHtml("Reward overrides", runA.reward_diff_count || 0, runB.reward_diff_count || 0),

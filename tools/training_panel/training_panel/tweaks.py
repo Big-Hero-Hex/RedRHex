@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .commands import DEFAULT_TASK
+from .commands import DEFAULT_TASK, resolve_spring_backend
 from .rewards import read_reward_scales_from_yaml
 
 
@@ -135,6 +135,7 @@ def build_tweak_payload(
     reward_values = reward_values_for_tweak(run, reward_presets)
     terrain_preset_id = str(params.get("terrain_preset_id") or run.get("terrain_preset_id") or "baseline")
     terrain_values = terrain_values_for_tweak(run, terrain_presets)
+    spring_backend = resolve_spring_backend(run)
     draft_id = f"tweak-{_slug(source_id or source_label)}"
 
     training_params = {
@@ -142,6 +143,7 @@ def build_tweak_payload(
         "num_envs": int(params.get("num_envs") or 4),
         "max_iterations": int(params.get("max_iterations") or 1),
         "device": str(params.get("device") or "cuda:0"),
+        "spring_backend": spring_backend,
         "headless": bool(params.get("headless", True)),
         "seed": params.get("seed"),
         "resume": False,

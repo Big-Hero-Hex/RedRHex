@@ -451,6 +451,47 @@ class HistoryTests(unittest.TestCase):
             self.assertIn("Good Runs", payload["folders"])
             self.assertEqual(payload["runs"][0]["folder"], "Good Runs")
 
+    def test_runs_payload_exposes_backend_discovered_from_torsion_yaml(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "native_run"
+            params_dir = run / "params"
+            params_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            payload = handler._runs_payload()
+
+            assert payload["runs"][0]["effective_spring_backend"] == "native"
+
+    def test_runs_payload_rejects_malformed_torsion_backend_metadata(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "invalid_run"
+            params_dir = run / "params"
+            params_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: invalid\n", encoding="utf-8")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            with self.assertRaisesRegex(ValueError, "spring_backend"):
+                handler._runs_payload()
+
     def test_open_location_rejects_paths_outside_log_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
