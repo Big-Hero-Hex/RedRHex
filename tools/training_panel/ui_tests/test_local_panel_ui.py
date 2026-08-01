@@ -269,7 +269,7 @@ def test_compact_preserves_artifacts_and_requires_exact_run_id(panel, page):
     page.locator("#compact-run").click()
     page.fill("#confirm-dialog-input", "panel_run_beta")
     page.locator("#confirm-dialog-confirm").click()
-    expect(page.locator("#notes-status")).to_contain_text("Compacted")
+    expect(page.locator("#panel-status")).to_contain_text("Compacted")
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
 
     wait_for_missing(panel["beta"] / "model_0.pt")
@@ -301,7 +301,7 @@ def test_rename_notes_refresh_and_snapshot_debug_does_not_poll(panel, page):
 
     page.fill("#notes-editor", "stable note")
     page.locator("#save-notes").click()
-    expect(page.locator("#notes-status")).to_contain_text("Notes saved")
+    expect(page.locator("#panel-status")).to_contain_text("Notes saved")
 
     page.locator("#refresh-button").click()
     expect(page.locator("#details-title")).to_have_text("Better Beta")
@@ -341,3 +341,39 @@ def test_deploy_mobile_layout_has_no_horizontal_overflow(panel, page):
     expect(page.locator("#deploy-report-json")).to_be_visible()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 1
+
+
+def test_status_toast_appears_for_actions_outside_history(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("setStatus('Fixture status message.')")
+    expect(page.locator("#panel-status .toast")).to_contain_text("Fixture status message.")
+
+
+def test_error_toast_persists_and_closes_on_click(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("setStatusTone('Fixture failure.', 'error')")
+    toast = page.locator("#panel-status .toast.toast-error")
+    expect(toast).to_contain_text("Fixture failure.")
+    page.wait_for_timeout(7000)
+    expect(toast).to_be_visible()  # errors must not auto-dismiss
+    toast.locator(".toast-close").click()
+    expect(page.locator("#panel-status .toast")).to_have_count(0)
+
+
+def test_info_toast_auto_dismisses(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("setStatus('Transient message.')")
+    expect(page.locator("#panel-status .toast")).to_have_count(1)
+    page.wait_for_timeout(7000)
+    expect(page.locator("#panel-status .toast")).to_have_count(0)
+
+
+def test_repeated_message_collapses_with_counter(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("setStatus('Same message.'); setStatus('Same message.'); setStatus('Same message.')")
+    expect(page.locator("#panel-status .toast")).to_have_count(1)
+    expect(page.locator("#panel-status .toast-count")).to_contain_text("3")

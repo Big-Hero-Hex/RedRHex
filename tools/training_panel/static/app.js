@@ -195,19 +195,83 @@ async function api(path, options = {}) {
   return data;
 }
 
+const TOAST_DISMISS_MS = 6000;
+const TOAST_MAX = 3;
+
 function setStatus(message, linkUrl = "") {
-  const status = $("#notes-status");
-  status.textContent = "";
-  status.append(document.createTextNode(message));
+  setStatusTone(message, "info", linkUrl);
+}
+
+function setStatusTone(message, tone = "info", linkUrl = "") {
+  const region = $("#panel-status");
+  if (!region) return;
+  const text = String(message ?? "").trim();
+  if (!text) return;
+
+  const existing = Array.from(region.querySelectorAll(".toast")).find(
+    (node) => node.dataset.message === text && node.dataset.tone === tone,
+  );
+  if (existing) {
+    const count = Number(existing.dataset.count || "1") + 1;
+    existing.dataset.count = String(count);
+    const counter = existing.querySelector(".toast-count");
+    if (counter) {
+      counter.textContent = `×${count}`;
+      counter.hidden = false;
+    }
+    restartToastTimer(existing, tone);
+    return;
+  }
+
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${tone}`;
+  toast.dataset.message = text;
+  toast.dataset.tone = tone;
+  toast.dataset.count = "1";
+
+  const body = document.createElement("div");
+  body.className = "toast-body";
+  body.append(document.createTextNode(text));
   if (linkUrl) {
     const link = document.createElement("a");
     link.href = linkUrl;
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = linkUrl;
-    status.append(document.createTextNode(" "));
-    status.append(link);
+    body.append(document.createTextNode(" "));
+    body.append(link);
   }
+
+  const counter = document.createElement("span");
+  counter.className = "toast-count";
+  counter.hidden = true;
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss message");
+  close.textContent = "×";
+  close.addEventListener("click", () => dismissToast(toast));
+
+  toast.append(body, counter, close);
+  region.append(toast);
+
+  while (region.querySelectorAll(".toast").length > TOAST_MAX) {
+    dismissToast(region.querySelector(".toast"));
+  }
+  restartToastTimer(toast, tone);
+}
+
+function restartToastTimer(toast, tone) {
+  if (toast.dismissTimer) clearTimeout(toast.dismissTimer);
+  if (tone === "error") return;  // errors stay until dismissed — a failure must be read
+  toast.dismissTimer = setTimeout(() => dismissToast(toast), TOAST_DISMISS_MS);
+}
+
+function dismissToast(toast) {
+  if (!toast) return;
+  if (toast.dismissTimer) clearTimeout(toast.dismissTimer);
+  toast.remove();
 }
 
 function setTerrainStatus(message) {
@@ -2516,7 +2580,7 @@ function handleActionError(error, pendingWindow = null) {
     renderDebugPayload(error.data);
     if (error.data.run_id && error.data.kind) setDebugTarget({ type: "process", id: error.data.run_id });
   }
-  setStatus(error.message);
+  setStatusTone(error.message, "error");
 }
 
 async function runningProcessForSelectedRun() {
@@ -3702,7 +3766,6 @@ function renderComparisonPanel(runA, runB) {
       <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runB.display_name || runB.id)}</strong></div>
       ${rows.join("")}
     </div>
-    <div id="notes-status" class="status-line"></div>
   `;
   const exitBtn = $("#exit-comparison-btn");
   if (exitBtn) exitBtn.addEventListener("click", exitComparison);
