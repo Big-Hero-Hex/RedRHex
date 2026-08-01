@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tools.training_panel.training_panel.commands import TrainingParams, VideoParams, resolve_spring_backend
+from tools.training_panel.training_panel.commands import DEFAULT_TASK, TrainingParams, VideoParams, resolve_spring_backend
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.history import HistoryStore
 from tools.training_panel.training_panel.processes import (
@@ -522,6 +522,148 @@ class ProcessRegistryTests(unittest.TestCase):
                 if proc:
                     proc.wait(timeout=8)
                 time.sleep(0.1)
+
+    def test_forward_fast_process_log_resolves_logged_root_for_live_and_completed_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            log_dir = experiment_root / "2026-06-01_12-00-00_forward_fast_reform_v1"
+            log_dir.mkdir(parents=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                "Exact experiment name requested from command line: 2026-06-01_12-00-00\n",
+                encoding="utf-8",
+            )
+            run = {
+                "id": "forward_fast",
+                "source": "training_panel",
+                "status": "running",
+                "process_log": str(process_log),
+            }
+            history.add_run(run)
+            registry = ProcessRegistry(paths, history)
+
+            self.assertEqual(registry._log_dir_from_process_log("forward_fast"), str(log_dir))
+            self.assertEqual(registry._completed_log_for_run(run), str(log_dir))
+
+    def test_completed_legacy_exact_name_without_match_does_not_time_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            process_log = paths.process_log_dir / "legacy.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                "Exact experiment name requested from command line: 2026-06-01_12-00-00\n",
+                encoding="utf-8",
+            )
+            neighbor_log = paths.rsl_rl_log_root / "2026-06-01_12-01-00_wheg_locomotion"
+            neighbor_log.mkdir(parents=True)
+            run = {"process_log": str(process_log), "created_at": "2000-01-01T00:00:00"}
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._completed_log_for_run(run))
+
+    def test_completed_forward_fast_training_starts_native_video_for_source_task(self):
+        class CompletedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            log_dir = experiment_root / "2026-06-01_12-00-00_forward_fast_reform_v1"
+            log_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_7.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                "Exact experiment name requested from command line: 2026-06-01_12-00-00\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "forward_fast",
+                    "source": "training_panel",
+                    "status": "running",
+                    "process_log": str(process_log),
+                    "params": {
+                        "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                        "spring_backend": "native",
+                        "device": "cpu",
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry._monitor_training("forward_fast", CompletedProcess(), 0)
+
+            command = spawn.call_args.args[1]
+            self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", command)
+            self.assertIn("--spring-backend native", command)
+
+    def test_play_and_onnx_export_use_source_run_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "forward_fast",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {"task": "Template-Redrhex-ForwardFast-Direct-v0", "spring_backend": "native"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch.object(registry, "_raise_if_immediate_exit"), patch(
+                "tools.training_panel.training_panel.processes.threading.Thread"
+            ) as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry.start_play("forward_fast", "/tmp/model_7.pt", device="cpu")
+                registry.start_onnx_export("forward_fast", "/tmp/model_7.pt", device="cpu")
+
+            commands = [call.args[1] for call in spawn.call_args_list]
+            self.assertTrue(all("--task Template-Redrhex-ForwardFast-Direct-v0" in command for command in commands))
+            self.assertTrue(all("--spring-backend native" in command for command in commands))
+
+    def test_play_and_onnx_export_default_task_for_legacy_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run({"id": "legacy", "source": "rsl_rl", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch.object(registry, "_raise_if_immediate_exit"), patch(
+                "tools.training_panel.training_panel.processes.threading.Thread"
+            ) as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry.start_play("legacy", "/tmp/model_7.pt", device="cpu")
+                registry.start_onnx_export("legacy", "/tmp/model_7.pt", device="cpu")
+
+            commands = [call.args[1] for call in spawn.call_args_list]
+            self.assertTrue(all(f"--task {DEFAULT_TASK}" in command for command in commands))
 
     def test_process_terrain_override_falls_back_to_run_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:

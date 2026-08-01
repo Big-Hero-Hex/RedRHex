@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .commands import export_onnx_argv, resolve_spring_backend, shell_for_isaaclab
+from .commands import DEFAULT_TASK, export_onnx_argv, resolve_spring_backend, shell_for_isaaclab
 from .config import PanelPaths, timestamp_id
 from .history import latest_onnx
 from .mujoco_rollout import (
@@ -1286,7 +1286,8 @@ def run_export_stage(paths: PanelPaths, run: dict[str, Any], *, device: str = "c
             next_steps=["Set ISAACLAB_ROOT so isaaclab.sh can be found."],
         )
     spring_backend = resolve_spring_backend(run, checkpoint)
-    script_argv = export_onnx_argv(checkpoint=checkpoint, device=device, spring_backend=spring_backend)
+    task = str((run.get("params") or {}).get("task") or DEFAULT_TASK)
+    script_argv = export_onnx_argv(checkpoint=checkpoint, task=task, device=device, spring_backend=spring_backend)
     shell = shell_for_isaaclab(paths, script_argv)
     start = time.monotonic()
     print(f"[deploy] launching ONNX export via Isaac: {paths.isaaclab_launcher} -p {' '.join(script_argv)}", flush=True)

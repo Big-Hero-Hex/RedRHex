@@ -143,7 +143,10 @@ class DeployReadinessTests(unittest.TestCase):
             paths.isaaclab_root.mkdir()
             paths.isaaclab_launcher.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
             run = self.make_run(root)
-            run["params"] = {"spring_backend": "native"}
+            run["params"] = {
+                "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                "spring_backend": "native",
+            }
 
             with patch(
                 "tools.training_panel.training_panel.deploy.export_onnx_argv",
@@ -155,6 +158,7 @@ class DeployReadinessTests(unittest.TestCase):
                 stage = run_export_stage(paths, run, device="cpu")
 
             self.assertEqual(stage.status, "pass")
+            self.assertEqual(export.call_args.kwargs["task"], "Template-Redrhex-ForwardFast-Direct-v0")
             self.assertEqual(export.call_args.kwargs["spring_backend"], "native")
 
 
