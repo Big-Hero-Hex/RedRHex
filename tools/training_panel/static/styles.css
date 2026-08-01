@@ -1392,7 +1392,8 @@ html[data-theme="dark"] .comparison-diff {
   line-height: 1.25;
 }
 
-[data-tooltip]:hover::after {
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
   opacity: 1;
 }
 

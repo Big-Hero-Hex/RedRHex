@@ -419,3 +419,54 @@ def test_malformed_hash_degrades_quietly(panel, page):
     page.wait_for_load_state("networkidle")
     page.wait_for_selector("#train.view.active")
     expect(page.locator("#panel-status .toast")).to_have_count(0)
+
+
+def test_tooltip_is_reachable_by_keyboard(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.click('.nav-button[data-view="convergence"]')
+    target = page.locator('#convergence-presets [data-preset="default"]')
+    page.wait_for_selector("#convergence-presets")
+    assert target.get_attribute("data-tooltip") is not None
+
+    # Reach the target purely by keyboard so Chromium's :focus-visible
+    # heuristic engages (locator.focus() is programmatic focus and never
+    # matches :focus-visible). Land programmatic focus on the checkbox
+    # immediately preceding the segmented control in DOM order, then walk
+    # forward with real Tab keypresses until the target itself is focused.
+    page.locator("#convergence-enabled").focus()
+    for _ in range(10):
+        page.keyboard.press("Tab")
+        is_target = page.evaluate(
+            "document.activeElement === document.querySelector('#convergence-presets [data-preset=\"default\"]')"
+        )
+        if is_target:
+            break
+    else:
+        raise AssertionError("keyboard Tab traversal never reached the target element")
+
+    # opacity is animated by a 160ms CSS transition; give it a moment to
+    # settle before reading the computed value.
+    page.wait_for_timeout(250)
+    opacity = target.evaluate("(el) => getComputedStyle(el, '::after').opacity")
+    assert float(opacity) > 0, f"tooltip not visible on keyboard focus (opacity={opacity})"
+
+    # Sanity check: a mouse click on a sibling element (one that has never
+    # received keyboard focus) does focus it, but Chromium does not treat
+    # mouse-driven focus as focus-visible, so its tooltip must not appear.
+    # This distinguishes the :focus-visible rule from a plain :focus rule
+    # that would fire for keyboard and mouse alike. Using a fresh element
+    # (rather than re-clicking `target`, which is already focus-visible from
+    # the Tab traversal above and would keep that state on a same-element
+    # click regardless of input modality) is what actually exercises the
+    # mouse-focus code path.
+    strict_button = page.locator('#convergence-presets [data-preset="strict"]')
+    strict_button.click()
+    is_focused = page.evaluate(
+        "document.activeElement === document.querySelector('#convergence-presets [data-preset=\"strict\"]')"
+    )
+    assert is_focused, "mouse click did not focus the sibling element"
+    click_opacity = strict_button.evaluate("(el) => getComputedStyle(el, '::after').opacity")
+    assert float(click_opacity) == 0, (
+        f"tooltip should not appear on mouse click focus (opacity={click_opacity})"
+    )
