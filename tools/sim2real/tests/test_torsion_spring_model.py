@@ -76,3 +76,75 @@ def test_backend_validation_rejects_unknown_value() -> None:
 
     with pytest.raises(ValueError, match="spring backend"):
         spring.actuator_gains("servo", stiffness=200.0, damping=0.0)
+
+
+def test_continuous_position_unwraps_across_both_pi_boundaries() -> None:
+    spring = _load_module()
+    previous_wrapped = torch.tensor([[3.1, -3.1]])
+    previous_unwrapped = previous_wrapped.clone()
+    current_wrapped = torch.tensor([[-3.1, 3.1]])
+
+    unwrapped = spring.unwrap_continuous_position(
+        current_wrapped, previous_wrapped, previous_unwrapped
+    )
+
+    torch.testing.assert_close(
+        unwrapped,
+        torch.tensor(
+            [[3.1 + (2.0 * math.pi - 6.2), -3.1 - (2.0 * math.pi - 6.2)]]
+        ),
+    )
+
+
+def test_continuous_position_uses_velocity_prediction_for_multiple_turn_steps() -> None:
+    spring = _load_module()
+    previous_wrapped = torch.tensor([[0.0]])
+    previous_unwrapped = torch.tensor([[0.0]])
+    current_wrapped = torch.tensor([[-2.5]])
+
+    unwrapped = spring.unwrap_continuous_position(
+        current_wrapped,
+        previous_wrapped,
+        previous_unwrapped,
+        predicted_delta=torch.tensor([[3.8]]),
+    )
+
+    assert unwrapped.item() == pytest.approx(2.0 * math.pi - 2.5)
+    assert spring.unwrap_ambiguity_mask(torch.tensor([[400.0]]), 1.0 / 120.0).item()
+    assert not spring.unwrap_ambiguity_mask(torch.tensor([[10.0]]), 1.0 / 120.0).item()
+
+
+def test_temporal_passivity_residual_balances_energy_work_and_dissipation() -> None:
+    spring = _load_module()
+    previous_power = torch.tensor([0.0, 2.0])
+    current_power = torch.tensor([4.0, 6.0])
+
+    work = spring.trapezoidal_energy_increment(
+        previous_power, current_power, 0.5
+    )
+    residual = spring.energy_work_residual(
+        current_energy=torch.tensor([8.0, 3.0]),
+        reference_energy=torch.tensor([10.0, 10.0]),
+        cumulative_work=work,
+        cumulative_dissipation=torch.tensor([1.0, 3.0]),
+    )
+
+    torch.testing.assert_close(work, torch.tensor([1.0, 2.0]))
+    torch.testing.assert_close(residual, torch.tensor([0.0, -2.0]))
+
+
+def test_parameters_reorder_from_canonical_to_actuator_joint_order() -> None:
+    spring = _load_module()
+    canonical_names = ["j5", "j8", "j13", "j25", "j26", "j27"]
+    actuator_names = ["j5", "j13", "j25", "j26", "j27", "j8"]
+    values = torch.tensor([[5.0, 8.0, 13.0, 25.0, 26.0, 27.0]])
+
+    reordered = spring.reorder_joint_parameters(
+        values, canonical_names, actuator_names
+    )
+
+    torch.testing.assert_close(
+        reordered, torch.tensor([[5.0, 13.0, 25.0, 26.0, 27.0, 8.0]])
+    )
+    with pytest.raises(ValueError, match="same unique joints"):
+        spring.reorder_joint_parameters(values, canonical_names, actuator_names[:-1])

@@ -454,10 +454,42 @@ def _apply_passive_springs(
         robot.write_joint_damping_to_sim(damping)
         robot.data.default_joint_stiffness = stiffness.clone()
         robot.data.default_joint_damping = damping.clone()
+        if hasattr(unwrapped, "_configure_torsion_spring_backend"):
+            unwrapped._configure_torsion_spring_backend()
+        else:
+            actuators = getattr(robot, "actuators", {})
+            if isinstance(actuators, dict) and "damper" in actuators:
+                actuator = actuators["damper"]
+                canonical_names = [
+                    joint_aliases[f"damper_{index}"] for index in range(6)
+                ]
+                canonical_index = {
+                    name: index for index, name in enumerate(canonical_names)
+                }
+                try:
+                    actuator_order = [
+                        canonical_index[name] for name in actuator.joint_names
+                    ]
+                except KeyError as exc:
+                    raise ContractError(
+                        "damper actuator order does not contain the six managed springs"
+                    ) from exc
+                actuators["damper"].stiffness = (
+                    effective_stiffness[:, actuator_order].clone()
+                    if backend == "native"
+                    else torch.zeros_like(effective_stiffness)
+                )
+                actuators["damper"].damping = (
+                    effective_damping[:, actuator_order].clone()
+                    if backend == "native"
+                    else torch.zeros_like(effective_damping)
+                )
         if backend == "native" and hasattr(
             unwrapped, "_set_native_torsion_spring_target"
         ):
             unwrapped._set_native_torsion_spring_target()
+        if hasattr(unwrapped, "_reset_torsion_spring_backend"):
+            unwrapped._reset_torsion_spring_backend()
         return sorted(springs)
 
     _assign_named(

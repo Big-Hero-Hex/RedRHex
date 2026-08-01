@@ -54,3 +54,13 @@ def test_runtime_bundle_hash_tracks_dirty_behavior_defining_modules(
     assert first["redrhex_module_sha256"] == first["config_sha256"]
     assert first["isaaclab_version"] == "0.54.2"
     assert first["isaacsim_version"].startswith("5.1.0-rc.19+")
+
+    spring_model = tmp_path / (
+        "source/RedRhex/RedRhex/tasks/direct/redrhex/torsion_spring.py"
+    )
+    spring_model.write_bytes(spring_model.read_bytes() + b"\n# spring law change\n")
+    third = production_runtime_provenance(
+        tmp_path, run_git=_git, toolchain_provider=toolchain
+    )
+    assert second["runtime_bundle_sha256"] != third["runtime_bundle_sha256"]
+    assert second["torsion_spring_model_sha256"] != third["torsion_spring_model_sha256"]

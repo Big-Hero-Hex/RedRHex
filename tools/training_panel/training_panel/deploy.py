@@ -113,6 +113,9 @@ class PolicyManifest:
     policy_torchscript_path: str
     env_yaml_path: str
     agent_yaml_path: str
+    torsion_spring_path: str
+    physics_profile_path: str
+    physics_profile_metadata_path: str
     deploy_config_path: str
     expected_obs_dim: int
     history_obs_dim: int
@@ -455,6 +458,9 @@ def build_policy_manifest(paths: PanelPaths, run: dict[str, Any]) -> PolicyManif
     policy_pt_path = onnx_path.with_name("policy.pt") if onnx_path.name else log_dir / "exported" / "policy.pt"
     env_yaml = log_dir / "params" / "env.yaml"
     agent_yaml = log_dir / "params" / "agent.yaml"
+    torsion_spring = log_dir / "params" / "torsion_spring.yaml"
+    physics_profile = log_dir / "params" / "physics_profile.json"
+    physics_profile_metadata = log_dir / "params" / "physics_profile_metadata.json"
     deploy_config = paths.repo_root / "ros2_ws" / "src" / "redrhex_rl_controller" / "config" / "redrhex_policy.yaml"
     deploy_yaml, yaml_warning = _load_yaml(deploy_config)
     params = _nested(deploy_yaml, "redrhex_rl_controller", "ros__parameters", default={})
@@ -475,6 +481,9 @@ def build_policy_manifest(paths: PanelPaths, run: dict[str, Any]) -> PolicyManif
             ("policy_torchscript", policy_pt_path),
             ("env_yaml", env_yaml),
             ("agent_yaml", agent_yaml),
+            ("torsion_spring", torsion_spring),
+            ("physics_profile", physics_profile),
+            ("physics_profile_metadata", physics_profile_metadata),
             ("deploy_config", deploy_config),
         ]
     )
@@ -490,6 +499,9 @@ def build_policy_manifest(paths: PanelPaths, run: dict[str, Any]) -> PolicyManif
         policy_torchscript_path=str(policy_pt_path),
         env_yaml_path=str(env_yaml),
         agent_yaml_path=str(agent_yaml),
+        torsion_spring_path=str(torsion_spring),
+        physics_profile_path=str(physics_profile),
+        physics_profile_metadata_path=str(physics_profile_metadata),
         deploy_config_path=str(deploy_config),
         expected_obs_dim=int(getattr(contract, "OBS_DIM_SINGLE", 56)),
         history_obs_dim=int(getattr(contract, "OBS_DIM_SINGLE", 56)) * history_length,
@@ -546,6 +558,44 @@ def validate_export_integrity(manifest: PolicyManifest) -> ValidationStageResult
             "policy_torchscript": manifest.policy_torchscript_path,
             "env_yaml": manifest.env_yaml_path,
             "agent_yaml": manifest.agent_yaml_path,
+        },
+    )
+
+
+def validate_spring_calibration(manifest: PolicyManifest) -> ValidationStageResult:
+    """Block deployment unless the run's physical spring evidence still verifies."""
+
+    try:
+        from tools.sim2real.checkpoint_spring import (
+            validate_checkpoint_spring_deployment,
+        )
+
+        details = validate_checkpoint_spring_deployment(manifest.log_dir)
+    except (ImportError, ValueError) as exc:
+        return _result(
+            "spring_calibration",
+            "Torsion-Spring Calibration",
+            "fail",
+            f"Deployment requires a calibrated torsion-spring checkpoint: {exc}",
+            details={
+                "torsion_spring_path": manifest.torsion_spring_path,
+                "physics_profile_path": manifest.physics_profile_path,
+                "physics_profile_metadata_path": manifest.physics_profile_metadata_path,
+            },
+            next_steps=[
+                "Complete the approved physical calibration/holdout workflow and retrain from its authenticated profile."
+            ],
+        )
+    return _result(
+        "spring_calibration",
+        "Torsion-Spring Calibration",
+        "pass",
+        "Checkpoint spring parameters are bound to authenticated calibration and holdout evidence.",
+        details=details,
+        artifacts={
+            "torsion_spring": manifest.torsion_spring_path,
+            "physics_profile": manifest.physics_profile_path,
+            "physics_profile_metadata": manifest.physics_profile_metadata_path,
         },
     )
 
@@ -1271,6 +1321,7 @@ def run_export_stage(paths: PanelPaths, run: dict[str, Any], *, device: str = "c
 def evaluate_overall(stages: list[ValidationStageResult]) -> tuple[str, str]:
     required = {
         "onnx_export",
+        "spring_calibration",
         "export_integrity",
         "static_onnx",
         "onnx_runtime",
@@ -1382,50 +1433,86 @@ def run_deploy_validation(
             json_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
             return report
     manifest = build_policy_manifest(paths, run)
-    stage_plan = [] if mujoco_only else [
+    stage_plan = [
         ValidatorSpec(
-            "export_integrity",
-            "Export Integrity",
-            lambda: validate_export_integrity(manifest),
-            dependencies=["policy.pt", "policy.onnx", "checkpoint", "params/env.yaml", "params/agent.yaml"],
-        ),
-        ValidatorSpec(
-            "static_onnx",
-            "Static ONNX",
-            lambda: validate_static_onnx(manifest),
-            dependencies=["policy.onnx", "onnx"],
-        ),
-        ValidatorSpec(
-            "onnx_runtime",
-            "ONNX Runtime",
-            lambda: validate_onnx_runtime(manifest, use_cuda=use_cuda, use_tensorrt=use_tensorrt),
-            dependencies=["policy.onnx", "onnxruntime"],
-        ),
-        ValidatorSpec(
-            "torch_onnx_parity",
-            "Torch/ONNX Parity",
-            lambda: validate_torch_onnx_parity(manifest, rtol=rtol, atol=atol),
-            dependencies=["policy.pt", "policy.onnx", "torch", "onnxruntime"],
-        ),
-        ValidatorSpec(
-            "contract",
-            "Observation/Action Contract",
-            lambda: validate_contract(paths, manifest),
-            dependencies=["redrhex_contract.py", "params/env.yaml", "params/agent.yaml"],
-        ),
-        ValidatorSpec(
-            "safety_faults",
-            "Safety Fault Injection",
-            lambda: validate_safety_faults(paths, manifest),
-            dependencies=["safety_filter.py", "redrhex_contract.py"],
-        ),
-        ValidatorSpec(
-            "ros_mock",
-            "ROS Mock/Fake Sensor",
-            lambda: validate_ros_mock(paths, manifest, run_ros_mock=include_ros_mock),
-            dependencies=["ros2", "fake_sensor_node.py", "policy_onnx_runner.py"],
-        ),
+            "spring_calibration",
+            "Torsion-Spring Calibration",
+            lambda: validate_spring_calibration(manifest),
+            dependencies=[
+                "params/torsion_spring.yaml",
+                "params/physics_profile.json",
+                "params/physics_profile_metadata.json",
+                "managed torsion-spring calibration/holdout episodes",
+            ],
+        )
     ]
+    if not mujoco_only:
+        stage_plan.extend(
+            [
+                ValidatorSpec(
+                    "export_integrity",
+                    "Export Integrity",
+                    lambda: validate_export_integrity(manifest),
+                    dependencies=[
+                        "policy.pt",
+                        "policy.onnx",
+                        "checkpoint",
+                        "params/env.yaml",
+                        "params/agent.yaml",
+                    ],
+                ),
+                ValidatorSpec(
+                    "static_onnx",
+                    "Static ONNX",
+                    lambda: validate_static_onnx(manifest),
+                    dependencies=["policy.onnx", "onnx"],
+                ),
+                ValidatorSpec(
+                    "onnx_runtime",
+                    "ONNX Runtime",
+                    lambda: validate_onnx_runtime(
+                        manifest, use_cuda=use_cuda, use_tensorrt=use_tensorrt
+                    ),
+                    dependencies=["policy.onnx", "onnxruntime"],
+                ),
+                ValidatorSpec(
+                    "torch_onnx_parity",
+                    "Torch/ONNX Parity",
+                    lambda: validate_torch_onnx_parity(
+                        manifest, rtol=rtol, atol=atol
+                    ),
+                    dependencies=["policy.pt", "policy.onnx", "torch", "onnxruntime"],
+                ),
+                ValidatorSpec(
+                    "contract",
+                    "Observation/Action Contract",
+                    lambda: validate_contract(paths, manifest),
+                    dependencies=[
+                        "redrhex_contract.py",
+                        "params/env.yaml",
+                        "params/agent.yaml",
+                    ],
+                ),
+                ValidatorSpec(
+                    "safety_faults",
+                    "Safety Fault Injection",
+                    lambda: validate_safety_faults(paths, manifest),
+                    dependencies=["safety_filter.py", "redrhex_contract.py"],
+                ),
+                ValidatorSpec(
+                    "ros_mock",
+                    "ROS Mock/Fake Sensor",
+                    lambda: validate_ros_mock(
+                        paths, manifest, run_ros_mock=include_ros_mock
+                    ),
+                    dependencies=[
+                        "ros2",
+                        "fake_sensor_node.py",
+                        "policy_onnx_runner.py",
+                    ],
+                ),
+            ]
+        )
     if include_mujoco:
         model_path = Path(mujoco_model_path).expanduser() if mujoco_model_path else default_mujoco_model_path(paths)
         artifact_dir = Path(manifest.log_dir) / "deploy" / f"mujoco_{pipeline_id}"

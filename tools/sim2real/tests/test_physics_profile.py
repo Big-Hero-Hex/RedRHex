@@ -97,6 +97,7 @@ def _fake_env_cfg() -> SimpleNamespace:
         damper_stiffness=200.0,
         damper_damping=20.0,
         spring_backend="explicit",
+        spring_calibrated=False,
         spring_stiffness_nm_per_rad=(200.0,) * 6,
         spring_damping_nm_s_per_rad=(20.0,) * 6,
         sim2real_command_delay_steps=0,
@@ -127,6 +128,143 @@ def _fake_env_cfg() -> SimpleNamespace:
             "Revolute_27",
         ],
     )
+
+
+def test_config_marks_six_spring_profile_calibrated_only_with_representative_source(
+    monkeypatch,
+) -> None:
+    from tools.sim2real import physics_profile
+
+    apply_profile_to_config = physics_profile.apply_profile_to_config
+
+    aliases = [f"damper_{index}" for index in range(6)]
+    quality_gates = {
+        "r_squared": True,
+        "heldout_rmse": True,
+        "stiffness_cv": True,
+        "hysteresis": True,
+        "neutral_model_heldout_rmse": True,
+    }
+    payload = _profile().to_dict()
+    payload["simulation_physics"]["passive_spring"] = {
+        alias: {"stiffness": 200.0, "damping": 0.0} for alias in aliases
+    }
+    payload["measurement_sources"] = {
+        "passive_spring:damper_0": {
+            "trace_sha256": "a" * 64,
+            "metadata_sha256": "b" * 64,
+            "scenario_id": "torsion-spring",
+            "scenario_sha256": "c" * 64,
+            "source": "real",
+            "metric_kind": "torsional_spring",
+            "frame": "damper_0",
+            "repeat_count": 3,
+            "dataset_id": "spring-bench",
+            "episode_id": "representative-spring",
+            "applies_to": aliases,
+            "rest_position_rad": 0.0,
+            "episode_path": "/missing/representative-spring",
+            "quality_validation": {
+                "accepted": True,
+                "gates": quality_gates,
+                "calibration_trace_sha256": "a" * 64,
+                "calibration_metadata_sha256": "b" * 64,
+                "holdout_trace_sha256": "d" * 64,
+                "holdout_metadata_sha256": "e" * 64,
+                "holdout_scenario_id": "torsion-spring-holdout",
+                "holdout_scenario_sha256": "f" * 64,
+                "source": "real",
+                "dataset_id": "spring-bench",
+                "episode_id": "representative-spring-holdout",
+                "episode_path": "/missing/representative-spring-holdout",
+            },
+        }
+    }
+    self_asserted_cfg = _fake_env_cfg()
+    self_asserted = apply_profile_to_config(
+        self_asserted_cfg, CalibrationProfileV1.from_dict(payload)
+    )
+    assert self_asserted_cfg.spring_calibrated is False
+    assert self_asserted["spring_calibration_status"] == "uncalibrated"
+
+    monkeypatch.setattr(
+        physics_profile,
+        "verify_representative_spring_source",
+        lambda _source: {
+            "calibration": {
+                "neutral_stiffness_nm_per_rad": 200.0,
+                "rest_position_rad": 0.0,
+            },
+            "quality": {"accepted": True, "gates": quality_gates},
+        },
+    )
+    cfg = _fake_env_cfg()
+
+    summary = apply_profile_to_config(cfg, CalibrationProfileV1.from_dict(payload))
+
+    assert cfg.spring_calibrated is True
+    assert summary["spring_calibration_status"] == "calibrated"
+    assert cfg.spring_damping_nm_s_per_rad == (0.0,) * 6
+
+    native_cfg = _fake_env_cfg()
+    native_cfg.spring_backend = "native"
+    native = apply_profile_to_config(
+        native_cfg, CalibrationProfileV1.from_dict(payload)
+    )
+    assert native_cfg.robot_cfg.actuators["damper"].stiffness == 200.0
+    assert native_cfg.robot_cfg.actuators["damper"].damping == 0.0
+    assert native["spring_calibration_status"] == "calibrated"
+
+    damped_payload = copy.deepcopy(payload)
+    damped_payload["simulation_physics"]["passive_spring"]["damper_4"][
+        "damping"
+    ] = 0.1
+    damped_cfg = _fake_env_cfg()
+    damped = apply_profile_to_config(
+        damped_cfg, CalibrationProfileV1.from_dict(damped_payload)
+    )
+    assert damped_cfg.spring_calibrated is False
+    assert damped["spring_calibration_status"] == "uncalibrated"
+
+    failed_payload = copy.deepcopy(payload)
+    failed_quality = failed_payload["measurement_sources"][
+        "passive_spring:damper_0"
+    ]["quality_validation"]
+    failed_quality["accepted"] = False
+    failed_quality["gates"]["heldout_rmse"] = False
+    failed_cfg = _fake_env_cfg()
+    failed = apply_profile_to_config(
+        failed_cfg, CalibrationProfileV1.from_dict(failed_payload)
+    )
+    assert failed_cfg.spring_calibrated is False
+    assert failed["spring_calibration_status"] == "uncalibrated"
+
+    missing_payload = copy.deepcopy(payload)
+    del missing_payload["measurement_sources"]["passive_spring:damper_0"][
+        "quality_validation"
+    ]
+    missing_cfg = _fake_env_cfg()
+    missing = apply_profile_to_config(
+        missing_cfg, CalibrationProfileV1.from_dict(missing_payload)
+    )
+    assert missing_cfg.spring_calibrated is False
+    assert missing["spring_calibration_status"] == "uncalibrated"
+
+    mismatched_payload = copy.deepcopy(payload)
+    mismatched_payload["measurement_sources"]["passive_spring:damper_0"][
+        "rest_position_rad"
+    ] = 0.25
+    mismatched_cfg = _fake_env_cfg()
+    mismatched = apply_profile_to_config(
+        mismatched_cfg, CalibrationProfileV1.from_dict(mismatched_payload)
+    )
+    assert mismatched_cfg.spring_calibrated is False
+    assert mismatched["spring_calibration_status"] == "uncalibrated"
+
+    unverified_cfg = _fake_env_cfg()
+    unverified = apply_profile_to_config(unverified_cfg, _profile())
+    assert unverified_cfg.spring_calibrated is False
+    assert unverified["spring_calibration_status"] == "uncalibrated"
 
 
 def test_profile_application_updates_only_explicit_candidate_config() -> None:
@@ -828,6 +966,14 @@ def test_runtime_passive_spring_profile_is_backend_aware(backend: str) -> None:
 
         def __init__(self) -> None:
             self.data = data
+            self.actuators = {
+                "damper": SimpleNamespace(
+                    joint_names=[
+                        cfg.damper_joint_names[index]
+                        for index in (0, 2, 3, 4, 5, 1)
+                    ]
+                )
+            }
 
         def write_joint_stiffness_to_sim(self, stiffness):
             self.data.joint_stiffness = stiffness.clone()
@@ -873,6 +1019,18 @@ def test_runtime_passive_spring_profile_is_backend_aware(backend: str) -> None:
         torch.testing.assert_close(
             robot.data.joint_damping[:, damper_indices], expected_damping
         )
+    actuator_order = (0, 2, 3, 4, 5, 1)
+    expected_actuator_stiffness = expected_stiffness[:, actuator_order]
+    expected_actuator_damping = expected_damping[:, actuator_order]
+    if backend == "explicit":
+        expected_actuator_stiffness = torch.zeros_like(expected_actuator_stiffness)
+        expected_actuator_damping = torch.zeros_like(expected_actuator_damping)
+    torch.testing.assert_close(
+        robot.actuators["damper"].stiffness, expected_actuator_stiffness
+    )
+    torch.testing.assert_close(
+        robot.actuators["damper"].damping, expected_actuator_damping
+    )
     assert summary["spring_backend"] == backend
     assert summary["energy_bookkeeping"]["stiffness"] == pytest.approx(
         expected_stiffness[0].tolist()

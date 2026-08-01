@@ -74,7 +74,17 @@ from isaaclab.markers.config import GREEN_ARROW_X_MARKER_CFG, RED_ARROW_X_MARKER
 from .redrhex_env_cfg import RedrhexEnvCfg
 from .abad_target_mapping import map_abad_targets
 from .target_delay import advance_target_delay
-from .torsion_spring import actuator_gains, mechanical_power, potential_energy, restoring_torque
+from .torsion_spring import (
+    actuator_gains,
+    energy_work_residual,
+    mechanical_power,
+    potential_energy,
+    reorder_joint_parameters,
+    restoring_torque,
+    trapezoidal_energy_increment,
+    unwrap_ambiguity_mask,
+    unwrap_continuous_position,
+)
 
 
 class RedrhexEnv(DirectRLEnv):
@@ -395,8 +405,22 @@ class RedrhexEnv(DirectRLEnv):
             raise ValueError("torsion-spring stiffness must be finite and non-negative")
         if not torch.isfinite(self._spring_d).all() or torch.any(self._spring_d < 0.0):
             raise ValueError("torsion-spring damping must be finite and non-negative")
+        self._spring_wrapped_pos = self.robot.data.joint_pos[
+            :, self._damper_indices
+        ].clone()
+        self._spring_unwrapped_pos = self._spring_wrapped_pos.clone()
+        self._spring_unwrap_velocity = self.robot.data.joint_vel[
+            :, self._damper_indices
+        ].clone()
+        self._spring_unwrap_ambiguous = torch.zeros(
+            self.num_envs,
+            self.num_damper_joints,
+            dtype=torch.bool,
+            device=self.device,
+        )
         self._spring_calibrated = bool(getattr(self.cfg, "spring_calibrated", False))
         self._configure_torsion_spring_backend()
+        self._initialize_torsion_spring_accounting()
         print(f"[扭轉彈簧中性角度] {[f'{a*180/3.14159:.1f}°' for a in damper_init_angles]}")
         print(
             f"[扭轉彈簧] backend={self._spring_backend}, calibrated={self._spring_calibrated}, "
@@ -618,6 +642,7 @@ class RedrhexEnv(DirectRLEnv):
             "diag_spring_energy": torch.zeros(self.num_envs, device=self.device),
             "diag_spring_power": torch.zeros(self.num_envs, device=self.device),
             "diag_spring_passivity_residual": torch.zeros(self.num_envs, device=self.device),
+            "diag_spring_unwrap_ambiguous": torch.zeros(self.num_envs, device=self.device),
         }
 
         # 初始化目標速度緩衝
@@ -1721,6 +1746,17 @@ class RedrhexEnv(DirectRLEnv):
         damping = self._spring_d * native_scale
         self.robot.write_joint_stiffness_to_sim(stiffness, joint_ids=self._damper_indices)
         self.robot.write_joint_damping_to_sim(damping, joint_ids=self._damper_indices)
+        damper_actuator = self.robot.actuators["damper"]
+        self.robot.actuators["damper"].stiffness = reorder_joint_parameters(
+            stiffness,
+            self.cfg.damper_joint_names,
+            damper_actuator.joint_names,
+        )
+        self.robot.actuators["damper"].damping = reorder_joint_parameters(
+            damping,
+            self.cfg.damper_joint_names,
+            damper_actuator.joint_names,
+        )
         self.robot.data.default_joint_stiffness[:, self._damper_indices] = stiffness
         self.robot.data.default_joint_damping[:, self._damper_indices] = damping
 
@@ -1748,10 +1784,23 @@ class RedrhexEnv(DirectRLEnv):
         self, env_ids: Sequence[int] | torch.Tensor | None = None
     ) -> None:
         """Reset persistent native targets or stale explicit efforts."""
+        env_ids_tensor = self._as_env_id_tensor(env_ids)
+        spring_position = self.robot.data.joint_pos[:, self._damper_indices]
+        spring_velocity = self.robot.data.joint_vel[:, self._damper_indices]
+        if env_ids_tensor is None:
+            self._spring_wrapped_pos.copy_(spring_position)
+            self._spring_unwrapped_pos.copy_(spring_position)
+            self._spring_unwrap_velocity.copy_(spring_velocity)
+            self._spring_unwrap_ambiguous.zero_()
+        else:
+            self._spring_wrapped_pos[env_ids_tensor] = spring_position[env_ids_tensor]
+            self._spring_unwrapped_pos[env_ids_tensor] = spring_position[env_ids_tensor]
+            self._spring_unwrap_velocity[env_ids_tensor] = spring_velocity[env_ids_tensor]
+            self._spring_unwrap_ambiguous[env_ids_tensor] = False
+        self._reset_torsion_spring_accounting(env_ids_tensor)
         if self._spring_backend == "native":
             self._set_native_torsion_spring_target(env_ids)
             return
-        env_ids_tensor = self._as_env_id_tensor(env_ids)
         env_count = self.num_envs if env_ids_tensor is None else int(env_ids_tensor.numel())
         self.robot.set_joint_effort_target(
             torch.zeros(env_count, self.num_damper_joints, device=self.device),
@@ -1759,11 +1808,124 @@ class RedrhexEnv(DirectRLEnv):
             env_ids=env_ids_tensor,
         )
 
+    def _update_unwrapped_spring_position(self) -> torch.Tensor:
+        spring_position = self.robot.data.joint_pos[:, self._damper_indices]
+        spring_velocity = self.robot.data.joint_vel[:, self._damper_indices]
+        dt_s = float(self.cfg.sim.dt)
+        predicted_delta = 0.5 * (
+            self._spring_unwrap_velocity + spring_velocity
+        ) * dt_s
+        candidate = unwrap_continuous_position(
+            spring_position,
+            self._spring_wrapped_pos,
+            self._spring_unwrapped_pos,
+            predicted_delta=predicted_delta,
+        )
+        changed = spring_position != self._spring_wrapped_pos
+        unwrapped = torch.where(changed, candidate, self._spring_unwrapped_pos)
+        maximum_velocity = torch.maximum(
+            torch.abs(self._spring_unwrap_velocity), torch.abs(spring_velocity)
+        )
+        self._spring_unwrap_ambiguous |= unwrap_ambiguity_mask(
+            maximum_velocity, dt_s
+        )
+        self._spring_wrapped_pos.copy_(spring_position)
+        self._spring_unwrapped_pos.copy_(unwrapped)
+        self._spring_unwrap_velocity.copy_(spring_velocity)
+        return self._spring_unwrapped_pos
+
+    def _initialize_torsion_spring_accounting(self) -> None:
+        self._spring_energy_reference = torch.zeros(self.num_envs, device=self.device)
+        self._spring_previous_power = torch.zeros(self.num_envs, device=self.device)
+        self._spring_previous_dissipation = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._spring_cumulative_work = torch.zeros(self.num_envs, device=self.device)
+        self._spring_cumulative_dissipation = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._spring_temporal_passivity_residual = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._spring_accounted_position = self._spring_unwrapped_pos.clone()
+        self._spring_accounted_velocity = self.robot.data.joint_vel[
+            :, self._damper_indices
+        ].clone()
+        self._reset_torsion_spring_accounting(None)
+
+    def _reset_torsion_spring_accounting(
+        self, env_ids: torch.Tensor | None
+    ) -> None:
+        if not hasattr(self, "_spring_energy_reference"):
+            return
+        selected = slice(None) if env_ids is None else env_ids
+        position = self._spring_unwrapped_pos[selected]
+        velocity = self.robot.data.joint_vel[selected][:, self._damper_indices]
+        energy = potential_energy(
+            position,
+            self._spring_rest_pos,
+            self._spring_k[selected],
+        ).sum(dim=1)
+        torque = restoring_torque(
+            position,
+            velocity,
+            self._spring_rest_pos,
+            self._spring_k[selected],
+            self._spring_d[selected],
+        )
+        power = mechanical_power(torque, velocity).sum(dim=1)
+        dissipation = (self._spring_d[selected] * torch.square(velocity)).sum(dim=1)
+        self._spring_energy_reference[selected] = energy
+        self._spring_previous_power[selected] = power
+        self._spring_previous_dissipation[selected] = dissipation
+        self._spring_cumulative_work[selected] = 0.0
+        self._spring_cumulative_dissipation[selected] = 0.0
+        self._spring_temporal_passivity_residual[selected] = 0.0
+        self._spring_accounted_position[selected] = position
+        self._spring_accounted_velocity[selected] = velocity
+
+    def _advance_torsion_spring_accounting(
+        self,
+        position: torch.Tensor,
+        velocity: torch.Tensor,
+        torque: torch.Tensor,
+    ) -> None:
+        changed = torch.any(position != self._spring_accounted_position, dim=1) | torch.any(
+            velocity != self._spring_accounted_velocity, dim=1
+        )
+        if not bool(changed.any()):
+            return
+        power = mechanical_power(torque, velocity).sum(dim=1)
+        dissipation = (self._spring_d * torch.square(velocity)).sum(dim=1)
+        dt_s = float(self.cfg.sim.dt)
+        work_increment = trapezoidal_energy_increment(
+            self._spring_previous_power, power, dt_s
+        )
+        dissipation_increment = trapezoidal_energy_increment(
+            self._spring_previous_dissipation, dissipation, dt_s
+        )
+        self._spring_cumulative_work[changed] += work_increment[changed]
+        self._spring_cumulative_dissipation[changed] += dissipation_increment[changed]
+        current_energy = potential_energy(
+            position, self._spring_rest_pos, self._spring_k
+        ).sum(dim=1)
+        residual = energy_work_residual(
+            current_energy,
+            self._spring_energy_reference,
+            self._spring_cumulative_work,
+            self._spring_cumulative_dissipation,
+        )
+        self._spring_temporal_passivity_residual[changed] = torch.abs(residual[changed])
+        self._spring_previous_power[changed] = power[changed]
+        self._spring_previous_dissipation[changed] = dissipation[changed]
+        self._spring_accounted_position[changed] = position[changed]
+        self._spring_accounted_velocity[changed] = velocity[changed]
+
     def _apply_explicit_torsion_spring(self) -> None:
         """Apply passive torque from fresh simulator state on each physics substep."""
-        if self._spring_backend != "explicit" or self.num_damper_joints == 0:
+        if self.num_damper_joints == 0:
             return
-        spring_position = self.robot.data.joint_pos[:, self._damper_indices]
+        spring_position = self._update_unwrapped_spring_position()
         spring_velocity = self.robot.data.joint_vel[:, self._damper_indices]
         spring_torque = restoring_torque(
             spring_position,
@@ -1772,11 +1934,17 @@ class RedrhexEnv(DirectRLEnv):
             self._spring_k,
             self._spring_d,
         )
-        self.robot.set_joint_effort_target(spring_torque, joint_ids=self._damper_indices)
+        self._advance_torsion_spring_accounting(
+            spring_position, spring_velocity, spring_torque
+        )
+        if self._spring_backend == "explicit":
+            self.robot.set_joint_effort_target(
+                spring_torque, joint_ids=self._damper_indices
+            )
 
     def _compute_torsion_spring_diagnostics(self) -> dict[str, torch.Tensor]:
-        spring_position = self.joint_pos[:, self._damper_indices]
-        spring_velocity = self.joint_vel[:, self._damper_indices]
+        spring_position = self._update_unwrapped_spring_position()
+        spring_velocity = self.robot.data.joint_vel[:, self._damper_indices]
         spring_deflection = spring_position - self._spring_rest_pos
         spring_torque = restoring_torque(
             spring_position,
@@ -1789,17 +1957,18 @@ class RedrhexEnv(DirectRLEnv):
             spring_position, self._spring_rest_pos, self._spring_k
         )
         spring_power = mechanical_power(spring_torque, spring_velocity)
-        conservative_rate = self._spring_k * spring_deflection * spring_velocity
-        dissipated_power = self._spring_d * torch.square(spring_velocity)
-        passivity_residual = torch.abs(
-            spring_power + conservative_rate + dissipated_power
-        ).sum(dim=1)
+        self._advance_torsion_spring_accounting(
+            spring_position, spring_velocity, spring_torque
+        )
         return {
             "deflection_mean": torch.abs(spring_deflection).mean(dim=1),
             "torque_rms": torch.sqrt(torch.square(spring_torque).mean(dim=1).clamp(min=0.0)),
             "energy": spring_energy.sum(dim=1),
             "power": spring_power.sum(dim=1),
-            "passivity_residual": passivity_residual,
+            "passivity_residual": self._spring_temporal_passivity_residual,
+            "unwrap_ambiguous": self._spring_unwrap_ambiguous.any(dim=1).to(
+                dtype=spring_position.dtype
+            ),
         }
 
     def _compute_damper_diagnostics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -3067,6 +3236,9 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_spring_passivity_residual"] += spring_diag[
             "passivity_residual"
         ]
+        self.episode_sums["diag_spring_unwrap_ambiguous"] += spring_diag[
+            "unwrap_ambiguous"
+        ]
         self.episode_sums["diag_abad_target_max_abs"] += abad_target_max_abs
         self.episode_sums["diag_abad_pos_max_abs"] += abad_pos_max_abs
         self.episode_sums["diag_abad_pos_limit_violation"] += abad_pos_limit_violation
@@ -4025,6 +4197,9 @@ class RedrhexEnv(DirectRLEnv):
         self.episode_sums["diag_spring_power"] += spring_diag["power"]
         self.episode_sums["diag_spring_passivity_residual"] += spring_diag[
             "passivity_residual"
+        ]
+        self.episode_sums["diag_spring_unwrap_ambiguous"] += spring_diag[
+            "unwrap_ambiguous"
         ]
         self.episode_sums["diag_abad_target_max_abs"] += abad_target_max_abs
         self.episode_sums["diag_abad_pos_max_abs"] += abad_pos_max_abs

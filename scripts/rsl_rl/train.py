@@ -44,6 +44,12 @@ parser.add_argument(
     help="Explicit CalibrationProfileV1 JSON override; defaults never load a candidate profile.",
 )
 parser.add_argument(
+    "--spring-backend",
+    choices=("explicit", "native"),
+    default="explicit",
+    help="Passive torsion-spring implementation used by the environment.",
+)
+parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -303,9 +309,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "(pass --panel_overrides to apply it)."
                 )
 
+    env_cfg.spring_backend = args_cli.spring_backend
+    resume_requested = agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation"
+    resume_path = None
+    if resume_requested:
+        if agent_cfg.load_checkpoint and (
+            os.path.isabs(agent_cfg.load_checkpoint) or os.path.exists(agent_cfg.load_checkpoint)
+        ):
+            resume_path = retrieve_file_path(agent_cfg.load_checkpoint)
+        else:
+            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+
     physics_profile = None
     physics_profile_config_application = None
     physics_profile_runtime_application = None
+    spring_profile_id = None
+    spring_profile_sha256 = None
     if args_cli.physics_profile is not None:
         repo_root = Path(__file__).resolve().parents[2]
         if str(repo_root) not in sys.path:
@@ -315,12 +334,40 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             load_optional_profile,
             write_training_profile_snapshot,
         )
+        from tools.sim2real.traces import sha256_json
 
         physics_profile = load_optional_profile(args_cli.physics_profile)
         physics_profile_config_application = apply_profile_to_config(
             env_cfg, physics_profile
         )
-        print(f"[INFO] Explicit physics profile applied to config: {physics_profile.profile_id}")
+        spring_profile_id = physics_profile.profile_id
+        spring_profile_sha256 = sha256_json(physics_profile.to_dict())
+        print(
+            f"[INFO] Explicit physics profile applied to config: {spring_profile_id} "
+            f"({spring_profile_sha256})"
+        )
+
+    spring_calibration_status = (
+        "calibrated" if bool(getattr(env_cfg, "spring_calibrated", False)) else "uncalibrated"
+    )
+    resume_checkpoint_calibration_status = None
+    if resume_requested:
+        from tools.sim2real.checkpoint_spring import validate_checkpoint_spring_evaluation
+
+        resume_checkpoint_calibration_status = validate_checkpoint_spring_evaluation(
+            os.path.dirname(resume_path),
+            selected_backend=args_cli.spring_backend,
+            selected_profile_id=spring_profile_id,
+            selected_profile_sha256=spring_profile_sha256,
+        )
+        if resume_checkpoint_calibration_status == "calibrated" and spring_calibration_status != "calibrated":
+            raise RuntimeError("calibrated checkpoint profile did not produce a calibrated spring configuration")
+    print(
+        f"[INFO] Torsion spring backend={args_cli.spring_backend}, "
+        f"calibration_status={spring_calibration_status}, "
+        f"resume_checkpoint_calibration_status={resume_checkpoint_calibration_status}, "
+        f"profile_id={spring_profile_id}, profile_sha256={spring_profile_sha256}"
+    )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -336,15 +383,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
-
-    # save resume path before creating a new log_dir
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        if agent_cfg.load_checkpoint and (
-            os.path.isabs(agent_cfg.load_checkpoint) or os.path.exists(agent_cfg.load_checkpoint)
-        ):
-            resume_path = retrieve_file_path(agent_cfg.load_checkpoint)
-        else:
-            resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
 
     # wrap for video recording
     if args_cli.video:
@@ -374,7 +412,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         runner.git_status_repos = []
     # load the checkpoint
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    if resume_requested:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         if args_cli.resume_policy_only:
             _load_runner_checkpoint_with_policy_fallback(
@@ -412,6 +450,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    dump_yaml(
+        os.path.join(log_dir, "params", "torsion_spring.yaml"),
+        {
+            "spring_backend": args_cli.spring_backend,
+            "calibration_status": spring_calibration_status,
+            "profile_id": spring_profile_id,
+            "profile_sha256": spring_profile_sha256,
+            "joint_aliases": [f"damper_{index}" for index in range(6)],
+            "joint_names": list(env_cfg.damper_joint_names),
+            "stiffness_nm_per_rad": list(env_cfg.spring_stiffness_nm_per_rad),
+            "damping_nm_s_per_rad": list(env_cfg.spring_damping_nm_s_per_rad),
+            "neutral_angle_rad": [
+                float(env_cfg.robot_cfg.init_state.joint_pos.get(joint_name, 0.0))
+                for joint_name in env_cfg.damper_joint_names
+            ],
+            "resume_checkpoint_calibration_status": resume_checkpoint_calibration_status,
+        },
+    )
     if physics_profile is not None:
         write_training_profile_snapshot(
             log_dir,

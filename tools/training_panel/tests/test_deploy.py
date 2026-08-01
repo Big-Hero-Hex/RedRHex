@@ -2,6 +2,7 @@ import tempfile
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.deploy import (
@@ -11,6 +12,7 @@ from tools.training_panel.training_panel.deploy import (
     validate_contract,
     validate_export_integrity,
     validate_safety_faults,
+    validate_spring_calibration,
 )
 
 
@@ -39,6 +41,10 @@ class DeployReadinessTests(unittest.TestCase):
         (exported / "policy.pt").write_text("fake torchscript", encoding="utf-8")
         (params / "env.yaml").write_text("env: test\n", encoding="utf-8")
         (params / "agent.yaml").write_text("agent: test\n", encoding="utf-8")
+        (params / "torsion_spring.yaml").write_text(
+            "spring_backend: explicit\ncalibration_status: uncalibrated\n",
+            encoding="utf-8",
+        )
         return {
             "id": "deploy_run",
             "display_name": "Deploy Run",
@@ -55,6 +61,7 @@ class DeployReadinessTests(unittest.TestCase):
             self.assertEqual(manifest.expected_obs_dim, 56)
             self.assertEqual(manifest.expected_action_dim, 12)
             self.assertIn("policy_onnx", manifest.hashes)
+            self.assertIn("torsion_spring", manifest.hashes)
             self.assertGreater(manifest.sizes["policy_onnx"], 0)
 
             stage = validate_export_integrity(manifest)
@@ -74,6 +81,28 @@ class DeployReadinessTests(unittest.TestCase):
             safety = validate_safety_faults(paths, manifest)
             self.assertEqual(safety.status, "pass")
             self.assertGreaterEqual(len(safety.details["cases"]), 5)
+
+    def test_spring_calibration_is_a_fail_closed_deployment_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = build_policy_manifest(self.make_paths(root), self.make_run(root))
+
+            rejected = validate_spring_calibration(manifest)
+            self.assertEqual(rejected.status, "fail")
+            self.assertIn("calibrated torsion-spring", rejected.summary)
+
+            with patch(
+                "tools.sim2real.checkpoint_spring.validate_checkpoint_spring_deployment",
+                return_value={
+                    "spring_backend": "native",
+                    "calibration_status": "calibrated",
+                    "profile_id": "measured-spring",
+                    "profile_sha256": "a" * 64,
+                },
+            ):
+                accepted = validate_spring_calibration(manifest)
+            self.assertEqual(accepted.status, "pass")
+            self.assertEqual(accepted.details["spring_backend"], "native")
 
     def test_deploy_defaults_expose_validation_runtime_dependencies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -102,6 +131,8 @@ class DeployReadinessTests(unittest.TestCase):
             self.assertTrue(markdown_path.is_file())
             self.assertEqual(report.pipeline_id, "test_pipeline")
             self.assertTrue(any(stage.name == "export_integrity" for stage in report.stages))
+            self.assertTrue(any(stage.name == "spring_calibration" for stage in report.stages))
+            self.assertEqual(report.overall_status, "fail")
             self.assertEqual(report.runtime["python"], sys.executable)
 
 

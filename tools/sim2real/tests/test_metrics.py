@@ -19,6 +19,8 @@ from tools.sim2real.metrics import (
     stiffness_metrics,
     static_settle_metrics,
     torsional_spring_metrics,
+    torsional_spring_holdout_metrics,
+    torsional_spring_quality_gates,
     step_response_metrics,
     torque_saturation_metrics,
     variation_metrics,
@@ -544,6 +546,163 @@ def test_torsional_spring_and_variation_metrics() -> None:
         "steady_speed_rad_s_mean": pytest.approx(2.0),
         "steady_speed_rad_s_std": pytest.approx(np.std([1.0, 2.0, 3.0])),
         "steady_speed_rad_s_count": 3,
+    }
+
+
+def test_signed_torsional_spring_metrics_report_linearity_repeatability_and_hysteresis() -> None:
+    angles: list[float] = []
+    torque: list[float] = []
+    branches: list[float] = []
+    repeats: list[int] = []
+    for repeat_index, stiffness in enumerate((9.8, 10.0, 10.2)):
+        for branch, offset in ((1.0, 0.05), (-1.0, -0.05)):
+            for angle in (-0.4, -0.2, 0.2, 0.4):
+                angles.append(angle)
+                torque.append(stiffness * angle + offset)
+                branches.append(branch)
+                repeats.append(repeat_index)
+    torque_array = np.asarray(torque)
+
+    result = torsional_spring_metrics(
+        angle_rad=np.asarray(angles),
+        load_force=np.abs(torque_array) / 0.1,
+        lever_arm_m=np.full(len(angles), 0.1),
+        torque_direction=np.sign(torque_array),
+        sweep_branch=np.asarray(branches),
+        repeat_index=np.asarray(repeats),
+        expected_repeats=3,
+        rest_position_rad=0.0,
+    )
+
+    assert result["stiffness_nm_per_rad"] == pytest.approx(10.0)
+    assert result["r_squared"] > 0.998
+    assert result["stiffness_cv"] == pytest.approx(
+        np.std([9.8, 10.0, 10.2]) / 10.0
+    )
+    assert result["hysteresis_width_nm"] == pytest.approx(0.1)
+    assert result["hysteresis_full_scale_ratio"] < 0.03
+    assert result["neutral_stiffness_nm_per_rad"] == pytest.approx(10.0)
+    assert result["neutral_fit_rmse_full_scale_ratio"] < 0.02
+
+
+def test_torsional_spring_holdout_metrics_and_quality_gates_use_calibration_model() -> None:
+    calibration = {
+        "r_squared": 0.995,
+        "stiffness_cv": 0.02,
+        "hysteresis_full_scale_ratio": 0.04,
+        "stiffness_nm_per_rad": 10.0,
+        "torque_intercept_nm": 0.0,
+        "neutral_stiffness_nm_per_rad": 10.0,
+    }
+    angle = np.tile(np.array([-0.3, 0.3]), 3)
+    torque = angle * 10.0
+    holdout = torsional_spring_holdout_metrics(
+        angle_rad=angle,
+        load_force=np.abs(torque) / 0.1,
+        lever_arm_m=np.full(angle.size, 0.1),
+        torque_direction=np.sign(torque),
+        calibration_metrics=calibration,
+        rest_position_rad=0.0,
+    )
+    quality = torsional_spring_quality_gates(calibration, holdout)
+
+    assert holdout["torque_rmse_nm"] == pytest.approx(0.0)
+    assert holdout["rmse_full_scale_ratio"] == pytest.approx(0.0)
+    assert holdout["neutral_model_rmse_full_scale_ratio"] == pytest.approx(0.0)
+    assert quality["accepted"] is True
+    assert set(quality["gates"]) == {
+        "r_squared",
+        "heldout_rmse",
+        "stiffness_cv",
+        "hysteresis",
+        "neutral_model_heldout_rmse",
+    }
+
+
+def test_compute_metrics_uses_managed_signed_torsion_spring_annotations(
+    tmp_path: Path,
+) -> None:
+    scenario = load_scenario("torsion-spring")
+    angle = np.tile(np.array([-0.4, -0.2, 0.2, 0.4, 0.4, 0.2, -0.2, -0.4]), 3)
+    time_s = np.arange(angle.size, dtype=float) * 0.1
+    torque = angle * 10.0
+    write_trace(
+        tmp_path / "torsion-spring",
+        {
+            "angle_time_s": time_s,
+            "angle": angle,
+            "load_force_time_s": time_s,
+            "load_force": np.abs(torque) / 0.1,
+            "lever_arm_time_s": time_s,
+            "lever_arm": np.full(angle.size, 0.1),
+            "torque_direction": np.sign(torque),
+            "sweep_branch": np.tile(np.repeat([1.0, -1.0], 4), 3),
+            "repeat_index": np.repeat(np.arange(3), 8),
+        },
+        scenario=scenario,
+        source="sim",
+        metadata={"calibration_constants": {"rest_position_rad": 0.0}},
+    )
+
+    result = compute_subsystem_metrics(
+        scenario, load_trace(tmp_path / "torsion-spring", scenario=scenario)
+    )
+
+    assert result["r_squared"] == pytest.approx(1.0)
+    assert result["hysteresis_full_scale_ratio"] == pytest.approx(0.0)
+    assert result["neutral_stiffness_nm_per_rad"] == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize(
+    ("torque_direction", "sweep_branch", "message"),
+    [
+        ([1.0, 0.0], [1.0, -1.0], "torque_direction"),
+        ([1.0, -1.0], [1.0, 2.0], "sweep_branch"),
+    ],
+)
+def test_torsional_spring_annotations_require_signed_unit_encodings(
+    torque_direction: list[float], sweep_branch: list[float], message: str
+) -> None:
+    with pytest.raises(ContractError, match=message):
+        torsional_spring_metrics(
+            angle_rad=[-0.1, 0.1],
+            load_force=[1.0, 1.0],
+            lever_arm_m=[0.1, 0.1],
+            torque_direction=torque_direction,
+            sweep_branch=sweep_branch,
+        )
+
+
+def test_torsional_spring_fit_rejects_non_restoring_torque_direction() -> None:
+    with pytest.raises(ContractError, match="positive restoring stiffness"):
+        torsional_spring_metrics(
+            angle_rad=[-0.2, -0.1, 0.1, 0.2],
+            load_force=[2.0, 1.0, 1.0, 2.0],
+            lever_arm_m=[0.1, 0.1, 0.1, 0.1],
+            torque_direction=[1.0, 1.0, -1.0, -1.0],
+        )
+
+
+def test_legacy_unsigned_spring_fit_preserves_its_historical_sign_convention() -> None:
+    result = torsional_spring_metrics(
+        angle_rad=[-0.1, 0.1],
+        load_force=[1.0, -1.0],
+        lever_arm_m=[0.1, 0.1],
+    )
+
+    assert result["stiffness_nm_per_rad"] == pytest.approx(-1.0)
+
+
+def test_legacy_unsigned_spring_fit_still_accepts_a_flat_trace() -> None:
+    result = torsional_spring_metrics(
+        angle_rad=[-0.1, 0.1],
+        load_force=[0.0, 0.0],
+        lever_arm_m=[0.1, 0.1],
+    )
+
+    assert result == {
+        "stiffness_nm_per_rad": pytest.approx(0.0),
+        "torque_intercept_nm": pytest.approx(0.0),
     }
 
 

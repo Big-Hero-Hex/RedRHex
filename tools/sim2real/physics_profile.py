@@ -9,6 +9,7 @@ from typing import Any, Mapping
 import numpy as np
 
 from .contracts import CalibrationProfileV1, ContractError, load_profile
+from .profile_measurements import verify_representative_spring_source
 from .traces import _atomic_json, sha256_json
 
 
@@ -284,6 +285,102 @@ def apply_profile_to_config(
                 )
             joint_pos[joint_name] = float(spring["rest_position_rad"])
 
+    aliases = tuple(f"damper_{index}" for index in range(6))
+    representative = profile.measurement_sources.get("passive_spring:damper_0")
+    verified_source: Mapping[str, Any] | None = None
+    verification_error: str | None = None
+    if isinstance(representative, Mapping):
+        try:
+            verified_source = verify_representative_spring_source(representative)
+        except ContractError as exc:
+            verification_error = str(exc)
+    representative_joint = joint_aliases.get("damper_0")
+    configured_representative_rest = (
+        joint_pos.get(representative_joint)
+        if isinstance(joint_pos, dict) and representative_joint is not None
+        else None
+    )
+    validated_representative_rest = (
+        representative.get("rest_position_rad")
+        if isinstance(representative, Mapping)
+        else None
+    )
+    quality_validation = (
+        representative.get("quality_validation")
+        if isinstance(representative, Mapping)
+        else None
+    )
+    quality_gates = (
+        quality_validation.get("gates")
+        if isinstance(quality_validation, Mapping)
+        else None
+    )
+    verified_calibration = (
+        verified_source.get("calibration")
+        if isinstance(verified_source, Mapping)
+        else None
+    )
+    verified_stiffness = (
+        verified_calibration.get("neutral_stiffness_nm_per_rad")
+        if isinstance(verified_calibration, Mapping)
+        else None
+    )
+    spring_calibrated = bool(
+        isinstance(representative, Mapping)
+        and representative.get("source") == "real"
+        and representative.get("scenario_id") == "torsion-spring"
+        and representative.get("metric_kind") == "torsional_spring"
+        and representative.get("applies_to") == list(aliases)
+        and isinstance(verified_source, Mapping)
+        and verified_stiffness is not None
+        and isinstance(quality_validation, Mapping)
+        and quality_validation.get("accepted") is True
+        and isinstance(quality_gates, Mapping)
+        and quality_gates
+        and all(value is True for value in quality_gates.values())
+        and quality_validation.get("calibration_trace_sha256")
+        == representative.get("trace_sha256")
+        and quality_validation.get("calibration_metadata_sha256")
+        == representative.get("metadata_sha256")
+        and configured_representative_rest is not None
+        and validated_representative_rest is not None
+        and math.isclose(
+            float(configured_representative_rest),
+            float(validated_representative_rest),
+            rel_tol=0.0,
+            abs_tol=1.0e-9,
+        )
+        and set(springs) == set(aliases)
+        and all(
+            "stiffness" in springs[alias]
+            and "damping" in springs[alias]
+            and math.isclose(
+                float(springs[alias]["damping"]),
+                0.0,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+            for alias in aliases
+        )
+        and len(
+            {
+                float(springs[alias]["stiffness"])
+                for alias in aliases
+            }
+        )
+        == 1
+        and all(
+            math.isclose(
+                float(springs[alias]["stiffness"]),
+                float(verified_stiffness),
+                rel_tol=1.0e-12,
+                abs_tol=1.0e-12,
+            )
+            for alias in aliases
+        )
+    )
+    env_cfg.spring_calibrated = spring_calibrated
+
     damper_values = physics.get("damper", {})
     if "stiffness" in damper_values and hasattr(env_cfg, "damper_stiffness"):
         env_cfg.damper_stiffness = float(damper_values["stiffness"])
@@ -334,16 +431,26 @@ def apply_profile_to_config(
         if damper_actuator is None:
             raise ContractError("robot configuration has no damper actuator")
         if hasattr(damper_actuator, "stiffness"):
+            native_stiffness = (
+                stiffness_values[0]
+                if len(set(stiffness_values)) == 1
+                else float(damper_values.get("stiffness", stiffness_values[0]))
+            )
             damper_actuator.stiffness = (
                 0.0
                 if spring_backend == "explicit"
-                else float(damper_values.get("stiffness", stiffness_values[0]))
+                else native_stiffness
             )
         if hasattr(damper_actuator, "damping"):
+            native_damping = (
+                damping_values[0]
+                if len(set(damping_values)) == 1
+                else float(damper_values.get("damping", damping_values[0]))
+            )
             damper_actuator.damping = (
                 0.0
                 if spring_backend == "explicit"
-                else float(damper_values.get("damping", damping_values[0]))
+                else native_damping
             )
 
     ground = physics.get("ground", {})
@@ -374,6 +481,10 @@ def apply_profile_to_config(
     return {
         "schema_version": 1,
         "profile_id": profile.profile_id,
+        "spring_calibration_status": (
+            "calibrated" if spring_calibrated else "uncalibrated"
+        ),
+        "spring_calibration_verification_error": verification_error,
         "spring_backend": spring_backend,
         "effective_springs": {
             "joint_order": [f"damper_{index}" for index in range(len(damper_names))],

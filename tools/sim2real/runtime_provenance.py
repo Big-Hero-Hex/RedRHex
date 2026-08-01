@@ -21,12 +21,16 @@ _PRODUCTION_INPUTS = {
     ),
     "characterization_runner_sha256": Path("tools/sim2real/isaac_runner.py"),
     "sweep_runner_sha256": Path("tools/sim2real/sweep_runner.py"),
+    "torsion_spring_model_sha256": Path(
+        "source/RedRhex/RedRhex/tasks/direct/redrhex/torsion_spring.py"
+    ),
 }
 _BEHAVIOR_INPUTS = (
     Path("source/RedRhex/RedRhex/tasks/direct/redrhex/abad_target_mapping.py"),
     Path("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py"),
     Path("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py"),
     Path("source/RedRhex/RedRhex/tasks/direct/redrhex/target_delay.py"),
+    Path("source/RedRhex/RedRhex/tasks/direct/redrhex/torsion_spring.py"),
     Path("tools/sim2real/characterization.py"),
     Path("tools/sim2real/contracts.py"),
     Path("tools/sim2real/isaac_profile.py"),
