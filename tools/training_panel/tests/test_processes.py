@@ -416,7 +416,15 @@ class ProcessRegistryTests(unittest.TestCase):
                 "terrain:\n  terrain_type: plane\nterrain_curriculum_enable: false\n",
                 encoding="utf-8",
             )
-            history.add_run({"id": "run_one", "source": "training_panel", "status": "completed", "log_dir": str(log_dir)})
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                    "params": {"spring_backend": "native"},
+                }
+            )
             registry = ProcessRegistry(paths, history)
             result = registry.start_play("run_one", str(checkpoint), device="cpu")
             try:
@@ -426,6 +434,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertIsNone(debug["returncode"])
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("scripts/rsl_rl/play.py", debug["command"])
+                self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
                 self.assertIn("--camera_eye -3.0 -2.4 1.6", debug["command"])
@@ -473,6 +482,7 @@ class ProcessRegistryTests(unittest.TestCase):
                     "status": "completed",
                     "created_at": "2026-05-15T11:00:00",
                     "log_dir": str(log_dir),
+                    "params": {"spring_backend": "native"},
                 }
             )
             registry = ProcessRegistry(paths, history)
@@ -488,6 +498,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertEqual(debug["kind"], "video")
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("--headless", debug["command"])
+                self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--video", debug["command"])
                 self.assertIn("--video_length 1200", debug["command"])
                 self.assertIn("--video_width 1920", debug["command"])
@@ -575,6 +586,121 @@ class ProcessRegistryTests(unittest.TestCase):
             registry = ProcessRegistry(paths, history)
             self.assertIsNone(registry._write_process_terrain_override("play_test", "old_run"))
 
+    def test_play_resolves_native_backend_from_discovered_run_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "discovered_run"
+            params_dir = log_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text(
+                "spring_backend: native\n  spring_backend: explicit\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "discovered_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))) as spawn, patch.object(
+                registry, "_raise_if_immediate_exit"
+            ):
+                registry.start_play("discovered_run", str(checkpoint), device="cpu")
+
+            self.assertIn("--spring-backend native", spawn.call_args.args[1])
+
+    def test_play_uses_explicit_backend_for_legacy_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run({"id": "legacy_run", "source": "rsl_rl", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))) as spawn, patch.object(
+                registry, "_raise_if_immediate_exit"
+            ):
+                registry.start_play("legacy_run", "/tmp/model_10.pt", device="cpu")
+
+            self.assertIn("--spring-backend explicit", spawn.call_args.args[1])
+
+    def test_invalid_stored_backend_raises_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "invalid_run",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {"spring_backend": "unsupported"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(ValueError, "spring_backend"):
+                    registry.start_play("invalid_run", "/tmp/model_10.pt", device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_invalid_yaml_backend_raises_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "invalid_yaml_run"
+            params_dir = log_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: unsupported\n", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "invalid_yaml_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(ValueError, "spring_backend"):
+                    registry.start_play("invalid_yaml_run", str(checkpoint), device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_play_resolves_native_backend_from_checkpoint_parent_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            checkpoint_dir = root / "checkpoint_parent"
+            params_dir = checkpoint_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = checkpoint_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
+            history.add_run({"id": "run_without_log_dir", "source": "rsl_rl", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))) as spawn, patch.object(
+                registry, "_raise_if_immediate_exit"
+            ):
+                registry.start_play("run_without_log_dir", str(checkpoint), device="cpu")
+
+            self.assertIn("--spring-backend native", spawn.call_args.args[1])
+
     def test_onnx_export_process_uses_export_only_flags_and_updates_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -591,6 +717,7 @@ class ProcessRegistryTests(unittest.TestCase):
                     "status": "completed",
                     "created_at": "2026-05-15T11:00:00",
                     "log_dir": str(log_dir),
+                    "params": {"spring_backend": "native"},
                 }
             )
             registry = ProcessRegistry(paths, history)
@@ -601,6 +728,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertEqual(debug["kind"], "onnx")
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("--headless", debug["command"])
+                self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--export_policy_only", debug["command"])
                 self.assertIn("attach_command", debug)
                 run = history.get_run("run_one")
@@ -812,9 +940,20 @@ class ProcessRegistryTests(unittest.TestCase):
         )
         observed = (
             "python scripts/rsl_rl/train.py "
-            "--device cuda:0 --max_iterations 10 --num_envs 4 --task Template-Redrhex-Direct-v0"
+            "--device cuda:0 --max_iterations 10 --num_envs 4 --task Template-Redrhex-Direct-v0 --spring-backend explicit"
         )
         self.assertTrue(ProcessRegistry._training_commands_match(recorded, observed))
+
+    def test_training_command_match_rejects_different_spring_backends(self):
+        recorded = (
+            "python scripts/rsl_rl/train.py "
+            "--task Template-Redrhex-Direct-v0 --num_envs 4 --max_iterations 10 --device cuda:0 --spring-backend native"
+        )
+        observed = (
+            "python scripts/rsl_rl/train.py "
+            "--task Template-Redrhex-Direct-v0 --num_envs 4 --max_iterations 10 --device cuda:0 --spring-backend explicit"
+        )
+        self.assertFalse(ProcessRegistry._training_commands_match(recorded, observed))
 
     def test_running_isaac_processes_includes_onnx_exports(self):
         with tempfile.TemporaryDirectory() as tmp:

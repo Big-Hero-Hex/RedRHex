@@ -2,13 +2,14 @@ import tempfile
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.deploy import (
     build_policy_manifest,
     deploy_defaults,
     run_deploy_validation,
+    run_export_stage,
     validate_contract,
     validate_export_integrity,
     validate_safety_faults,
@@ -134,6 +135,27 @@ class DeployReadinessTests(unittest.TestCase):
             self.assertTrue(any(stage.name == "spring_calibration" for stage in report.stages))
             self.assertEqual(report.overall_status, "fail")
             self.assertEqual(report.runtime["python"], sys.executable)
+
+    def test_export_stage_propagates_resolved_native_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.isaaclab_root.mkdir()
+            paths.isaaclab_launcher.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+            run = self.make_run(root)
+            run["params"] = {"spring_backend": "native"}
+
+            with patch(
+                "tools.training_panel.training_panel.deploy.export_onnx_argv",
+                return_value=["scripts/rsl_rl/play.py", "--spring-backend", "native"],
+            ) as export, patch(
+                "tools.training_panel.training_panel.deploy.subprocess.run",
+                return_value=Mock(returncode=0, stdout=""),
+            ):
+                stage = run_export_stage(paths, run, device="cpu")
+
+            self.assertEqual(stage.status, "pass")
+            self.assertEqual(export.call_args.kwargs["spring_backend"], "native")
 
 
 if __name__ == "__main__":

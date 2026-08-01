@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .config import PanelPaths
 from .reward_overrides import normalize_reward_overrides
@@ -13,11 +15,49 @@ DEFAULT_VIDEO_PRESET = "high"
 DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
 SPRING_BACKENDS = ("explicit", "native")
+_TOP_LEVEL_SPRING_BACKEND_RE = re.compile(r"^spring_backend\s*:\s*(.*)$")
 
 
 def validate_spring_backend(spring_backend: str) -> None:
     if spring_backend not in SPRING_BACKENDS:
         raise ValueError(f"spring_backend must be one of: {', '.join(SPRING_BACKENDS)}")
+
+
+def _spring_backend_from_yaml(path: Path) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        match = _TOP_LEVEL_SPRING_BACKEND_RE.match(line)
+        if not match:
+            continue
+        value = match.group(1).split("#", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        validate_spring_backend(value)
+        return value
+    return None
+
+
+def resolve_spring_backend(run: dict[str, Any] | None, checkpoint: str | Path | None = None) -> str:
+    params = (run or {}).get("params")
+    if isinstance(params, dict) and "spring_backend" in params:
+        spring_backend = params["spring_backend"]
+        validate_spring_backend(spring_backend)
+        return spring_backend
+
+    log_dir = (run or {}).get("log_dir")
+    if log_dir:
+        spring_backend = _spring_backend_from_yaml(Path(str(log_dir)) / "params" / "torsion_spring.yaml")
+        if spring_backend is not None:
+            return spring_backend
+
+    if checkpoint:
+        spring_backend = _spring_backend_from_yaml(Path(checkpoint).parent / "params" / "torsion_spring.yaml")
+        if spring_backend is not None:
+            return spring_backend
+    return "explicit"
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ from .commands import (
     display_isaaclab_command,
     export_onnx_argv,
     play_argv,
+    resolve_spring_backend,
     shell_for_command,
     shell_for_isaaclab,
     tensorboard_argv,
@@ -466,10 +467,13 @@ class ProcessRegistry:
     def start_play(self, run_id: str, checkpoint: str, device: str = "cuda:0") -> dict:
         self.paths.ensure_dirs()
         play_id = f"play_{timestamp_id()}"
+        run = self.history.get_run(run_id)
+        spring_backend = resolve_spring_backend(run, checkpoint)
         terrain_override_file = self._write_process_terrain_override(play_id, run_id, checkpoint)
         argv = play_argv(
             checkpoint=checkpoint,
             device=device,
+            spring_backend=spring_backend,
             terrain_override_file=terrain_override_file,
             camera_follow_robot=True,
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
@@ -511,10 +515,13 @@ class ProcessRegistry:
         params = video_params or VideoParams.from_preset(DEFAULT_VIDEO_PRESET)
         params.validate()
         video_id = f"video_{timestamp_id()}"
+        run = self.history.get_run(run_id)
+        spring_backend = resolve_spring_backend(run, checkpoint)
         terrain_override_file = self._write_process_terrain_override(video_id, run_id, checkpoint)
         argv = play_argv(
             checkpoint=checkpoint,
             device=device,
+            spring_backend=spring_backend,
             num_envs=1,
             headless=True,
             video=True,
@@ -579,7 +586,9 @@ class ProcessRegistry:
 
     def start_onnx_export(self, run_id: str, checkpoint: str, device: str = "cuda:0") -> dict:
         onnx_id = f"onnx_{timestamp_id()}"
-        argv = export_onnx_argv(checkpoint=checkpoint, device=device)
+        run = self.history.get_run(run_id)
+        spring_backend = resolve_spring_backend(run, checkpoint)
+        argv = export_onnx_argv(checkpoint=checkpoint, device=device, spring_backend=spring_backend)
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{onnx_id}.log"
         spawned = self._spawn_shell(onnx_id, shell, log_file)
@@ -1712,7 +1721,7 @@ class ProcessRegistry:
     def _training_commands_match(recorded_command: str, process_command: str) -> bool:
         if not recorded_command or "scripts/rsl_rl/train.py" not in process_command:
             return False
-        keys = ("--task", "--num_envs", "--max_iterations", "--device", "--seed", "--checkpoint")
+        keys = ("--task", "--num_envs", "--max_iterations", "--device", "--seed", "--checkpoint", "--spring-backend")
         matched = 0
         for key in keys:
             recorded = ProcessRegistry._arg_value(recorded_command, key)
