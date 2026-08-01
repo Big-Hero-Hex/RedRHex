@@ -11,6 +11,7 @@ from .reward_overrides import normalize_reward_overrides
 
 
 DEFAULT_TASK = "Template-Redrhex-Direct-v0"
+FORWARD_FAST_TASK = "Template-Redrhex-ForwardFast-Direct-v0"
 DEFAULT_VIDEO_PRESET = "high"
 DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
@@ -231,6 +232,7 @@ def play_argv(
     video_height: int | None = None,
     video_fps: int | None = None,
     rendering_mode: str | None = None,
+    initial_command: str | None = None,
     terrain_override_file: str | None = None,
     camera_follow_robot: bool = False,
     camera_eye: tuple[float, float, float] | None = None,
@@ -263,6 +265,8 @@ def play_argv(
             argv.extend(["--video_fps", str(video_fps)])
         if rendering_mode:
             argv.extend(["--rendering_mode", rendering_mode])
+    if initial_command is not None:
+        argv.extend(["--initial_command", initial_command])
     if terrain_override_file:
         argv.extend(["--terrain_override_file", terrain_override_file])
     if camera_follow_robot:

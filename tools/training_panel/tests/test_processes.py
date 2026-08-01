@@ -505,6 +505,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertIn("--video_height 1080", debug["command"])
                 self.assertIn("--video_fps 30", debug["command"])
                 self.assertIn("--rendering_mode quality", debug["command"])
+                self.assertNotIn("--initial_command", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
                 self.assertIn("--camera_lookat 0.45 0.0 0.35", debug["command"])
@@ -522,6 +523,32 @@ class ProcessRegistryTests(unittest.TestCase):
                 if proc:
                     proc.wait(timeout=8)
                 time.sleep(0.1)
+
+    def test_manual_forward_fast_video_recording_starts_forward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "forward_fast",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {
+                        "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                        "spring_backend": "native",
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry.start_video_recording("forward_fast", "/tmp/model_7.pt", device="cpu")
+
+            self.assertIn("--initial_command forward", spawn.call_args.args[1])
 
     def test_forward_fast_process_log_resolves_logged_root_for_live_and_completed_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -747,6 +774,7 @@ class ProcessRegistryTests(unittest.TestCase):
             command = spawn.call_args.args[1]
             self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", command)
             self.assertIn("--spring-backend native", command)
+            self.assertIn("--initial_command forward", command)
             self.assertIn(f"--checkpoint {checkpoint}", command)
 
     def test_play_and_onnx_export_use_source_run_task(self):
@@ -776,6 +804,7 @@ class ProcessRegistryTests(unittest.TestCase):
             commands = [call.args[1] for call in spawn.call_args_list]
             self.assertTrue(all("--task Template-Redrhex-ForwardFast-Direct-v0" in command for command in commands))
             self.assertTrue(all("--spring-backend native" in command for command in commands))
+            self.assertTrue(all("--initial_command" not in command for command in commands))
 
     def test_play_and_onnx_export_default_task_for_legacy_run(self):
         with tempfile.TemporaryDirectory() as tmp:
