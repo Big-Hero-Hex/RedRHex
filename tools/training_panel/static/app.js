@@ -64,6 +64,8 @@ const state = {
   // Comparison (Module 6)
   comparisonRun: null,
   comparisonMode: false,
+  // Training curves (V3.5)
+  curvesRunId: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -993,6 +995,79 @@ function liveProgress(run) {
   return progress;
 }
 
+const CURVE_TAG_LABELS = {
+  "Train/mean_reward": "Mean Reward",
+  "Train/mean_episode_length": "Episode Length",
+};
+
+function sparklineSvg(points) {
+  if (!points || points.length < 2) return "";
+  const width = 280;
+  const height = 64;
+  const pad = 4;
+  const xs = points.map(([step]) => step);
+  const ys = points.map(([, value]) => value);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+  const coords = points.map(([step, value]) => {
+    const x = pad + ((step - minX) / spanX) * (width - 2 * pad);
+    const y = height - pad - ((value - minY) / spanY) * (height - 2 * pad);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return `
+    <svg class="sparkline" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img">
+      <polyline points="${escapeHtml(coords.join(" "))}" fill="none" stroke="currentColor" stroke-width="1.5" />
+    </svg>
+  `;
+}
+
+function renderRunCurves(data) {
+  const block = $("#run-curves-block");
+  const container = $("#run-curves");
+  if (!block || !container) return;
+  const tags = Object.entries(data?.tags || {});
+  if (!tags.length) {
+    block.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = tags
+    .map(([tag, points]) => {
+      const label = CURVE_TAG_LABELS[tag] || tag;
+      const latest = points.length ? points[points.length - 1][1] : null;
+      const latestText = typeof latest === "number" ? latest.toFixed(2) : "";
+      return `
+        <article class="curve-card">
+          <div class="curve-head">
+            <span class="curve-label">${escapeHtml(label)}</span>
+            <span class="curve-value">${escapeHtml(latestText)}</span>
+          </div>
+          ${sparklineSvg(points)}
+        </article>
+      `;
+    })
+    .join("");
+  block.hidden = false;
+}
+
+async function loadRunCurves(runId) {
+  if (!runId) {
+    renderRunCurves(null);
+    return;
+  }
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(runId)}/scalars?points=200`);
+    if (state.selectedRun?.id !== runId) return;  // selection changed while loading
+    renderRunCurves(data);
+  } catch (error) {
+    renderRunCurves(null);  // curves are informational — never surface an error banner
+  }
+}
+
 function formatEta(seconds) {
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "";
   const hours = Math.floor(seconds / 3600);
@@ -1350,6 +1425,12 @@ function renderRunDetails() {
   $("#copy-command").disabled = !hasCommand;
   $("#open-process-log-folder").disabled = !state.lastDebug || !(state.lastDebug.process_log || state.lastDebug.log_file);
 
+  if (!run) {
+    renderRunCurves(null);
+  } else if (state.curvesRunId !== run.id || liveProgress(run)) {
+    state.curvesRunId = run.id;
+    loadRunCurves(run.id);
+  }
   renderVideoPanel(run);
 }
 

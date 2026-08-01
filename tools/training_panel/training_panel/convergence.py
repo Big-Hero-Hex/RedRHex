@@ -171,3 +171,42 @@ def apply_settings(updates: dict, config_file: Path) -> ConvergenceConfig:
     _apply_preset(cfg)
     save_convergence_config(cfg, config_file)
     return cfg
+
+
+# Tags the panel is willing to plot. An allowlist, so a query parameter can
+# never be used to sweep arbitrary strings through the event accumulator.
+SCALAR_TAG_ALLOWLIST = frozenset({
+    "Train/mean_reward",
+    "Train/mean_episode_length",
+    "Loss/value_function",
+    "Loss/surrogate",
+    "Loss/learning_rate",
+    "Policy/mean_noise_std",
+})
+
+DEFAULT_SCALAR_TAGS = ["Train/mean_reward", "Train/mean_episode_length"]
+MAX_SCALAR_POINTS = 2000
+
+
+def requested_tags(raw: str) -> list[str]:
+    """Parse a comma-separated tag query into an allowlisted, de-duplicated list."""
+    tags: list[str] = []
+    for candidate in (raw or "").split(","):
+        tag = candidate.strip()
+        if tag in SCALAR_TAG_ALLOWLIST and tag not in tags:
+            tags.append(tag)
+    return tags or list(DEFAULT_SCALAR_TAGS)
+
+
+def downsample(points: list[tuple[int, float]], limit: int) -> list[tuple[int, float]]:
+    """Reduce a series to at most `limit` points, keeping the first and last."""
+    if limit < 1:
+        return []
+    if len(points) <= limit:
+        return list(points)
+    if limit == 1:
+        return [points[-1]]
+    stride = (len(points) - 1) / (limit - 1)
+    reduced = [points[int(round(i * stride))] for i in range(limit)]
+    reduced[-1] = points[-1]
+    return reduced
