@@ -42,6 +42,7 @@ def import_real_dataset(
     frames: Mapping[str, str] | None = None,
     latency_clock: str | None = None,
     time_bases: Mapping[str, str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
     profile: CalibrationProfileV1 | None = None,
     replay_fixture: Mapping[str, Any] | None = None,
 ) -> DatasetImport:
@@ -100,6 +101,7 @@ def import_real_dataset(
             units=units,
             frames=frames,
             latency_clock=clock,
+            metadata=metadata,
             time_bases=time_bases,
             profile=profile,
             replay_fixture=replay_fixture,

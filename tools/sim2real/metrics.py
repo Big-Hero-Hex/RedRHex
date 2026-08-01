@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -238,8 +238,11 @@ def torsional_spring_metrics(
     angle_rad: Any,
     load_force: Any,
     lever_arm_m: Any,
+    torque_direction: Any | None = None,
+    sweep_branch: Any | None = None,
     repeat_index: Any | None = None,
     expected_repeats: int | None = None,
+    rest_position_rad: float | None = None,
 ) -> dict[str, Any]:
     angle = _series(angle_rad, "angle_rad")
     force = _series(load_force, "load_force")
@@ -248,12 +251,78 @@ def torsional_spring_metrics(
         raise ContractError("spring angle, load force, and lever arm must have matching shapes")
     if np.any(arm < 0.0) or float(np.ptp(angle)) <= 0.0:
         raise ContractError("spring lever arm must be non-negative and angle must vary")
-    torque = force * arm
+    if torque_direction is None:
+        torque = force * arm
+        directions = None
+    else:
+        if np.any(force < 0.0):
+            raise ContractError("spring load_force must be non-negative when torque_direction is recorded")
+        directions = _signed_unit_series(torque_direction, "torque_direction")
+        if directions.size != angle.size:
+            raise ContractError("spring torque_direction must align with angle samples")
+        torque = force * arm * directions
+    branches = None
+    if sweep_branch is not None:
+        branches = _signed_unit_series(sweep_branch, "sweep_branch")
+        if branches.size != angle.size:
+            raise ContractError("spring sweep_branch must align with angle samples")
     slope, intercept = np.polyfit(angle, torque, 1)
+    if directions is not None and slope <= 0.0:
+        raise ContractError(
+            "spring signed measurements must identify a positive restoring stiffness"
+        )
     result: dict[str, Any] = {
         "stiffness_nm_per_rad": float(slope),
         "torque_intercept_nm": float(intercept),
     }
+    enhanced_metrics = (
+        directions is not None
+        or branches is not None
+        or rest_position_rad is not None
+    )
+    full_scale: float | None = None
+    if enhanced_metrics:
+        fitted = slope * angle + intercept
+        residual = torque - fitted
+        centered = torque - float(np.mean(torque))
+        total_variation = float(np.dot(centered, centered))
+        if total_variation <= 0.0:
+            raise ContractError("spring torque must vary to evaluate linearity")
+        full_scale = float(np.max(np.abs(torque)))
+        if full_scale <= 0.0:
+            raise ContractError("spring torque must have a non-zero full scale")
+        result.update(
+            {
+                "r_squared": float(
+                    1.0 - np.dot(residual, residual) / total_variation
+                ),
+                "fit_rmse_nm": float(np.sqrt(np.mean(np.square(residual)))),
+                "full_scale_torque_nm": full_scale,
+            }
+        )
+    if rest_position_rad is not None:
+        assert full_scale is not None
+        rest = float(rest_position_rad)
+        if not np.isfinite(rest):
+            raise ContractError("spring rest_position_rad must be finite")
+        deflection = angle - rest
+        denominator = float(np.dot(deflection, deflection))
+        if denominator <= 0.0:
+            raise ContractError("spring angle must vary from its configured rest position")
+        neutral_stiffness = float(np.dot(deflection, torque) / denominator)
+        neutral_residual = torque - neutral_stiffness * deflection
+        result.update(
+            {
+                "rest_position_rad": rest,
+                "neutral_stiffness_nm_per_rad": neutral_stiffness,
+                "neutral_fit_rmse_nm": float(
+                    np.sqrt(np.mean(np.square(neutral_residual)))
+                ),
+                "neutral_fit_rmse_full_scale_ratio": float(
+                    np.sqrt(np.mean(np.square(neutral_residual))) / full_scale
+                ),
+            }
+        )
     if repeat_index is not None or expected_repeats is not None:
         repeat_ids, repeats = _validated_repeats(
             repeat_index, angle.size, expected_repeats, "spring"
@@ -283,7 +352,157 @@ def torsional_spring_metrics(
                 "repeats": repeat_results,
             }
         )
+        if enhanced_metrics:
+            mean_stiffness = float(np.mean(stiffness))
+            if mean_stiffness == 0.0:
+                raise ContractError("spring repeat mean stiffness must be non-zero")
+            result["stiffness_cv"] = float(
+                np.std(stiffness) / abs(mean_stiffness)
+            )
+        if directions is not None and branches is not None:
+            for repeat_id in repeat_ids:
+                selected = repeats == repeat_id
+                if set(np.unique(directions[selected])) != {-1.0, 1.0}:
+                    raise ContractError("each spring repeat requires both torque directions")
+                if set(np.unique(branches[selected])) != {-1.0, 1.0}:
+                    raise ContractError("each spring repeat requires loading and unloading branches")
+    if branches is not None:
+        assert full_scale is not None
+        branch_models: dict[float, tuple[float, float, float, float]] = {}
+        for branch in (-1.0, 1.0):
+            selected = branches == branch
+            if np.count_nonzero(selected) < 2 or float(np.ptp(angle[selected])) <= 0.0:
+                raise ContractError("each spring sweep branch requires varying multi-sample angles")
+            branch_slope, branch_intercept = np.polyfit(angle[selected], torque[selected], 1)
+            branch_models[branch] = (
+                float(branch_slope),
+                float(branch_intercept),
+                float(np.min(angle[selected])),
+                float(np.max(angle[selected])),
+            )
+        lower = max(branch_models[-1.0][2], branch_models[1.0][2])
+        upper = min(branch_models[-1.0][3], branch_models[1.0][3])
+        if lower >= upper:
+            raise ContractError("spring loading and unloading angle ranges must overlap")
+        differences = [
+            abs(
+                branch_models[1.0][0] * value
+                + branch_models[1.0][1]
+                - branch_models[-1.0][0] * value
+                - branch_models[-1.0][1]
+            )
+            for value in (lower, upper)
+        ]
+        hysteresis = float(max(differences))
+        result.update(
+            {
+                "hysteresis_width_nm": hysteresis,
+                "hysteresis_full_scale_ratio": hysteresis / full_scale,
+            }
+        )
     return result
+
+
+def _signed_unit_series(value: Any, name: str) -> np.ndarray:
+    result = _series(value, name)
+    if np.any((result != -1.0) & (result != 1.0)):
+        raise ContractError(f"{name} must contain only -1 or 1")
+    return result
+
+
+def torsional_spring_holdout_metrics(
+    *,
+    angle_rad: Any,
+    load_force: Any,
+    lever_arm_m: Any,
+    torque_direction: Any,
+    calibration_metrics: Mapping[str, Any],
+    rest_position_rad: float,
+) -> dict[str, float]:
+    """Evaluate held-out signed torques against both calibrated linear models."""
+
+    angle = _series(angle_rad, "angle_rad")
+    force = _series(load_force, "load_force")
+    arm = _series(lever_arm_m, "lever_arm_m")
+    direction = _signed_unit_series(torque_direction, "torque_direction")
+    if len({angle.size, force.size, arm.size, direction.size}) != 1:
+        raise ContractError("spring holdout channels must have matching shapes")
+    if np.any(force < 0.0) or np.any(arm < 0.0):
+        raise ContractError("spring holdout force and lever arm must be non-negative")
+    torque = force * arm * direction
+    full_scale = float(np.max(np.abs(torque)))
+    if full_scale <= 0.0:
+        raise ContractError("spring holdout torque must have a non-zero full scale")
+
+    stiffness = float(calibration_metrics["stiffness_nm_per_rad"])
+    intercept = float(calibration_metrics["torque_intercept_nm"])
+    neutral_stiffness = float(calibration_metrics["neutral_stiffness_nm_per_rad"])
+    rest = float(rest_position_rad)
+    if not np.isfinite([stiffness, intercept, neutral_stiffness, rest]).all():
+        raise ContractError("spring calibration model must contain finite values")
+    residual = torque - (stiffness * angle + intercept)
+    neutral_residual = torque - neutral_stiffness * (angle - rest)
+    rmse = float(np.sqrt(np.mean(np.square(residual))))
+    neutral_rmse = float(np.sqrt(np.mean(np.square(neutral_residual))))
+    return {
+        "torque_rmse_nm": rmse,
+        "full_scale_torque_nm": full_scale,
+        "rmse_full_scale_ratio": rmse / full_scale,
+        "neutral_model_torque_rmse_nm": neutral_rmse,
+        "neutral_model_rmse_full_scale_ratio": neutral_rmse / full_scale,
+    }
+
+
+def torsional_spring_quality_gates(
+    calibration_metrics: Mapping[str, Any],
+    holdout_metrics: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the reviewed acceptance thresholds for the linear spring model."""
+
+    checks = {
+        "r_squared": float(calibration_metrics["r_squared"]) >= 0.98,
+        "heldout_rmse": float(holdout_metrics["rmse_full_scale_ratio"]) <= 0.05,
+        "stiffness_cv": float(calibration_metrics["stiffness_cv"]) <= 0.05,
+        "hysteresis": float(calibration_metrics["hysteresis_full_scale_ratio"]) <= 0.10,
+        "neutral_model_heldout_rmse": float(
+            holdout_metrics["neutral_model_rmse_full_scale_ratio"]
+        )
+        <= 0.05,
+    }
+    return {"accepted": all(checks.values()), "gates": checks}
+
+
+def torsional_spring_holdout_trace_metrics(
+    calibration_metrics: Mapping[str, Any],
+    trace: LoadedTrace,
+) -> dict[str, float]:
+    """Evaluate an authenticated holdout trace on its native channel clocks."""
+
+    arrays = trace.arrays
+    time_bases = trace.manifest.time_bases
+    required = {"angle", "load_force", "lever_arm", "torque_direction"}
+    if not required.issubset(arrays):
+        raise ContractError("torsion-spring holdout is missing signed measurement channels")
+    if time_bases["torque_direction"] != time_bases["angle"]:
+        raise ContractError("spring torque_direction must use the angle clock")
+    constants = trace.manifest.metadata.get("calibration_constants", {})
+    rest_position = (
+        constants.get("rest_position_rad")
+        if isinstance(constants, Mapping)
+        else None
+    )
+    if rest_position is None:
+        raise ContractError(
+            "torsion-spring holdout requires calibration_constants.rest_position_rad"
+        )
+    return torsional_spring_holdout_metrics(
+        angle_rad=arrays["angle"],
+        load_force=_interpolate(trace, "load_force", "angle"),
+        lever_arm_m=_interpolate(trace, "lever_arm", "angle"),
+        torque_direction=arrays["torque_direction"],
+        calibration_metrics=calibration_metrics,
+        rest_position_rad=float(rest_position),
+    )
 
 
 def _integer_series(value: Any, name: str) -> np.ndarray:
@@ -878,12 +1097,33 @@ def compute_subsystem_metrics(
     if kind == "spring":
         if time_bases["repeat_index"] != time_bases["angle"]:
             raise ContractError("spring repeat_index must use the angle clock")
+        signed_channels = {"torque_direction", "sweep_branch"}
+        present_signed = signed_channels.intersection(arrays)
+        if present_signed and present_signed != signed_channels:
+            raise ContractError(
+                "spring torque_direction and sweep_branch must be recorded together"
+            )
+        if any(time_bases[name] != time_bases["angle"] for name in present_signed):
+            raise ContractError("spring signed annotations must use the angle clock")
+        constants = trace.manifest.metadata.get("calibration_constants", {})
+        rest_position = (
+            constants.get("rest_position_rad")
+            if isinstance(constants, Mapping)
+            else None
+        )
+        if scenario.scenario_id.startswith("torsion-spring") and rest_position is None:
+            raise ContractError(
+                "managed torsion-spring traces require calibration_constants.rest_position_rad"
+            )
         result = torsional_spring_metrics(
             angle_rad=arrays["angle"],
             load_force=_interpolate(trace, "load_force", "angle"),
             lever_arm_m=_interpolate(trace, "lever_arm", "angle"),
+            torque_direction=arrays.get("torque_direction"),
+            sweep_branch=arrays.get("sweep_branch"),
             repeat_index=arrays["repeat_index"],
             expected_repeats=scenario.repeats,
+            rest_position_rad=rest_position,
         )
         return {
             "schema_version": 1,

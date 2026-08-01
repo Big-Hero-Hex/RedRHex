@@ -312,11 +312,61 @@ def test_parser_exposes_the_five_pure_python_commands() -> None:
             "profile.json",
             "--replay-fixture",
             "fixture.json",
+            "--calibration-constants-json",
+            '{"rest_position_rad":0.7853981633974483}',
         ]
     )
     assert parsed.profile == Path("profile.json")
     assert parsed.replay_fixture == Path("fixture.json")
+    assert json.loads(parsed.calibration_constants_json) == {
+        "rest_position_rad": pytest.approx(0.7853981633974483)
+    }
     assert parsed.latency_clock is None
+
+
+def test_import_real_cli_preserves_operator_approved_calibration_constants(
+    tmp_path: Path, capsys
+) -> None:
+    source = _npz(tmp_path / "approved-spring-data.npz")
+    constants = {
+        "rest_position_rad": 0.7853981633974483,
+        "applies_to_spring_aliases": [f"damper_{index}" for index in range(6)],
+        "mechanical_owner_approval": {
+            "owner": "mechanical-owner",
+            "fixture_id": "torsion-spring-bench-v1",
+            "maximum_safe_deflection_rad": 0.5,
+        },
+    }
+
+    assert main(
+        [
+            "import-real",
+            str(source),
+            "--scenario",
+            "main-step",
+            "--output",
+            str(tmp_path),
+            "--dataset-id",
+            "approved-spring-metadata",
+            "--episode-id",
+            "episode",
+            "--latency-clock",
+            "bag_receive_time",
+            "--calibration-constants-json",
+            json.dumps(constants),
+        ]
+    ) == 0
+    capsys.readouterr()
+    trace = load_trace(
+        tmp_path
+        / "datasets"
+        / "sim2real"
+        / "approved-spring-metadata"
+        / "episodes"
+        / "episode"
+    )
+
+    assert trace.manifest.metadata["calibration_constants"] == constants
 
 
 def test_replay_fixture_cli_is_strict_and_reaches_the_importer(

@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from tools.training_panel import __version__
 
 from .activity import ActivityStore
-from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams
+from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams, resolve_spring_backend
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
 from .history import HistoryStore
@@ -991,6 +991,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.state.processes.reconcile_stale_history()
         runs = self.state.history.list_runs()
         for run in runs:
+            run["effective_spring_backend"] = resolve_spring_backend(run)
             latest = latest_deploy_report(run)
             if latest:
                 run["deploy_latest_report"] = {

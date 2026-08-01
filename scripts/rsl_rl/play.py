@@ -48,6 +48,12 @@ parser.add_argument(
     help="Explicit CalibrationProfileV1 JSON override; defaults never load a candidate profile.",
 )
 parser.add_argument(
+    "--spring-backend",
+    choices=("explicit", "native"),
+    default="explicit",
+    help="Passive torsion-spring implementation used by the environment.",
+)
+parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
@@ -660,16 +666,46 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_panel_terrain_override(env_cfg, args_cli.terrain_override_file)
     _configure_follow_camera(env_cfg)
 
+    env_cfg.spring_backend = args_cli.spring_backend
     physics_profile = None
+    spring_profile_id = None
+    spring_profile_sha256 = None
     if args_cli.physics_profile is not None:
         repo_root = Path(__file__).resolve().parents[2]
         if str(repo_root) not in sys.path:
             sys.path.insert(0, str(repo_root))
         from tools.sim2real.physics_profile import apply_profile_to_config, load_optional_profile
+        from tools.sim2real.traces import sha256_json
 
         physics_profile = load_optional_profile(args_cli.physics_profile)
         apply_profile_to_config(env_cfg, physics_profile)
-        print(f"[INFO] Explicit physics profile applied to config: {physics_profile.profile_id}")
+        spring_profile_id = physics_profile.profile_id
+        spring_profile_sha256 = sha256_json(physics_profile.to_dict())
+        print(
+            f"[INFO] Explicit physics profile applied to config: {spring_profile_id} "
+            f"({spring_profile_sha256})"
+        )
+
+    from tools.sim2real.checkpoint_spring import validate_checkpoint_spring_evaluation
+
+    checkpoint_spring_calibration_status = validate_checkpoint_spring_evaluation(
+        log_dir,
+        selected_backend=args_cli.spring_backend,
+        selected_profile_id=spring_profile_id,
+        selected_profile_sha256=spring_profile_sha256,
+    )
+
+    spring_calibration_status = (
+        "calibrated" if bool(getattr(env_cfg, "spring_calibrated", False)) else "uncalibrated"
+    )
+    if checkpoint_spring_calibration_status == "calibrated" and spring_calibration_status != "calibrated":
+        raise RuntimeError("calibrated checkpoint profile did not produce a calibrated spring configuration")
+    print(
+        f"[INFO] Torsion spring backend={args_cli.spring_backend}, "
+        f"calibration_status={spring_calibration_status}, "
+        f"checkpoint_calibration_status={checkpoint_spring_calibration_status}, "
+        f"profile_id={spring_profile_id}, profile_sha256={spring_profile_sha256}"
+    )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)

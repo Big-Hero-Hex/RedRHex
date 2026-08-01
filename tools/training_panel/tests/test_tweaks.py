@@ -103,3 +103,32 @@ def test_tweak_payload_falls_back_to_recorded_reward_overrides():
 
     assert payload["reward_preset"]["values"] == {"rew_scale_alive": 0.25}
     assert payload["training_params"]["terrain_overrides"] == {"terrain.terrain_type": "plane"}
+
+
+def test_tweak_payload_uses_backend_discovered_from_saved_torsion_yaml(tmp_path):
+    log_dir = tmp_path / "native_run"
+    params_dir = log_dir / "params"
+    params_dir.mkdir(parents=True)
+    (params_dir / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
+    run = {
+        "id": "native_yaml",
+        "status": "completed",
+        "log_dir": str(log_dir),
+        "params": {"reward_preset_id": "baseline"},
+    }
+
+    payload = build_tweak_payload(run, reward_presets=REWARD_PRESETS, terrain_presets=TERRAIN_PRESETS)
+
+    assert payload["training_params"]["spring_backend"] == "native"
+
+
+def test_tweak_payload_preserves_legacy_explicit_backend():
+    run = {
+        "id": "legacy_explicit",
+        "status": "completed",
+        "params": {"spring_backend": "explicit", "reward_preset_id": "baseline"},
+    }
+
+    payload = build_tweak_payload(run, reward_presets=REWARD_PRESETS, terrain_presets=TERRAIN_PRESETS)
+
+    assert payload["training_params"]["spring_backend"] == "explicit"

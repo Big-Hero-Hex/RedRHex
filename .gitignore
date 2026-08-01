@@ -87,5 +87,8 @@ tests/
 .vscode/browse.vc.db
 .vscode/*.db
 
+# Local Git worktrees
+/.worktrees/
+
 # MuJoCo runtime logs
 MUJOCO_LOG.TXT

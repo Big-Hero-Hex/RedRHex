@@ -148,6 +148,7 @@ def _execution_provenance(
     headless: bool,
     seed: int,
     device: str,
+    spring_backend: str,
 ) -> dict[str, Any]:
     if not isinstance(provenance, Mapping):
         raise ContractError("provenance must be a JSON object")
@@ -159,6 +160,7 @@ def _execution_provenance(
             "headless": headless,
             "seed": seed,
             "device": device,
+            "spring_backend": spring_backend,
         }
     )
     try:
@@ -290,6 +292,7 @@ def _verify_result_fields(
     scene_mode: str,
     trace_sha256: str,
     output: Path,
+    spring_backend: str,
 ) -> None:
     expected = {
         "schema_version": 1,
@@ -297,6 +300,7 @@ def _verify_result_fields(
         "mode": scene_mode,
         "profile_id": profile.profile_id,
         "trace_sha256": trace_sha256,
+        "spring_backend": spring_backend,
     }
     for field, value in expected.items():
         if result.get(field) != value:
@@ -379,6 +383,13 @@ def _verify_artifact(
                 f"artifact provenance {field} mismatch: expected {provenance[field]!r}, "
                 f"got {loaded.manifest.metadata.get(field)!r}"
             )
+    spring_backend = provenance["spring_backend"]
+    if loaded.manifest.metadata.get("spring_backend") != spring_backend:
+        raise ContractError(
+            "artifact spring_backend mismatch: "
+            f"expected {spring_backend!r}, got "
+            f"{loaded.manifest.metadata.get('spring_backend')!r}"
+        )
     trace_sha256 = loaded.manifest.provenance["trace_sha256"]
     _verify_replay_bindings(result, loaded, provenance)
     _verify_result_fields(
@@ -388,6 +399,7 @@ def _verify_artifact(
         scene_mode=scene_mode,
         trace_sha256=trace_sha256,
         output=output,
+        spring_backend=spring_backend,
     )
     return {
         "trace_sha256": trace_sha256,
@@ -585,6 +597,7 @@ def execute_sweep(
     seed: int,
     device: str,
     provenance: Mapping[str, Any],
+    spring_backend: str = "explicit",
     provenance_provider: Callable[[], Mapping[str, Any]] = production_runtime_provenance,
     command_prefix: Sequence[str] | None = None,
     generate_only: bool = False,
@@ -605,6 +618,8 @@ def execute_sweep(
     _positive_int(seed, "seed", allow_zero=True)
     if not isinstance(device, str) or not device:
         raise ContractError("device must be a non-empty string")
+    if spring_backend not in {"explicit", "native"}:
+        raise ContractError(f"unsupported spring_backend: {spring_backend}")
     if not isinstance(scenario, ScenarioSpecV1):
         raise ContractError("scenario must be a ScenarioSpecV1")
     if not isinstance(base_profile, CalibrationProfileV1):
@@ -725,6 +740,7 @@ def execute_sweep(
         headless=headless,
         seed=seed,
         device=device,
+        spring_backend=spring_backend,
     )
     if not generate_only and any(
         effective_provenance[field] == "unavailable-generate-only"
@@ -960,6 +976,8 @@ def execute_sweep(
             str(seed),
             "--device",
             device,
+            "--spring-backend",
+            spring_backend,
         ]
         if headless:
             command.append("--headless")

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .config import PanelPaths
 from .reward_overrides import normalize_reward_overrides
@@ -12,6 +14,57 @@ DEFAULT_TASK = "Template-Redrhex-Direct-v0"
 DEFAULT_VIDEO_PRESET = "high"
 DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
+SPRING_BACKENDS = ("explicit", "native")
+_TOP_LEVEL_SPRING_BACKEND_RE = re.compile(r"^spring_backend\s*:\s*(.*)$")
+
+
+def validate_spring_backend(spring_backend: str) -> None:
+    if spring_backend not in SPRING_BACKENDS:
+        raise ValueError(f"spring_backend must be one of: {', '.join(SPRING_BACKENDS)}")
+
+
+def _spring_backend_from_yaml(path: Path) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OSError(f"Could not read spring backend metadata: {path}") from exc
+    values = []
+    for line in lines:
+        match = _TOP_LEVEL_SPRING_BACKEND_RE.match(line)
+        if not match:
+            continue
+        value = match.group(1).split("#", 1)[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values.append(value)
+    if len(values) > 1:
+        raise ValueError(f"Duplicate top-level spring_backend entries in {path}")
+    if values:
+        validate_spring_backend(values[0])
+        return values[0]
+    return None
+
+
+def resolve_spring_backend(run: dict[str, Any] | None, checkpoint: str | Path | None = None) -> str:
+    params = (run or {}).get("params")
+    if isinstance(params, dict) and "spring_backend" in params:
+        spring_backend = params["spring_backend"]
+        validate_spring_backend(spring_backend)
+        return spring_backend
+
+    log_dir = (run or {}).get("log_dir")
+    if log_dir:
+        spring_backend = _spring_backend_from_yaml(Path(str(log_dir)) / "params" / "torsion_spring.yaml")
+        if spring_backend is not None:
+            return spring_backend
+
+    if checkpoint:
+        spring_backend = _spring_backend_from_yaml(Path(checkpoint).parent / "params" / "torsion_spring.yaml")
+        if spring_backend is not None:
+            return spring_backend
+    return "explicit"
 
 
 @dataclass(frozen=True)
@@ -69,6 +122,7 @@ class TrainingParams:
     num_envs: int = 4
     max_iterations: int = 1
     device: str = "cuda:0"
+    spring_backend: str = "explicit"
     headless: bool = True
     seed: int | None = None
     resume: bool = False
@@ -94,6 +148,7 @@ class TrainingParams:
             num_envs=int(data.get("num_envs") or 4),
             max_iterations=int(data.get("max_iterations") or 1),
             device=str(data.get("device") or "cuda:0"),
+            spring_backend=data["spring_backend"] if "spring_backend" in data else "explicit",
             headless=bool(data.get("headless", True)),
             seed=int(data["seed"]) if data.get("seed") not in (None, "") else None,
             resume=bool(data.get("resume", False)),
@@ -122,6 +177,7 @@ class TrainingParams:
             raise ValueError("max_iterations must be between 1 and 100000")
         if not (self.device == "cpu" or self.device.startswith("cuda")):
             raise ValueError("device must be cpu or cuda[:index]")
+        validate_spring_backend(self.spring_backend)
         if self.resume and not self.checkpoint:
             raise ValueError("checkpoint is required when resume is enabled")
         if self.display_name and len(self.display_name) > 120:
@@ -146,6 +202,8 @@ def training_argv(params: TrainingParams) -> list[str]:
         str(params.max_iterations),
         "--device",
         params.device,
+        "--spring-backend",
+        params.spring_backend,
     ]
     # train.py only applies active_*_override.json when this flag is present.
     argv.append("--panel_overrides")
@@ -165,6 +223,7 @@ def play_argv(
     num_envs: int = 1,
     device: str = "cuda:0",
     *,
+    spring_backend: str = "explicit",
     headless: bool = False,
     video: bool = False,
     video_length: int | None = None,
@@ -178,6 +237,7 @@ def play_argv(
     camera_lookat: tuple[float, float, float] | None = None,
     export_policy_only: bool = False,
 ) -> list[str]:
+    validate_spring_backend(spring_backend)
     argv = [
         "scripts/rsl_rl/play.py",
         "--task",
@@ -186,6 +246,8 @@ def play_argv(
         str(num_envs),
         "--device",
         device,
+        "--spring-backend",
+        spring_backend,
     ]
     if headless:
         argv.append("--headless")
@@ -220,12 +282,15 @@ def export_onnx_argv(
     task: str = DEFAULT_TASK,
     num_envs: int = 1,
     device: str = "cuda:0",
+    *,
+    spring_backend: str = "explicit",
 ) -> list[str]:
     return play_argv(
         checkpoint=checkpoint,
         task=task,
         num_envs=num_envs,
         device=device,
+        spring_backend=spring_backend,
         headless=True,
         export_policy_only=True,
     )
