@@ -408,3 +408,14 @@ def test_dead_run_id_in_hash_opens_history_without_error(panel, page):
     page.goto(f"{panel['url']}#/history/run_that_does_not_exist")
     page.wait_for_selector("#history.view.active")
     expect(page.locator("#panel-status .toast")).to_have_count(0)
+
+
+def test_malformed_hash_degrades_quietly(panel, page):
+    page.goto(f"{panel['url']}#/history/%")
+    # Applying the malformed route happens inside the boot promise chain,
+    # after refreshAll()'s network calls settle; wait for that to finish
+    # so the assertion below isn't racing the async error handling and
+    # passing "by accident" while the toast is still on its way.
+    page.wait_for_load_state("networkidle")
+    page.wait_for_selector("#train.view.active")
+    expect(page.locator("#panel-status .toast")).to_have_count(0)

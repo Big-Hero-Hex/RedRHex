@@ -88,7 +88,12 @@ function parseHashRoute() {
   if (!raw) return { view: "train", runId: "" };
   const [view, encodedRun] = raw.split("/");
   if (!ROUTE_VIEWS.includes(view)) return { view: "train", runId: "" };
-  return { view, runId: encodedRun ? decodeURIComponent(encodedRun) : "" };
+  try {
+    return { view, runId: encodedRun ? decodeURIComponent(encodedRun) : "" };
+  } catch (error) {
+    if (error instanceof URIError) return { view: "train", runId: "" };
+    throw error;
+  }
 }
 
 async function applyHashRoute() {
