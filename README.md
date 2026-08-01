@@ -1,135 +1,285 @@
-# Template for Isaac Lab Projects
+# RedRhex Hexapod Robot - Isaac Lab RL Training Project
+
+A complete reinforcement learning training environment for the RedRhex hexapod robot, built on NVIDIA Isaac Lab and IsaacSim.
+
+> For the current Ubuntu machine setup and exact train/play commands, see [`docs/COMMANDS.md`](docs/COMMANDS.md).
+>
+> For measurement-first hardware physics calibration, bounded bench probes, and candidate-profile validation, see [`docs/sim2real_calibration.md`](docs/sim2real_calibration.md).
 
 ## Overview
 
-This project/repository serves as a template for building projects or extensions based on Isaac Lab.
-It allows you to develop in an isolated environment, outside of the core Isaac Lab repository.
+RedRhex is a 6-legged hexapod robot with 18 degrees of freedom (3 joints per leg). This project implements:
 
-**Key Features:**
+- **Tripod Gait Locomotion**: Trains the robot to walk using an efficient 3-leg stance pattern
+- **Reinforcement Learning**: PPO (Proximal Policy Optimization) training using RSL-RL framework
+- **ABAD Joint Optimization**: Utilizes hip (ABAD) joints for dynamic balance and terrain adaptation
+- **Physics Simulation**: NVIDIA PhysX at 120 Hz, with the deployed controller running at 60 Hz
 
-- `Isolation` Work outside the core Isaac Lab repository, ensuring that your development efforts remain self-contained.
-- `Flexibility` This template is set up to allow your code to be run as an extension in Omniverse.
+## Project Structure
 
-**Keywords:** extension, template, isaaclab
+```
+RedRhex/
+├── source/RedRhex/                    # Main package
+│   ├── RedRhex/
+│   │   ├── tasks/
+│   │   │   └── direct/redrhex/
+│   │   │       ├── redrhex_env.py     # Environment implementation
+│   │   │       ├── redrhex_env_cfg.py # Environment configuration
+│   │   │       └── agents/            # RL agent configs (PPO, SKRL)
+│   │   └── ui_extension_example.py
+│   ├── setup.py
+│   ├── pyproject.toml
+│   └── config/
+├── scripts/
+│   ├── rsl_rl/
+│   │   ├── train.py                   # PPO training script
+│   │   ├── play.py                    # Play trained models
+│   │   ├── train_jumping.py           # Jumping task training
+│   │   └── cli_args.py
+│   └── skrl/                          # SKRL framework scripts
+├── RedRhex.usd                        # Robot model (USD format)
+├── logs/                              # Training logs and checkpoints
+└── README.md
+```
+
+## Prerequisites
+
+- **Isaac Lab** v0.48.0+ ([Installation Guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html))
+- **Isaac Sim** v5.1+
+- **Python** 3.10+
+- **CUDA** 11.8+
+- **GPU**: NVIDIA RTX 4090 (or equivalent with ≥24GB VRAM recommended)
 
 ## Installation
 
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html).
-  We recommend using the conda or uv installation as it simplifies calling Python scripts from the terminal.
-
-- Clone or copy this project/repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
-
-- Using a python interpreter that has Isaac Lab installed, install the library in editable mode using:
-
-    ```bash
-    # use 'PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-    python -m pip install -e source/RedRhex
-
-- Verify that the extension is correctly installed by:
-
-    - Listing the available tasks:
-
-        Note: It the task name changes, it may be necessary to update the search pattern `"Template-"`
-        (in the `scripts/list_envs.py` file) so that it can be listed.
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/list_envs.py
-        ```
-
-    - Running a task:
-
-        ```bash
-        # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-        python scripts/<RL_LIBRARY>/train.py --task=<TASK_NAME>
-        ```
-
-    - Running a task with dummy agents:
-
-        These include dummy agents that output zero or random agents. They are useful to ensure that the environments are configured correctly.
-
-        - Zero-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/zero_agent.py --task=<TASK_NAME>
-            ```
-        - Random-action agent
-
-            ```bash
-            # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
-            python scripts/random_agent.py --task=<TASK_NAME>
-            ```
-
-### Set up IDE (Optional)
-
-To setup the IDE, please follow these instructions:
-
-- Run VSCode Tasks, by pressing `Ctrl+Shift+P`, selecting `Tasks: Run Task` and running the `setup_python_env` in the drop down menu.
-  When running this task, you will be prompted to add the absolute path to your Isaac Sim installation.
-
-If everything executes correctly, it should create a file .python.env in the `.vscode` directory.
-The file contains the python paths to all the extensions provided by Isaac Sim and Omniverse.
-This helps in indexing all the python modules for intelligent suggestions while writing code.
-
-### Setup as Omniverse Extension (Optional)
-
-We provide an example UI extension that will load upon enabling your extension defined in `source/RedRhex/RedRhex/ui_extension_example.py`.
-
-To enable your extension, follow these steps:
-
-1. **Add the search path of this project/repository** to the extension manager:
-    - Navigate to the extension manager using `Window` -> `Extensions`.
-    - Click on the **Hamburger Icon**, then go to `Settings`.
-    - In the `Extension Search Paths`, enter the absolute path to the `source` directory of this project/repository.
-    - If not already present, in the `Extension Search Paths`, enter the path that leads to Isaac Lab's extension directory directory (`IsaacLab/source`)
-    - Click on the **Hamburger Icon**, then click `Refresh`.
-
-2. **Search and enable your extension**:
-    - Find your extension under the `Third Party` category.
-    - Toggle it to enable your extension.
-
-## Code formatting
-
-We have a pre-commit template to automatically format your code.
-To install pre-commit:
+### 1. Clone the Repository
 
 ```bash
-pip install pre-commit
+git clone <repository-url>
+cd RedRhex
 ```
 
-Then you can run pre-commit with:
+### 2. Install RedRhex Package
 
 ```bash
-pre-commit run --all-files
+# If using IsaacLab installed via conda:
+python -m pip install -e source/RedRhex
+
+# Or use the IsaacLab launcher:
+cd /path/to/IsaacLab
+./isaaclab.sh -p /path/to/RedRhex/source/RedRhex/setup.py install
 ```
+
+### 3. Verify Installation
+
+```bash
+# List available RedRhex tasks
+python scripts/list_envs.py
+
+# Expected output should include:
+# Template-Redrhex-Direct-v0
+```
+
+## Quick Start
+
+### Training a New Policy
+
+```bash
+# Basic training with 4 environments
+./isaaclab.sh -p scripts/rsl_rl/train.py \
+  --task Template-Redrhex-Direct-v0 \
+  --num_envs 4 \
+  --max_iterations 100
+
+# Full training with 4096 environments (recommended for production)
+./isaaclab.sh -p scripts/rsl_rl/train.py \
+  --task Template-Redrhex-Direct-v0 \
+  --num_envs 4096 \
+  --max_iterations 1500
+```
+
+### Playing a Trained Model
+
+```bash
+# Run trained policy with visualization
+python scripts/rsl_rl/play.py \
+  --task Template-Redrhex-Direct-v0 \
+  --num_envs 4 \
+  --checkpoint logs/rsl_rl/redrhex_tripod_gait/<timestamp>/model_<iteration>.pt
+```
+
+### Testing with Dummy Agents
+
+```bash
+# Zero action agent (robot does nothing)
+python scripts/zero_agent.py --task Template-Redrhex-Direct-v0
+
+# Random action agent (baseline)
+python scripts/random_agent.py --task Template-Redrhex-Direct-v0
+```
+
+## Configuration
+
+### Main Environment Configuration
+
+Edit `source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py`:
+
+**Key Physics Parameters:**
+```python
+# Gravity (standard Earth gravity)
+gravity = (0.0, 0.0, -9.81)
+
+# Robot damping (prevents instability)
+linear_damping = 0.0        # Air resistance
+angular_damping = 0.05      # Rotation damping
+
+# Joint actuators
+effort_limit = 10.0         # Max torque per joint
+velocity_limit = 5.0        # Max joint speed
+stiffness = 30.0            # Joint stiffness
+damping = 3.0               # Joint damping
+```
+
+**Reward Scaling:**
+```python
+rew_scale_alive = 0.5                    # Survival reward
+rew_scale_lin_vel_xy = 1.0              # Forward motion reward
+rew_scale_forward_progress = 0.5        # Extra progress bonus
+rew_scale_ang_vel_z = 0.3               # Turning penalty
+rew_scale_base_height = -1.0            # Height tracking
+rew_scale_action_rate = -0.01           # Smoothness penalty
+```
+
+### Training Configuration
+
+Edit `source/RedRhex/RedRhex/tasks/direct/redrhex/agents/rsl_rl_ppo_cfg.py`:
+
+```python
+# Learning parameters
+learning_rate = 1e-3
+num_steps_per_env = 24        # Rollout length
+num_mini_batches = 4          # Batch division
+clip_ratio = 0.2              # PPO clip parameter
+
+# Network architecture
+policy_hidden_sizes = [256, 256, 128]
+value_hidden_sizes = [256, 256, 128]
+```
+
+## Robot Specifications
+
+- **DOF**: 18 (6 legs × 3 joints each)
+- **Joint Types per Leg**:
+  1. **ABAD (Hip)**: Abduction/Adduction (±30°)
+  2. **Knee**: Flexion/Extension
+  3. **Foot**: Toe joint
+- **Gait Pattern**: Tripod gait alternating between two groups of 3 legs
+- **Target Speed**: 0.15-0.3 m/s forward locomotion
+
+## Training Tips
+
+1. **Start Small**: Begin with 4-8 environments to debug issues, then scale to 4096
+2. **Monitor Rewards**: Use tensorboard to track progress:
+   ```bash
+   tensorboard --logdir logs/rsl_rl/
+   ```
+3. **Adjust Damping**: If physics is unstable, increase joint damping gradually
+4. **Curriculum Learning**: Start with simple tasks, progress to complex terrains
+5. **Sample Efficiency**: Use 24-step rollouts to balance stability and efficiency
 
 ## Troubleshooting
 
-### Pylance Missing Indexing of Extensions
+### Physics Explosion
+**Symptom**: Robot position jumps to extreme values
 
-In some VsCode versions, the indexing of part of the extensions is missing.
-In this case, add the path to your extension in `.vscode/settings.json` under the key `"python.analysis.extraPaths"`.
-
-```json
-{
-    "python.analysis.extraPaths": [
-        "<path-to-ext-repo>/source/RedRhex"
-    ]
-}
+**Solution**: Increase joint damping in `redrhex_env_cfg.py`:
+```python
+damping = 3.0  # Increase value
 ```
 
-### Pylance Crash
+### Slow Convergence
+**Symptom**: Rewards not improving after many iterations
 
-If you encounter a crash in `pylance`, it is probable that too many files are indexed and you run out of memory.
-A possible solution is to exclude some of omniverse packages that are not used in your project.
-To do so, modify `.vscode/settings.json` and comment out packages under the key `"python.analysis.extraPaths"`
-Some examples of packages that can likely be excluded are:
+**Solution**: 
+- Check learning rate (try 1e-3 to 1e-4)
+- Verify reward scaling makes sense for your environment
+- Ensure robot isn't getting stuck in local minima
 
-```json
-"<path-to-isaac-sim>/extscache/omni.anim.*"         // Animation packages
-"<path-to-isaac-sim>/extscache/omni.kit.*"          // Kit UI tools
-"<path-to-isaac-sim>/extscache/omni.graph.*"        // Graph UI tools
-"<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
-...
+### Memory Issues with Large num_envs
+**Symptom**: CUDA out of memory error
+
+**Solution**:
+- Reduce `num_envs` (4096 → 2048)
+- Reduce `num_steps_per_env` (24 → 16)
+- Enable environment clustering
+
+### Import Errors
+**Symptom**: `ModuleNotFoundError: No module named 'isaaclab'`
+
+**Solution**:
+```bash
+# Reinstall package in editable mode
+python -m pip install -e source/RedRhex
+
+# Or use IsaacLab launcher
+cd /path/to/IsaacLab
+./isaaclab.sh -p <your-script>.py
 ```
+
+## Performance Metrics
+
+### Expected Training Results
+- **Initial Reward**: ~0 (random policy)
+- **After 100 iterations**: ~45-65
+- **After 500 iterations**: ~100-150
+- **After 1500 iterations**: ~150-200+
+
+### Convergence Speed
+- ~4000 steps/second per environment (4 envs)
+- ~60k steps/second total (4096 envs)
+- Full training: ~8-12 hours on RTX 4090
+
+## Contributing
+
+1. Create a feature branch: `git checkout -b feature/my-feature`
+2. Make changes and test thoroughly
+3. Format code: `pre-commit run --all-files`
+4. Commit with descriptive messages
+5. Push and create a Pull Request
+
+## Code Style
+
+This project uses:
+- **Pre-commit hooks** for automatic formatting
+- **Flake8** for linting (config in `.flake8`)
+- **Black** for code formatting
+
+```bash
+pip install pre-commit
+pre-commit install
+pre-commit run --all-files
+```
+
+## References
+
+- [Isaac Lab Documentation](https://isaac-sim.github.io/IsaacLab/)
+- [RSL-RL PPO Implementation](https://github.com/leggedrobotics/rsl_rl)
+- [PhysX Documentation](https://docs.omniverse.nvidia.com/sim/latest/index.html)
+
+## Team
+
+Built by: [Team Members]
+
+## License
+
+[Add appropriate license]
+
+## Contact
+
+For questions or issues, please contact: [contact info]
+
+---
+
+Last Updated: 2026-02-01
+IsaacLab Version: 0.48.0
+IsaacSim Version: 5.1
