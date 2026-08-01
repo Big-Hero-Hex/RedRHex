@@ -1,0 +1,35 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: decision
+status: <accepted|superseded>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="context"></a>
+## 背景
+
+<說明需要長期決策的影響因素與限制。>
+
+<a id="decision"></a>
+## 決策
+
+<陳述所選方向及其界線。>
+
+<a id="alternatives"></a>
+## 替代方案
+
+<列出重要替代方案及未選擇的原因。>
+
+<a id="consequences"></a>
+## 後果
+
+<說明正面、負面及後續影響。>
+
+<a id="supersession"></a>
+## 取代關係
+
+<連結取代本決策的決策，或說明未來取代條件。>

@@ -1,0 +1,45 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: experiment-summary
+status: published
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="question"></a>
+## 問題
+
+<說明此證據要回答的問題及其影響的決策。>
+
+<a id="baseline"></a>
+## 基準
+
+<說明比較基準及其來源。>
+
+<a id="method"></a>
+## 方法
+
+<說明輸入、控制條件、程序及評估量測方式。>
+
+<a id="results"></a>
+## 結果
+
+<報告量測結果，不得作出超出證據的推論。>
+
+<a id="decision-impact"></a>
+## 決策影響
+
+<說明結果如何改變或維持基準、建議或決策。>
+
+<a id="limitations"></a>
+## 限制
+
+<說明不確定性、排除項目及解讀威脅。>
+
+<a id="artifacts-and-addenda"></a>
+## 成品與附錄
+
+<連結可長期保存的證據，並以有日期的附錄更正，不得默默改寫結果。>

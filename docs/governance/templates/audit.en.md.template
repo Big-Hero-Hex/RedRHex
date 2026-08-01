@@ -1,0 +1,40 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: audit
+status: published
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="scope"></a>
+## Scope
+
+<Define the reviewed boundary, criteria, and exclusions.>
+
+<a id="method"></a>
+## Method
+
+<Describe the review procedure and evidence selection.>
+
+<a id="findings"></a>
+## Findings
+
+- <Finding supported by cited evidence>.
+
+<a id="actions"></a>
+## Actions
+
+- [ ] <Owner-neutral corrective or follow-up action>.
+
+<a id="evidence"></a>
+## Evidence
+
+<Link durable records supporting the findings.>
+
+<a id="follow-up"></a>
+## Follow-up
+
+<State the review condition, closure evidence, or next audit trigger.>

@@ -28,25 +28,25 @@ Preserve these results as checkpoint evidence; later failures must be explained 
 <a id="phase-1-isolation"></a>
 ## Phase 1 — Isolation and written checkpoint
 
-- [ ] Create a dedicated worktree and branch from `5de992d`; preserve all unrelated worktrees.
-- [ ] Add the annotated source tag `docs-reorg-source-2026-08-01` at the source commit.
-- [ ] Persist the approved English and Traditional Chinese design pair and this implementation-plan pair.
-- [ ] Manually compare each pair's nonlocalized frontmatter, explicit anchor IDs, constraints, commands, and acceptance criteria.
-- [ ] Hold a written-spec review checkpoint and record approval before migration or tooling implementation begins.
+- [x] Create a dedicated worktree and branch from `5de992d`; preserve all unrelated worktrees.
+- [x] Add the annotated source tag `docs-reorg-source-2026-08-01` at the source commit.
+- [x] Persist the approved English and Traditional Chinese design pair and this implementation-plan pair.
+- [x] Manually compare each pair's nonlocalized frontmatter, explicit anchor IDs, constraints, commands, and acceptance criteria.
+- [x] Hold a written-spec review checkpoint and record approval before migration or tooling implementation begins.
 
 **Phase acceptance:** the branch is isolated at the correct source, unrelated worktrees are unchanged, the annotated source tag resolves to `5de992d`, all four canonical checkpoint documents validate as equivalent pairs, and written approval is recorded.
 
 <a id="phase-2-governance"></a>
 ## Phase 2 — Governance and target tree
 
-- [ ] Create bilingual operator and developer portals and the approved central directory tree.
-- [ ] Define the frontmatter schema, enums, lifecycle/location rules, naming rules, staleness policy, and documentation-impact policy in governance documents.
-- [ ] Add templates for every maintained document family and a translation guide covering meaning parity and stable explicit anchors.
-- [ ] Define the short bilingual root/component `README.md` router convention.
-- [ ] Add root `AGENTS.md` as a thin operational adapter that points agents to canonical governance.
-- [ ] Add root `CLAUDE.md` with an `@AGENTS.md` import so Claude Code receives the same repository requirements.
-- [ ] Create a heading-level migration manifest with columns for old path, old heading, disposition, replacement document or documents, and removal commit.
-- [ ] Add every heading from every source document to the manifest before migrating or deleting that source.
+- [x] Create bilingual operator and developer portals and the approved central directory tree.
+- [x] Define the frontmatter schema, enums, lifecycle/location rules, naming rules, staleness policy, and documentation-impact policy in governance documents.
+- [x] Add templates for every maintained document family and a translation guide covering meaning parity and stable explicit anchors.
+- [x] Define the short bilingual root/component `README.md` router convention.
+- [x] Add root `AGENTS.md` as a thin operational adapter that points agents to canonical governance.
+- [x] Add root `CLAUDE.md` with an `@AGENTS.md` import so Claude Code receives the same repository requirements.
+- [x] Create a heading-level migration manifest with columns for old path, old heading, disposition, replacement document or documents, and removal commit.
+- [x] Add every heading from every source document to the manifest before migrating or deleting that source.
 
 **Phase acceptance:** portals and governance are paired and linked; schema examples pass the documented rules; router and translation conventions are unambiguous; root agent adapters point to canonical governance without policy duplication; and every in-scope old heading has a manifest row before content migration starts.
 

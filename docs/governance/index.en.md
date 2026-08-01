@@ -29,6 +29,8 @@ These governance documents are the single source of truth for RedRHex documentat
 - [Naming conventions](naming-conventions.en.md) defines canonical filenames.
 - [Document lifecycle](document-lifecycle.en.md) defines status transitions, staleness, retention, and removal.
 - [Translation guide](translation-guide.en.md) defines bilingual parity and pair review.
+- [Document templates](document-templates.en.md) provide paired starting structures for every maintained family.
+- [Migration manifest](migration-manifest.en.md) defines heading-level source traceability and removal gates.
 - [Documentation impact](documentation-impact.en.md) maps repository changes to documentation work and PR declarations.
 - [README router convention](readme-router-convention.en.md) defines the concise bilingual README exception.
 

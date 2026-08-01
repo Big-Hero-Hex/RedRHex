@@ -29,6 +29,8 @@ last_reviewed: 2026-08-01
 - [命名慣例](naming-conventions.zh-TW.md)定義正式檔名。
 - [文件生命週期](document-lifecycle.zh-TW.md)定義狀態流轉、過時警告、保留及移除規則。
 - [翻譯指南](translation-guide.zh-TW.md)定義雙語一致性與配對審查。
+- [文件範本](document-templates.zh-TW.md)提供每種維護文件類型的雙語起始結構。
+- [遷移清單](migration-manifest.zh-TW.md)定義標題層級來源可追溯性與移除關卡。
 - [文件影響](documentation-impact.zh-TW.md)把儲存庫變更對應至文件工作與 PR 宣告。
 - [README 路由慣例](readme-router-convention.zh-TW.md)定義簡短雙語 README 例外。
 

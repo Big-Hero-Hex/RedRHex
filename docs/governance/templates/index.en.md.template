@@ -1,0 +1,30 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: index
+status: <status>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="purpose"></a>
+## Purpose
+
+<State what this portal or section contains and why it exists.>
+
+<a id="audience-routes"></a>
+## Audience routes
+
+- [<Route label>](<locale-matched-target>) — <reader outcome>.
+
+<a id="contents"></a>
+## Contents
+
+- [<Document title>](<locale-matched-target>) — <document purpose>.
+
+<a id="status"></a>
+## Status
+
+<Describe coverage, known gaps, and the next review condition.>

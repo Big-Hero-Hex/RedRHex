@@ -57,4 +57,4 @@ Git 是檔案庫；現行文件樹不作為雜物間。可長期保存的內容�
 <a id="related-governance"></a>
 ## 相關治理規則
 
-詳細契約請使用[中繼資料結構描述](metadata-schema.zh-TW.md)、[命名慣例](naming-conventions.zh-TW.md)、[文件生命週期](document-lifecycle.zh-TW.md)、[翻譯指南](translation-guide.zh-TW.md)、[文件影響規則](documentation-impact.zh-TW.md)及 [README 路由慣例](readme-router-convention.zh-TW.md)。
+詳細契約請使用[中繼資料結構描述](metadata-schema.zh-TW.md)、[命名慣例](naming-conventions.zh-TW.md)、[文件生命週期](document-lifecycle.zh-TW.md)、[翻譯指南](translation-guide.zh-TW.md)、[文件範本](document-templates.zh-TW.md)、[遷移清單](migration-manifest.zh-TW.md)、[文件影響規則](documentation-impact.zh-TW.md)及 [README 路由慣例](readme-router-convention.zh-TW.md)。

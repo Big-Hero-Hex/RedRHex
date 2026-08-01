@@ -1,0 +1,30 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: index
+status: <status>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="purpose"></a>
+## 目的
+
+<說明此入口或區段包含的內容及其存在目的。>
+
+<a id="audience-routes"></a>
+## 讀者路徑
+
+- [<路徑標籤>](<語言相符的目標>) — <讀者成果>。
+
+<a id="contents"></a>
+## 內容
+
+- [<文件標題>](<語言相符的目標>) — <文件用途>。
+
+<a id="status"></a>
+## 狀態
+
+<說明涵蓋範圍、已知缺口及下次審查條件。>

@@ -1,0 +1,30 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: roadmap
+status: active
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="horizon"></a>
+## 時程範圍
+
+<定義此路線圖涵蓋的時間或成果範圍。>
+
+<a id="current-priorities"></a>
+## 目前優先事項
+
+1. <優先事項與預期成果>。
+
+<a id="dependencies"></a>
+## 相依性
+
+- <相依項目、負責人或前置條件>。
+
+<a id="exit-criteria"></a>
+## 結束條件
+
+- [ ] <將完成工作移至其長期紀錄的條件>。

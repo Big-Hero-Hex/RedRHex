@@ -1,0 +1,40 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: audit
+status: published
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="scope"></a>
+## 範圍
+
+<定義審查界線、準則及排除項目。>
+
+<a id="method"></a>
+## 方法
+
+<說明審查程序與證據選取方式。>
+
+<a id="findings"></a>
+## 發現
+
+- <有引用證據支持的發現>。
+
+<a id="actions"></a>
+## 行動
+
+- [ ] <不預設負責人的修正或後續行動>。
+
+<a id="evidence"></a>
+## 證據
+
+<連結支持發現的長期紀錄。>
+
+<a id="follow-up"></a>
+## 後續追蹤
+
+<說明審查條件、結案證據或下次稽核觸發條件。>

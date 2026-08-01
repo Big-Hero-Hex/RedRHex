@@ -57,4 +57,4 @@ Git is the archive; the live documentation tree is not an attic. Durable content
 <a id="related-governance"></a>
 ## Related governance
 
-Use the [metadata schema](metadata-schema.en.md), [naming conventions](naming-conventions.en.md), [document lifecycle](document-lifecycle.en.md), [translation guide](translation-guide.en.md), [documentation-impact rules](documentation-impact.en.md), and [README router convention](readme-router-convention.en.md) for their detailed contracts.
+Use the [metadata schema](metadata-schema.en.md), [naming conventions](naming-conventions.en.md), [document lifecycle](document-lifecycle.en.md), [translation guide](translation-guide.en.md), [document templates](document-templates.en.md), [migration manifest](migration-manifest.en.md), [documentation-impact rules](documentation-impact.en.md), and [README router convention](readme-router-convention.en.md) for their detailed contracts.

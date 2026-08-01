@@ -1,0 +1,36 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: release
+status: published
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="version-and-date"></a>
+## 版本與日期
+
+- 版本或里程碑：<已驗證識別碼>
+- 日期：<YYYY-MM-DD>
+
+<a id="summary"></a>
+## 摘要
+
+<摘要已發布成果與受影響讀者。>
+
+<a id="changes"></a>
+## 變更
+
+- <已驗證的發布變更>。
+
+<a id="compatibility-and-migration"></a>
+## 相容性與遷移
+
+<說明相容性限制、必要遷移，或確認不需要遷移。>
+
+<a id="verification-and-evidence"></a>
+## 驗證與證據
+
+<連結或說明支持此版本紀錄的證據。>
