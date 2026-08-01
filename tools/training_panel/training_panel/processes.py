@@ -1608,6 +1608,23 @@ class ProcessRegistry:
         log_dir, _ = self._log_dir_from_process_log_text(text)
         return log_dir
 
+    @staticmethod
+    def _canonical_contained_log_dir(
+        path: Path, *roots: Path, allow_missing: bool = False
+    ) -> tuple[Path, float | None] | None:
+        try:
+            canonical_path = path.resolve()
+            path_stat = canonical_path.stat()
+        except OSError:
+            if allow_missing and all(canonical_path.is_relative_to(root) for root in roots):
+                return canonical_path, None
+            return None
+        if not stat.S_ISDIR(path_stat.st_mode) or any(
+            not canonical_path.is_relative_to(root) for root in roots
+        ):
+            return None
+        return canonical_path, path_stat.st_mtime
+
     def _log_dir_from_process_log_text(self, text: str) -> tuple[str | None, bool]:
         experiment_roots = list(
             re.finditer(r"\[INFO\][ \t]+Logging experiment in directory:[ \t]*([^\r\n]+)", text)
@@ -1621,40 +1638,46 @@ class ProcessRegistry:
                 root_path = Path(root_matches[-1].group(1).strip()).resolve()
                 if not root_path.is_relative_to(rsl_rl_root):
                     return None, True
-                candidates = []
-                for path in root_path.glob(f"{name}*"):
-                    try:
-                        candidate = path.resolve()
-                        candidate_stat = candidate.stat()
-                    except OSError:
-                        continue
-                    if (
-                        not stat.S_ISDIR(candidate_stat.st_mode)
-                        or not candidate.is_relative_to(rsl_rl_root)
-                        or not candidate.is_relative_to(root_path)
-                    ):
-                        continue
-                    candidates.append((candidate, candidate_stat.st_mtime))
+                candidates = [
+                    candidate
+                    for path in root_path.glob(f"{name}*")
+                    if (candidate := self._canonical_contained_log_dir(
+                        path, rsl_rl_root, root_path
+                    ))
+                    is not None
+                ]
                 if candidates:
                     return str(max(candidates, key=lambda item: item[1])[0]), True
                 return None, True
-            candidates = [path for path in self.paths.rsl_rl_log_root.glob(f"{name}*") if path.is_dir()]
+            legacy_root = self.paths.rsl_rl_log_root.resolve()
+            candidates = [
+                candidate
+                for path in legacy_root.glob(f"{name}*")
+                if (candidate := self._canonical_contained_log_dir(path, legacy_root))
+                is not None
+            ]
             if candidates:
-                return str(max(candidates, key=lambda path: path.stat().st_mtime)), True
-        root = re.escape(str(self.paths.rsl_rl_log_root))
+                return str(max(candidates, key=lambda item: item[1])[0]), True
+        log_root = self.paths.rsl_rl_log_root
+        canonical_log_root = log_root.resolve()
+        root = re.escape(str(log_root))
         matches = re.findall(rf"({root}/[^\s'\"<>]+)", text)
         log_dirs = []
         for match in matches:
             path = Path(match)
             if path.name.startswith("events.out.tfevents") or path.name.startswith("model_"):
                 path = path.parent
-            while path.parent != self.paths.rsl_rl_log_root and path != self.paths.rsl_rl_log_root:
+            while path.parent != log_root and path != log_root:
                 path = path.parent
-            if path.parent == self.paths.rsl_rl_log_root:
-                log_dirs.append(path)
+            if path.parent == log_root and (
+                candidate := self._canonical_contained_log_dir(
+                    path, canonical_log_root, allow_missing=True
+                )
+            ):
+                log_dirs.append(candidate)
         if not log_dirs:
             return None, bool(exact_names)
-        return str(log_dirs[-1]), bool(exact_names)
+        return str(log_dirs[-1][0]), bool(exact_names)
 
     def _is_repo_training_process(self, command: str, pid_text: str) -> bool:
         if self._is_tmux_server_command(command):

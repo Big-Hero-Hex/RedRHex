@@ -637,6 +637,50 @@ class ProcessRegistryTests(unittest.TestCase):
 
             self.assertIsNone(registry._log_dir_from_process_log("forward_fast"))
 
+    def test_legacy_exact_name_rejects_symlinked_candidate_outside_log_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            outside_log = root / "outside" / f"{timestamp}_wheg_locomotion"
+            outside_log.mkdir(parents=True)
+            paths.rsl_rl_log_root.mkdir(parents=True)
+            (paths.rsl_rl_log_root / outside_log.name).symlink_to(
+                outside_log, target_is_directory=True
+            )
+            process_log = paths.process_log_dir / "legacy.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "legacy", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("legacy"))
+
+    def test_textual_log_path_rejects_symlinked_directory_outside_log_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            outside_log = root / "outside" / "2026-06-01_12-00-00_wheg_locomotion"
+            outside_log.mkdir(parents=True)
+            paths.rsl_rl_log_root.mkdir(parents=True)
+            symlinked_log = paths.rsl_rl_log_root / outside_log.name
+            symlinked_log.symlink_to(outside_log, target_is_directory=True)
+            process_log = paths.process_log_dir / "legacy.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"saved {symlinked_log / 'events.out.tfevents.test'}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "legacy", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("legacy"))
+
     def test_completed_legacy_exact_name_without_match_does_not_time_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
