@@ -17,6 +17,7 @@ _FIELD_LINE = _re.compile(r"([a-z][a-z_]*): (.*)\Z")
 _BLOCK_SCALAR = _re.compile(
     r"[|>](?:(?:[1-9][+-]?)|(?:[+-][1-9]?))?(?:[ \t]+#.*)?\Z"
 )
+_NON_SCALAR_PREFIX = _re.compile(r"(?:[!&*#]|[-?:][ \t])")
 _REQUIRED_FIELDS = frozenset(
     {
         "id",
@@ -72,7 +73,11 @@ def _parse_frontmatter(text: str) -> _ParsedDocument | None:
         value = raw_value.strip()
         if not value or key in metadata:
             return None
-        if value.startswith(("[", "{")) or _BLOCK_SCALAR.fullmatch(value):
+        if (
+            value.startswith(("[", "{"))
+            or _BLOCK_SCALAR.fullmatch(value)
+            or _NON_SCALAR_PREFIX.match(value)
+        ):
             return None
         metadata[key] = value
     return _ParsedDocument(metadata, tuple(lines[closing_index + 1 :]))

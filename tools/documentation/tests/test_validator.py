@@ -231,6 +231,45 @@ class RepositoryValidationTests(unittest.TestCase):
         )
         self.assertTrue(all(issue.message == "invalid frontmatter" for issue in issues))
 
+    def test_frontmatter_rejects_leading_yaml_indicators_but_accepts_quoted_scalars(
+        self,
+    ) -> None:
+        invalid_titles = (
+            "# comment",
+            "!!seq [Guide]",
+            "&items [Guide]",
+            "!!str |",
+            "&body >-",
+            "*items",
+            "- item",
+            "? key",
+            ": value",
+        )
+        expected: list[Issue] = []
+        for index, title in enumerate(invalid_titles):
+            stem = f"frontmatter/leading-indicator-{index}"
+            document_id = f"leading-indicator-{index}"
+            self.write(f"{stem}.en.md", self.document(document_id=document_id, title=title))
+            self.write(
+                f"{stem}.zh-TW.md",
+                self.document(document_id=document_id, title="有效", lang="zh-TW"),
+            )
+            expected.append(
+                Issue(Path(f"{stem}.en.md"), "frontmatter", "invalid frontmatter")
+            )
+
+        quoted_titles = ("'!!seq [Guide]'", '"&items [Guide]"', "'# comment'")
+        for index, title in enumerate(quoted_titles):
+            stem = f"frontmatter/quoted-scalar-{index}"
+            document_id = f"quoted-scalar-{index}"
+            self.write(f"{stem}.en.md", self.document(document_id=document_id, title=title))
+            self.write(
+                f"{stem}.zh-TW.md",
+                self.document(document_id=document_id, title="有效", lang="zh-TW"),
+            )
+
+        self.assertEqual(validate_repository(self.repo), expected)
+
     def test_frontmatter_requires_exact_field_set(self) -> None:
         fields = (
             "id",
