@@ -352,6 +352,25 @@ class PullRequestDeclarationCliTests(unittest.TestCase):
         )
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_deeply_nested_json_event_uses_json_operational_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            event_path = Path(directory) / "event.json"
+            event_path.write_text(
+                "[" * 10_000 + "0" + "]" * 10_000,
+                encoding="utf-8",
+            )
+
+            result = self.run_cli("--event-json", str(event_path))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(
+            result.stderr,
+            "GitHub event JSON is malformed\n"
+            "documentation impact declaration failed (1 errors)\n",
+        )
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_oversized_numeric_body_uses_json_operational_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             event_path = Path(directory) / "event.json"

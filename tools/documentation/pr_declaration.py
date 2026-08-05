@@ -89,7 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _report_failure(["unable to read GitHub event JSON"])
     try:
         event = json.loads(event_text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return _report_failure(["GitHub event JSON is malformed"])
     pull_request = event.get("pull_request") if isinstance(event, dict) else None
     if not isinstance(pull_request, dict):
