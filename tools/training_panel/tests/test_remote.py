@@ -1,3 +1,5 @@
+import shlex
+import sys
 import tempfile
 import time
 import unittest
@@ -1479,6 +1481,22 @@ class RemoteTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     manager.start("tmux")
             self.assertTrue(any(call[1] == "new-session" for call in runner.calls))
+
+    def test_manager_worker_shell_uses_the_panel_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            manager = RemoteWorkerManager(
+                paths,
+                RemoteStateStore(paths.remote_state_file),
+                env_file=self._write_env_file(root),
+            )
+
+            expected = f"exec {shlex.quote(sys.executable)} -u -m tools.training_panel.remote_worker"
+            self.assertIn(expected, manager._worker_shell())
+            self.assertIn(f"source {shlex.quote(str(paths.conda_sh))}", manager._worker_shell())
+            self.assertIn(f"conda activate {shlex.quote(paths.conda_env)}", manager._worker_shell())
+            self.assertNotIn("exec python -u", manager._worker_shell())
 
     def test_manager_save_settings_persists_worker_controls(self):
         with tempfile.TemporaryDirectory() as tmp:
