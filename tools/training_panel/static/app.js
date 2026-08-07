@@ -3115,7 +3115,7 @@ async function tweakFromLastRun() {
     await applyTweakPayload(await api("/api/tweaks/last-run"));
   } catch (error) {
     $("#train-status").textContent = error.message;
-    setStatus(error.message);
+    setStatusTone(error.message, "error");
   }
 }
 
@@ -3123,7 +3123,7 @@ async function tweakFromRun(runId) {
   try {
     await applyTweakPayload(await api(`/api/runs/${encodeURIComponent(runId)}/tweak`));
   } catch (error) {
-    setStatus(error.message);
+    setStatusTone(error.message, "error");
   }
 }
 
@@ -4777,7 +4777,7 @@ $("#train-form").addEventListener("submit", startTraining);
 $("#smoke-button").addEventListener("click", () => applyPreset("smoke"));
 $("#debug-button").addEventListener("click", () => applyPreset("debug"));
 $("#clear-resume").addEventListener("click", clearResume);
-$("#refresh-button").addEventListener("click", () => refreshAll().catch((error) => setStatus(error.message)));
+$("#refresh-button").addEventListener("click", () => refreshAll().catch((error) => setStatusTone(error.message, "error")));
 $("#save-name").addEventListener("click", () => saveName().catch(handleActionError));
 $("#run-name").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -4995,5 +4995,5 @@ updateBulkToolbar();
 startCurvesPolling();
 setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
 refreshAll()
-  .catch((error) => setStatus(error.message))
+  .catch((error) => setStatusTone(error.message, "error"))
   .then(() => applyHashRoute().catch(handleActionError));

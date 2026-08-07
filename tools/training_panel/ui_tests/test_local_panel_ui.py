@@ -443,6 +443,24 @@ def test_repeated_message_collapses_with_counter(panel, page):
     expect(page.locator("#panel-status .toast-count")).to_contain_text("3")
 
 
+def test_refresh_failure_leaves_a_persistent_error_toast(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "System probe exploded."}),
+        ),
+    )
+    page.locator("#refresh-button").click()
+    toast = page.locator("#panel-status .toast.toast-error")
+    expect(toast).to_contain_text("System probe exploded.")
+    page.wait_for_timeout(7000)
+    expect(toast).to_be_visible()  # must not erase itself after 6s
+
+
 def test_view_switch_updates_hash(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")
