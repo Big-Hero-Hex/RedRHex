@@ -13,6 +13,20 @@
 
 目前沒有。安靜得很可疑，但先享受一下。
 
+## V3.6.0 Panel UX
+
+### Fixed
+
+- Rewards、Terrain、Convergence、Activity、Control Center 的動作錯誤現在會顯示。原本這些錯誤只寫進 History 詳情窗格的狀態列，最後無聲消失。
+- Tooltips 現在也會在鍵盤焦點時出現，不只在滑鼠懸停。
+
+### Added
+
+- 選擇的 view 和 run 現在會記在網址裡，重新整理也保持位置，還可以分享給隊友。
+- Run card 上有個溢出菜單，放著 Resume to Train、Tweak、Compare。Stop 按鈕仍在卡片上。
+- Panel 在等待初次 fetch 時會顯示 loading skeleton，而不是說自己是空的。
+- Topbar 指示器會顯示 panel 是否還在收 backend 訊號，以及隔了多久。
+
 ## V3.5.0 Training Insight
 
 ### Added

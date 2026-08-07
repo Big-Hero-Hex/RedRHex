@@ -2,7 +2,7 @@
 
 Local admin panel and V3.5.0 remote-control system for launching RSL-RL training runs, tuning rewards/terrain, viewing run history, keeping notes, coordinating team access, and sending requester-scoped notifications.
 
-**Version:** 3.5.0 Training Insight
+**Version:** 3.6.0 Panel UX
 **Published by:** BioRoLa ABAD RHex Team
 **Credits:** Jason Liao and Jacob Yang
 

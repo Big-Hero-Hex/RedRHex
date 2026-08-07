@@ -13,6 +13,20 @@ Format:
 
 Nothing yet. Nice and suspiciously calm.
 
+## V3.6.0 Panel UX
+
+### Fixed
+
+- Action failures from Rewards, Terrain, Convergence, Activity, and Control Center are now visible. They previously wrote into a status line inside the History details pane and were silently lost.
+- Tooltips appear on keyboard focus, not only on hover.
+
+### Added
+
+- The current view and selected run live in the URL, so a refresh keeps your place and a run can be linked to a teammate.
+- An overflow menu on run cards holds Resume to Train, Tweak, and Compare. Stop controls stay on the card.
+- Panels show a loading skeleton while their first fetch is in flight instead of claiming to be empty.
+- A topbar indicator shows whether the panel is still hearing from the backend, and how long ago.
+
 ## V3.5.0 Training Insight
 
 ### Added
