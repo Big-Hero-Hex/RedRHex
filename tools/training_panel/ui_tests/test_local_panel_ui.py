@@ -174,7 +174,7 @@ def panel(tmp_path):
     )
     wait_for_panel(url, proc)
     try:
-        yield {"url": url, "root": tmp_path, **paths}
+        yield {"url": url, "root": tmp_path, "proc": proc, **paths}
     finally:
         proc.terminate()
         try:
@@ -550,3 +550,21 @@ def test_background_refresh_does_not_reflash_skeleton(panel, page):
     page.evaluate("beginLoading('runs'); renderRuns()")
     expect(page.locator(".run-card").first).to_be_visible()
     expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+
+
+def test_freshness_reports_live_after_a_successful_poll(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.wait_for_function("document.querySelector('#freshness')?.dataset.state === 'live'")
+    expect(page.locator("#freshness-label")).to_contain_text("updated")
+
+
+def test_freshness_reports_failed_when_the_backend_stops(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_function("document.querySelector('#freshness')?.dataset.state === 'live'")
+    panel["proc"].terminate()
+    panel["proc"].wait(timeout=10)
+    page.wait_for_function(
+        "document.querySelector('#freshness')?.dataset.state === 'failed'",
+        timeout=45000,
+    )

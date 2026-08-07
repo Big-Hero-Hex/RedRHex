@@ -2853,3 +2853,34 @@ pre {
     background: var(--surface-2);
   }
 }
+
+/* ── Freshness indicator (V3.6) ── */
+.freshness {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.freshness-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.freshness[data-state="live"] .freshness-dot { background: var(--green); }
+.freshness[data-state="stale"] .freshness-dot { background: var(--amber); }
+.freshness[data-state="failed"] .freshness-dot { background: var(--red); }
+.freshness[data-state="failed"] { color: var(--red); }
+
+/* Anchored at the right edge of the topbar, so its tooltip must grow
+   leftward instead of centering — a centered tooltip here overshoots the
+   viewport on narrow screens. */
+.freshness[data-tooltip]::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}

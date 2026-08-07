@@ -16,6 +16,8 @@ const state = {
   lastDebug: null,
   debugTimer: null,
   runsRefreshTimer: null,
+  lastPollAt: 0,
+  lastPollError: "",
   openMenuRunId: null,
   renameDirty: false,
   renameDraftRunId: null,
@@ -2129,6 +2131,34 @@ function hasActiveRun() {
   );
 }
 
+const FRESHNESS_TICK_MS = 5000;
+
+function renderFreshness() {
+  const wrap = $("#freshness");
+  const label = $("#freshness-label");
+  if (!wrap || !label) return;
+
+  if (state.lastPollError) {
+    wrap.dataset.state = "failed";
+    label.textContent = `disconnected — ${state.lastPollError}`;
+    wrap.title = state.lastPollError;
+    return;
+  }
+  if (!state.lastPollAt) {
+    wrap.dataset.state = "stale";
+    label.textContent = "connecting…";
+    return;
+  }
+  const ageMs = Date.now() - state.lastPollAt;
+  const interval = hasActiveRun() ? RUNS_POLL_ACTIVE_MS : RUNS_POLL_IDLE_MS;
+  wrap.dataset.state = ageMs <= interval * 1.5 ? "live" : "stale";
+  const seconds = Math.max(0, Math.round(ageMs / 1000));
+  label.textContent = seconds < 60
+    ? `updated ${seconds}s ago`
+    : `updated ${Math.round(seconds / 60)}m ago`;
+  wrap.title = new Date(state.lastPollAt).toLocaleTimeString();
+}
+
 function scheduleRunsRefresh() {
   if (state.runsRefreshTimer) clearTimeout(state.runsRefreshTimer);
   const delay = hasActiveRun() ? RUNS_POLL_ACTIVE_MS : RUNS_POLL_IDLE_MS;
@@ -2147,6 +2177,9 @@ async function loadRuns() {
     const selectedId = state.selectedRun && state.selectedRun.id;
     const scrollState = captureHistoryScroll();
     const [runsData, processesData] = await Promise.all([api("/api/runs"), api("/api/processes")]);
+    state.lastPollAt = Date.now();
+    state.lastPollError = "";
+    renderFreshness();
     state.runs = runsData.runs;
     if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
     reconcileHistoryNotifications(state.runs);
@@ -2180,6 +2213,10 @@ async function loadRuns() {
     renderDeployPanel();
     restoreHistoryScroll(scrollState);
     scheduleRunsRefresh();
+  } catch (error) {
+    state.lastPollError = error.message;
+    renderFreshness();
+    throw error;
   } finally {
     endLoading("runs");
   }
@@ -4939,6 +4976,7 @@ renderNotificationBadges();
 renderRunDetails();
 updateBulkToolbar();
 startCurvesPolling();
+setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
 refreshAll()
   .catch((error) => setStatus(error.message))
   .then(() => applyHashRoute().catch(handleActionError));
