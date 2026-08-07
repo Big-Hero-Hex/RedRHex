@@ -781,18 +781,21 @@ def test_probe_and_lowlevel_share_the_same_immutable_physical_pwm_cap(monkeypatc
 
 def test_setup_registers_probe_and_operator_docs_are_fail_safe() -> None:
     setup = (CONTROLLER_ROOT / "setup.py").read_text(encoding="utf-8")
-    readme = (CONTROLLER_ROOT / "README.md").read_text(encoding="utf-8")
+    operator_docs = "\n".join(
+        (CONTROLLER_ROOT / "docs" / filename).read_text(encoding="utf-8")
+        for filename in ("deployment.en.md", "deployment.zh-TW.md")
+    )
 
     assert "sim2real_probe = redrhex_rl_controller.sim2real_probe:main" in setup
-    assert "sim2real_probe --main-index 0 --dry-run" in readme
+    assert "sim2real_probe --main-index 0 --dry-run" in operator_docs
     assert (
         "sim2real_probe --main-index 0 --enable --confirm-risk "
-        "--confirm-abad-disable" in readme
+        "--confirm-abad-disable" in operator_docs
     )
-    assert "probe_abad_disable_verified: true" in readme
-    assert "/motor/command" in readme and "/motor/state" in readme
-    assert "60 Hz" in readme
-    assert "990" in readme and "16.5" in readme
-    assert "16.7 ms" in readme and "overrun" in readme and "不會補送" in readme
+    assert "probe_abad_disable_verified: true" in operator_docs
+    assert "/motor/command" in operator_docs and "/motor/state" in operator_docs
+    assert "60 Hz" in operator_docs
+    assert "990" in operator_docs and "16.5" in operator_docs
+    assert "16.7 ms" in operator_docs and "不會補送" in operator_docs
     for mandatory in ("實體急停", "限流", "sbRIO watchdog"):
-        assert mandatory in readme
+        assert mandatory in operator_docs

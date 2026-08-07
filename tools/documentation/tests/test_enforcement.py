@@ -20,6 +20,21 @@ DOCUMENTATION_PLAN = (
     PROJECT_ROOT
     / "docs/plans/active/2026-08-01-documentation-system-reorganization.zh-TW.md",
 )
+DOCUMENTATION_DESIGN = tuple(
+    PROJECT_ROOT
+    / f"docs/designs/active/2026-08-01-documentation-system-design.{locale}.md"
+    for locale in ("en", "zh-TW")
+)
+DOCUMENTATION_RELEASE = tuple(
+    PROJECT_ROOT
+    / f"docs/releases/2026-08-07-documentation-system-v1.{locale}.md"
+    for locale in ("en", "zh-TW")
+)
+DOCUMENTATION_AUDIT = tuple(
+    PROJECT_ROOT
+    / f"docs/research/2026-08-07-documentation-system-audit.{locale}.md"
+    for locale in ("en", "zh-TW")
+)
 
 
 class PanelWorkflowPreservationTests(unittest.TestCase):
@@ -164,27 +179,37 @@ class GovernanceEnforcementStateTests(unittest.TestCase):
         )
 
 
-class PhaseThreePlanStateTests(unittest.TestCase):
-    def test_phase_three_and_its_acceptance_are_checked_in_both_locales(self) -> None:
-        texts = tuple(path.read_text(encoding="utf-8") for path in DOCUMENTATION_PLAN)
-        for text, acceptance_label in zip(
-            texts,
-            ("Phase acceptance:", "階段驗收："),
-        ):
-            phase_three = text.split('<a id="phase-3-validator"></a>', 1)[1].split(
-                '<a id="phase-4-central-migration"></a>', 1
-            )[0]
-            self.assertEqual(phase_three.count("- [x] "), 9)
-            self.assertNotIn("- [ ] ", phase_three)
-            self.assertIn(f"- [x] **{acceptance_label}**", phase_three)
-            later_phases = text.split(
-                '<a id="phase-4-central-migration"></a>', 1
-            )[1]
-            self.assertNotIn("- [x] ", later_phases)
+class DocumentationLifecycleCompletionTests(unittest.TestCase):
+    def test_completed_design_and_plan_resolve_to_release_and_audit(self) -> None:
+        for temporary in (*DOCUMENTATION_DESIGN, *DOCUMENTATION_PLAN):
+            self.assertFalse(temporary.exists(), temporary)
+        for durable in (*DOCUMENTATION_RELEASE, *DOCUMENTATION_AUDIT):
+            self.assertTrue(durable.is_file(), durable)
+
+        release_texts = tuple(
+            path.read_text(encoding="utf-8") for path in DOCUMENTATION_RELEASE
+        )
+        audit_texts = tuple(
+            path.read_text(encoding="utf-8") for path in DOCUMENTATION_AUDIT
+        )
+        for text in release_texts:
+            self.assertIn("id: documentation-system-v1-release", text)
+            self.assertIn("status: published", text)
+            self.assertIn("docs-reorg-v1", text)
+        for text in audit_texts:
+            self.assertIn("id: documentation-system-v1-audit", text)
+            self.assertIn("`pending`", text)
+            self.assertIn("stale", text)
+            self.assertTrue("zero" in text or "零" in text)
+
         anchor_pattern = re.compile(r'<a id="([a-z0-9-]+)"></a>')
         self.assertEqual(
-            anchor_pattern.findall(texts[0]),
-            anchor_pattern.findall(texts[1]),
+            anchor_pattern.findall(release_texts[0]),
+            anchor_pattern.findall(release_texts[1]),
+        )
+        self.assertEqual(
+            anchor_pattern.findall(audit_texts[0]),
+            anchor_pattern.findall(audit_texts[1]),
         )
 
 

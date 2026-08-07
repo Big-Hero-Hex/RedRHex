@@ -12,6 +12,7 @@ last_reviewed: 2026-08-07
 <a id="project-milestones"></a>
 ## 專案里程碑
 
+- [2026-08-07 文件系統 v1](2026-08-07-documentation-system-v1.zh-TW.md)
 - [2026-07-10 訓練堆疊改革](2026-07-10-training-stack-reform.zh-TW.md)
 
 <a id="component-releases"></a>

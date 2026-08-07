@@ -12,6 +12,7 @@ last_reviewed: 2026-08-07
 <a id="project-milestones"></a>
 ## Project milestones
 
+- [2026-08-07 documentation system v1](2026-08-07-documentation-system-v1.en.md)
 - [2026-07-10 training-stack reform](2026-07-10-training-stack-reform.en.md)
 
 <a id="component-releases"></a>

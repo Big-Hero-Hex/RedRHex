@@ -12,7 +12,6 @@ last_reviewed: 2026-08-07
 <a id="approved-designs"></a>
 ## Approved designs
 
-- [Bilingual documentation system](active/2026-08-01-documentation-system-design.en.md)
 - [Windows remote launcher](active/2026-08-01-windows-remote-launcher.en.md)
 
 <a id="proposed-designs"></a>
@@ -24,3 +23,5 @@ last_reviewed: 2026-08-07
 ## Design lifecycle
 
 Actionable proposed and approved designs remain here. Once resolved, their durable outcome moves into architecture, an ADR, a release, or the roadmap and the temporary design is removed.
+
+The implemented bilingual documentation-system design is recorded in the [documentation-system v1 milestone](../releases/2026-08-07-documentation-system-v1.en.md).

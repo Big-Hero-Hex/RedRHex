@@ -53,6 +53,41 @@ ros2 topic echo /redrhex/lowlevel_diagnostics --once
 
 若 preview 順序、sign、scale、heartbeat 或 publisher 數量錯誤，不可繼續。
 
+<a id="fixed-sim-to-real-probe"></a>
+## 擷取固定 sim-to-real probe
+
+只有 preview 成功後、policy control 前才使用 `sim2real_probe`。它是不可調整的架空單顆 main-drive step/coast sequence：以 60 Hz 執行三次、共 990 個 command ticks、總長 16.5 秒、drive segments 為 ±0.25 rad/s，且 probe-only 實體 PWM 上限為 30.0。Main indices 0–4 用於 calibration；index 5 是 holdout。
+
+先預覽 JSON；此動作不建立 ROS node，也不發布訊息：
+
+```bash
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --dry-run
+```
+
+Preview 回報的 scenario ID、SHA-256、rate、repeats、ticks、duration、speed cap 與 PWM cap 全部符合前，不可上電。Enabled run 前必須證明實體急停、保守限流、穩固架空、線材安全與 sbRIO watchdog。隔離 ABAD 電源，或實測 disabled servo mode 後才設定 bridge interlock `probe_abad_disable_verified: true`。CLI confirmation 不能取代這項硬體證據。
+
+停止其他所有 motor-command publishers。Probe 必須是 `/redrhex/motor_commands` 唯一 publisher，並且能看到 subscriber、未逾時且為 true 的 heartbeat、未逾時的 joint state，以及明確的 `/estop=false`。直接記錄 raw BioRoLa topics，不可只錄衍生 feedback：
+
+```bash
+ros2 bag record -o redrhex_probe_main0_raw \
+  /motor/command \
+  /motor/state \
+  /redrhex/motor_commands \
+  /redrhex/sim2real_probe/events \
+  /redrhex/lowlevel_heartbeat \
+  /joint_states \
+  /estop \
+  /imu/data
+```
+
+開始錄製後，才在另一個 terminal 給予兩項明確授權：
+
+```bash
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --enable --confirm-risk --confirm-abad-disable
+```
+
+Scheduler 使用 absolute 60 Hz deadlines。若 command lateness 達到一個 period，約 16.7 ms，它會在發布該 tick 前 abort 並送出 disabled packets。不會補送漏掉的 tick，也不會把延遲的 enabled commands 集中 burst。任何 E-stop、heartbeat、joint-state、graph ownership、subscriber 或 process 異常，都必須先按實體急停並診斷，才可重新嘗試。
+
 <a id="start-the-gated-controller"></a>
 ## 啟動具閘門的控制器
 

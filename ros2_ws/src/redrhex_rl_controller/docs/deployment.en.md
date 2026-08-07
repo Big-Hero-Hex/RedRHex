@@ -53,6 +53,41 @@ ros2 topic echo /redrhex/lowlevel_diagnostics --once
 
 Do not continue if the preview order, sign, scale, heartbeat, or publisher count is wrong.
 
+<a id="fixed-sim-to-real-probe"></a>
+## Capture the fixed sim-to-real probe
+
+Use `sim2real_probe` only after preview succeeds and before policy control. It is an immutable suspended single-main-drive step/coast sequence: three repetitions at 60 Hz, 990 command ticks, 16.5 s total, ±0.25 rad/s drive segments, and a probe-only physical PWM ceiling of 30.0. Main indices 0–4 are calibration; index 5 is the holdout.
+
+Preview the JSON without creating a ROS node or publishing:
+
+```bash
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --dry-run
+```
+
+Do not energize unless the preview reports the expected scenario ID, SHA-256, rate, repeats, ticks, duration, speed cap, and PWM cap. Before the enabled run, prove the physical E-stop, conservative current limiting, secure suspension, cable clearance, and sbRIO watchdog. Isolate ABAD power, or physically verify the disabled servo mode and then set the bridge interlock `probe_abad_disable_verified: true`. CLI confirmation cannot replace that hardware evidence.
+
+Stop every other motor-command publisher. The probe must be the only publisher to `/redrhex/motor_commands`, with a visible subscriber, fresh true heartbeat, fresh joint state, and explicit `/estop=false`. Record the raw BioRoLa topics rather than only derived feedback:
+
+```bash
+ros2 bag record -o redrhex_probe_main0_raw \
+  /motor/command \
+  /motor/state \
+  /redrhex/motor_commands \
+  /redrhex/sim2real_probe/events \
+  /redrhex/lowlevel_heartbeat \
+  /joint_states \
+  /estop \
+  /imu/data
+```
+
+After recording begins, grant both explicit authorizations in another terminal:
+
+```bash
+ros2 run redrhex_rl_controller sim2real_probe --main-index 0 --enable --confirm-risk --confirm-abad-disable
+```
+
+The scheduler uses absolute 60 Hz deadlines. If a command is late by one period, about 16.7 ms, it aborts before publishing that tick and sends disabled packets. It never catches up a missed tick or bursts delayed enabled commands. Any E-stop, heartbeat, joint-state, graph-ownership, subscriber, or process anomaly requires physical E-stop and diagnosis before a new attempt.
+
 <a id="start-the-gated-controller"></a>
 ## Start the gated controller
 
