@@ -732,6 +732,8 @@ def test_freshness_reports_live_after_a_successful_poll(panel, page):
 
 
 def test_freshness_reports_failed_when_the_backend_stops(panel, page):
+    # The 45s margin below assumes the fixture seeds a queued run, which keeps the
+    # panel on its 10s active poll interval rather than the 30s idle one.
     page.goto(panel["url"])
     page.wait_for_function("document.querySelector('#freshness')?.dataset.state === 'live'")
     panel["proc"].terminate()

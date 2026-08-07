@@ -4363,7 +4363,7 @@ function renderActivityEvent(event) {
 
 function renderActivityGroups(events) {
   if (!events.length) {
-    return isLoading("activity") && !events.length
+    return isLoading("activity")
       ? skeletonHtml(3)
       : `<article class="empty-panel">No activity recorded yet.</article>`;
   }
