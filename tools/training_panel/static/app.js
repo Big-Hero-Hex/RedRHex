@@ -318,7 +318,10 @@ function setStatusTone(message, tone = "info", linkUrl = "") {
   region.append(toast);
 
   while (region.querySelectorAll(".toast").length > TOAST_MAX) {
-    dismissToast(region.querySelector(".toast"));
+    // Drop the oldest *non-error* toast first so routine chatter can never push
+    // out an unread failure. When every slot is an error, drop the oldest one.
+    const toasts = Array.from(region.querySelectorAll(".toast"));
+    dismissToast(toasts.find((node) => node.dataset.tone !== "error") || toasts[0]);
   }
   restartToastTimer(toast, tone);
 }
@@ -2261,7 +2264,9 @@ async function selectRun(runId) {
   ]);
   if (!state.selectedRun || state.selectedRun.id !== runId) return;
   $("#notes-editor").value = notesData.notes;
-  setStatus(run.latest_checkpoint ? `Latest checkpoint: ${run.latest_checkpoint}` : "No checkpoint available yet.");
+  // No toast here: checkpoint state is metadata, not an event, and the details
+  // pane already reports it ("Checkpoint: iter N" / "no checkpoint"). A toast on
+  // every run click would evict unread errors three clicks later.
   setDebugTarget({ type: "run", id: runId });
 }
 

@@ -443,6 +443,25 @@ def test_repeated_message_collapses_with_counter(panel, page):
     expect(page.locator("#panel-status .toast-count")).to_contain_text("3")
 
 
+def test_error_toast_survives_a_flood_of_info_toasts(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("setStatusTone('Deploy blew up.', 'error')")
+    page.evaluate("setStatus('one'); setStatus('two'); setStatus('three'); setStatus('four')")
+    # Eviction must drop info toasts first — an unread failure may not be pushed out.
+    expect(page.locator("#panel-status .toast")).to_have_count(3)
+    expect(page.locator("#panel-status .toast.toast-error")).to_contain_text("Deploy blew up.")
+
+
+def test_selecting_a_run_does_not_emit_a_toast(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card").first.click()
+    page.wait_for_timeout(800)
+    # Checkpoint metadata belongs in the details pane, not in a corner toast that
+    # would evict unread errors on every ordinary click.
+    expect(page.locator("#panel-status .toast")).to_have_count(0)
+
+
 def test_refresh_failure_leaves_a_persistent_error_toast(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")
