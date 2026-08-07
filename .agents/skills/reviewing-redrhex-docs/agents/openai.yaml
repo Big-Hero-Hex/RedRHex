@@ -1,0 +1,6 @@
+interface:
+  display_name: "Review RedRHex Docs"
+  short_description: "Review RedRHex documentation for compliance"
+  default_prompt: "Use $reviewing-redrhex-docs to review this RedRHex documentation change."
+policy:
+  allow_implicit_invocation: true
