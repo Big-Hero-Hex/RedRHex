@@ -590,6 +590,54 @@ def test_menu_does_not_reopen_on_a_later_render(panel, page):
     expect(page.locator(".run-menu[data-open='true']")).to_have_count(0)
 
 
+# Holds every GET /api/runs open until the test releases it, so a skeleton can be
+# observed during a genuinely in-flight fetch rather than by hand-setting state.
+RUNS_FETCH_GATE = """
+(() => {
+  const realFetch = window.fetch.bind(window);
+  window.__pendingRuns = [];
+  window.fetch = (input, init) => {
+    const url = String(typeof input === "string" ? input : input.url);
+    if (url.split("?")[0].endsWith("/api/runs")) {
+      return new Promise((resolve, reject) => {
+        window.__pendingRuns.push(() => realFetch(input, init).then(resolve, reject));
+      });
+    }
+    return realFetch(input, init);
+  };
+  window.__releaseRuns = () => {
+    const queued = window.__pendingRuns;
+    window.__pendingRuns = [];
+    queued.forEach((run) => run());
+    return queued.length;
+  };
+})();
+"""
+
+
+def test_skeleton_shows_during_an_in_flight_runs_fetch(panel, page):
+    page.add_init_script(RUNS_FETCH_GATE)
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="history"]').click()
+
+    # The real boot path — no hand-set state — must paint a skeleton.
+    expect(page.locator("#runs .skeleton-row").first).to_be_visible()
+    expect(page.locator(".run-card")).to_have_count(0)
+
+    page.evaluate("window.__releaseRuns()")
+    expect(page.locator(".run-card").first).to_be_visible()
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+
+    # A background refresh of already-loaded data must not reflash the skeleton.
+    # `void` matters: the gated promise never settles and evaluate() awaits it.
+    page.evaluate("void loadRuns()")
+    page.wait_for_function("window.__pendingRuns.length > 0")
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+    expect(page.locator(".run-card").first).to_be_visible()
+    page.evaluate("window.__releaseRuns()")
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+
+
 def test_skeleton_shows_before_runs_arrive(panel, page):
     page.goto(panel["url"])
     page.locator('.nav-button[data-view="history"]').click()

@@ -1716,6 +1716,7 @@ async function loadDeployForSelectedRun() {
     return;
   }
   beginLoading("deploy");
+  if (!state.deployData) renderDeployPanel();  // skeleton while the fetch is in flight
   try {
     state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
   } finally {
@@ -2178,6 +2179,9 @@ function scheduleRunsRefresh() {
 
 async function loadRuns() {
   beginLoading("runs");
+  // Paint the skeleton now, while the fetch below is still in flight. Rendering
+  // only after the await would mean the loading flag is never observed.
+  if (!state.runs.length) renderRuns();
   try {
     const selectedId = state.selectedRun && state.selectedRun.id;
     const scrollState = captureHistoryScroll();
@@ -2208,6 +2212,8 @@ async function loadRuns() {
         clearRunDetailState({ render: false });
       }
     }
+    // Not redundant with the `finally` below: the post-fetch render must see the
+    // flag already cleared, or a genuinely empty result paints a skeleton forever.
     endLoading("runs");
     renderRuns();
     renderRunDetails();
@@ -3321,6 +3327,7 @@ function selectPresetForEdit(presetId) {
 
 async function loadRewardsPage() {
   beginLoading("rewards");
+  if (!state.presets.length) renderPresets();  // skeleton while the fetch is in flight
   let presetsData;
   let tweakData;
   try {
@@ -3652,6 +3659,7 @@ function selectTerrainPresetForEdit(presetId) {
 
 async function loadTerrainPage() {
   beginLoading("terrain");
+  if (!state.terrainPresets.length) renderTerrainPresets();  // skeleton while the fetch is in flight
   let presetsData;
   let terrainData;
   try {
@@ -4580,6 +4588,7 @@ function renderActivity() {
 
 async function loadActivity() {
   beginLoading("activity");
+  if (!state.activityEvents.length) renderActivity();  // skeleton while the fetch is in flight
   try {
     const params = new URLSearchParams({
       limit: "160",
