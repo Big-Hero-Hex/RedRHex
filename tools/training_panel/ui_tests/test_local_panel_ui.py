@@ -525,3 +525,28 @@ def test_menu_does_not_reopen_on_a_later_render(panel, page):
     page.evaluate("loadRuns()")
     page.wait_for_timeout(500)
     expect(page.locator(".run-menu[data-open='true']")).to_have_count(0)
+
+
+def test_skeleton_shows_before_runs_arrive(panel, page):
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="history"]').click()
+    page.wait_for_selector("#runs")
+    page.evaluate("state.runs = []; beginLoading('runs'); renderRuns()")
+    expect(page.locator("#runs .skeleton-row").first).to_be_visible()
+    expect(page.locator("#runs")).not_to_contain_text("No training history found yet")
+
+
+def test_empty_state_shows_when_not_loading(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("state.runs = []; endLoading('runs'); renderRuns()")
+    expect(page.locator("#runs")).to_contain_text("No training history found yet")
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+
+
+def test_background_refresh_does_not_reflash_skeleton(panel, page):
+    open_history(page, panel["url"])
+    page.wait_for_selector(".run-card")
+    page.evaluate("beginLoading('runs'); renderRuns()")
+    expect(page.locator(".run-card").first).to_be_visible()
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)

@@ -72,7 +72,29 @@ const state = {
   curvesLoadedAt: 0,
   curvesInFlight: null,
   curvesTimer: null,
+  // Loading registry (V3.6)
+  loading: new Set(),
 };
+
+// A skeleton stands in for data that has never arrived. Once real data is on
+// screen, a background refresh must leave it alone rather than flashing.
+function beginLoading(key) {
+  state.loading.add(key);
+}
+
+function endLoading(key) {
+  state.loading.delete(key);
+}
+
+function isLoading(key) {
+  return state.loading.has(key);
+}
+
+function skeletonHtml(rows = 3) {
+  return Array.from({ length: rows })
+    .map(() => `<div class="skeleton-row" aria-hidden="true"></div>`)
+    .join("");
+}
 
 const ROUTE_VIEWS = ["train", "rewards", "terrain", "history", "deploy", "convergence", "activity", "access"];
 
@@ -1294,9 +1316,11 @@ function renderRuns() {
   const badge = $("#run-count-badge");
   if (badge) badge.textContent = `${runs.length} run${runs.length !== 1 ? "s" : ""}`;
   if (!runs.length) {
-    $("#runs").innerHTML = state.runs.length
-      ? `<article class="empty-panel">No runs match your search or filter.</article>`
-      : `<article class="empty-panel">No training history found yet.</article>`;
+    $("#runs").innerHTML = isLoading("runs") && !state.runs.length
+      ? skeletonHtml(4)
+      : state.runs.length
+        ? `<article class="empty-panel">No runs match your search or filter.</article>`
+        : `<article class="empty-panel">No training history found yet.</article>`;
     updateBulkToolbar();
     return;
   }
@@ -1684,7 +1708,12 @@ async function loadDeployForSelectedRun() {
     renderDeployPanel();
     return;
   }
-  state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
+  beginLoading("deploy");
+  try {
+    state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
+  } finally {
+    endLoading("deploy");
+  }
   renderDeployPanel();
 }
 
@@ -1804,7 +1833,11 @@ function renderDeployReport(data) {
   const json = $("#deploy-report-json");
   const badge = $("#deploy-readiness-badge");
   if (!report) {
-    if (stageList) stageList.innerHTML = `<article class="empty-panel">No deploy readiness report for this run yet.</article>`;
+    if (stageList) {
+      stageList.innerHTML = isLoading("deploy") && !state.deployData
+        ? skeletonHtml(3)
+        : `<article class="empty-panel">No deploy readiness report for this run yet.</article>`;
+    }
     if (meta) meta.textContent = "";
     if (json) json.textContent = "";
     if (badge) {
@@ -2109,41 +2142,47 @@ function scheduleRunsRefresh() {
 }
 
 async function loadRuns() {
-  const selectedId = state.selectedRun && state.selectedRun.id;
-  const scrollState = captureHistoryScroll();
-  const [runsData, processesData] = await Promise.all([api("/api/runs"), api("/api/processes")]);
-  state.runs = runsData.runs;
-  if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
-  reconcileHistoryNotifications(state.runs);
-  state.activeProcessMap = {};
-  state.activeProcesses = [];
-  state.activeProcessesByRun = {};
-  state.activeProcessByKind = {};
-  for (const process of processesData.processes) {
-    if (process.returncode !== null) continue;
-    state.activeProcesses.push(process);
-    rememberActiveProcess(process.run_id, process);
-    rememberActiveProcess(process.source_run_id, process);
-  }
-  const validRunIds = new Set(state.runs.map((run) => run.id));
-  state.selectedRunIds = new Set([...state.selectedRunIds].filter((runId) => validRunIds.has(runId)));
-  if (selectedId) {
-    const selected = findRun(selectedId);
-    if (selected) {
-      state.selectedRun = selected;
-    } else {
-      clearRunDetailState({ render: false });
+  beginLoading("runs");
+  try {
+    const selectedId = state.selectedRun && state.selectedRun.id;
+    const scrollState = captureHistoryScroll();
+    const [runsData, processesData] = await Promise.all([api("/api/runs"), api("/api/processes")]);
+    state.runs = runsData.runs;
+    if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
+    reconcileHistoryNotifications(state.runs);
+    state.activeProcessMap = {};
+    state.activeProcesses = [];
+    state.activeProcessesByRun = {};
+    state.activeProcessByKind = {};
+    for (const process of processesData.processes) {
+      if (process.returncode !== null) continue;
+      state.activeProcesses.push(process);
+      rememberActiveProcess(process.run_id, process);
+      rememberActiveProcess(process.source_run_id, process);
     }
+    const validRunIds = new Set(state.runs.map((run) => run.id));
+    state.selectedRunIds = new Set([...state.selectedRunIds].filter((runId) => validRunIds.has(runId)));
+    if (selectedId) {
+      const selected = findRun(selectedId);
+      if (selected) {
+        state.selectedRun = selected;
+      } else {
+        clearRunDetailState({ render: false });
+      }
+    }
+    endLoading("runs");
+    renderRuns();
+    renderRunDetails();
+    syncRunCurves();
+    renderGpuLockStatus();
+    renderFolderSidebar();
+    renderFolderOptions();
+    renderDeployPanel();
+    restoreHistoryScroll(scrollState);
+    scheduleRunsRefresh();
+  } finally {
+    endLoading("runs");
   }
-  renderRuns();
-  renderRunDetails();
-  syncRunCurves();
-  renderGpuLockStatus();
-  renderFolderSidebar();
-  renderFolderOptions();
-  renderDeployPanel();
-  restoreHistoryScroll(scrollState);
-  scheduleRunsRefresh();
 }
 
 async function selectRun(runId) {
@@ -3181,7 +3220,9 @@ function toggleRewardCategoriesCollapsed() {
 function renderPresets() {
   const { selectedPresetId } = state;
   const presets = rewardPresetsForRender();
-  $("#preset-list").innerHTML = presets.map((p) => `
+  $("#preset-list").innerHTML = !presets.length && isLoading("rewards")
+    ? skeletonHtml(3)
+    : presets.map((p) => `
     <div class="preset-card ${p.id === selectedPresetId ? "selected" : ""} ${p.draft ? "draft-preset" : ""}"
          data-preset-id="${escapeHtml(p.id)}"
          title="${escapeHtml(p.description)}">
@@ -3235,10 +3276,17 @@ function selectPresetForEdit(presetId) {
 }
 
 async function loadRewardsPage() {
-  const [presetsData, tweakData] = await Promise.all([
-    api("/api/presets"),
-    api("/api/tweakables"),
-  ]);
+  beginLoading("rewards");
+  let presetsData;
+  let tweakData;
+  try {
+    [presetsData, tweakData] = await Promise.all([
+      api("/api/presets"),
+      api("/api/tweakables"),
+    ]);
+  } finally {
+    endLoading("rewards");
+  }
   state.presets = presetsData.presets || [];
   state.activePresetId = presetsData.active_preset_id || "baseline";
   state.rewardDefaults = tweakData.reward_defaults || {};
@@ -3512,7 +3560,9 @@ function toggleTerrainCategoriesCollapsed() {
 
 function renderTerrainPresets() {
   const { terrainPresets, selectedTerrainPresetId } = state;
-  $("#terrain-preset-list").innerHTML = terrainPresets.map((p) => `
+  $("#terrain-preset-list").innerHTML = !terrainPresets.length && isLoading("terrain")
+    ? skeletonHtml(3)
+    : terrainPresets.map((p) => `
     <div class="preset-card ${p.id === selectedTerrainPresetId ? "selected" : ""}"
          data-terrain-preset-id="${escapeHtml(p.id)}"
          title="${escapeHtml(p.description)}">
@@ -3557,6 +3607,7 @@ function selectTerrainPresetForEdit(presetId) {
 }
 
 async function loadTerrainPage() {
+  beginLoading("terrain");
   let presetsData;
   let terrainData;
   try {
@@ -3581,6 +3632,8 @@ async function loadTerrainPage() {
     $("#terrain-preset-save-btn").disabled = true;
     setTerrainStatus(error.message);
     return;
+  } finally {
+    endLoading("terrain");
   }
   setTerrainStatus("");
   state.terrainPresets = presetsData.presets || [];
@@ -4251,7 +4304,11 @@ function renderActivityEvent(event) {
 }
 
 function renderActivityGroups(events) {
-  if (!events.length) return `<article class="empty-panel">No activity recorded yet.</article>`;
+  if (!events.length) {
+    return isLoading("activity") && !events.length
+      ? skeletonHtml(3)
+      : `<article class="empty-panel">No activity recorded yet.</article>`;
+  }
   const groups = groupActivityByActor(events);
   return groups.map((group) => {
     const collapsed = state.activityCollapsedGroups.has(group.key);
@@ -4477,6 +4534,7 @@ function renderActivity() {
 }
 
 async function loadActivity() {
+  beginLoading("activity");
   try {
     const params = new URLSearchParams({
       limit: "160",
@@ -4490,6 +4548,8 @@ async function loadActivity() {
   } catch {
     state.activityEvents = [];
     state.activityAnalytics = {};
+  } finally {
+    endLoading("activity");
   }
   renderActivity();
 }
