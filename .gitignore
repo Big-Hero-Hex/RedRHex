@@ -53,6 +53,9 @@ tools/training_panel/active_terrain_override.json
 # Doc Outputs
 **/docs/_build/*
 **/generated/*
+/site/
+/.site-source/
+/.site-artifact/
 
 # Isaac-Sim packman
 _isaac_sim*

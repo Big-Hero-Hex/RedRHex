@@ -6,13 +6,13 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
 <a id="purpose"></a>
 ## Purpose
 
-The [migration manifest](migration-manifest.csv) is the machine-readable, language-neutral traceability ledger for source-document migration. Original source headings remain verbatim and are not translated.
+The [migration manifest](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/migration-manifest.csv) is the machine-readable, language-neutral traceability ledger for source-document migration. Original source headings remain verbatim and are not translated.
 
 <a id="provenance-and-coverage"></a>
 ## Provenance and coverage

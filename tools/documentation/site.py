@@ -5,13 +5,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
+import urllib.parse
 from pathlib import Path, PurePosixPath
 
 from .errors import DocumentationOperationError
-from .validator import _split_locale, _valid_stem
+from .validator import _outside_fence_mask, _split_locale, _valid_stem
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,7 +101,6 @@ _STAGING_EXCLUDED_DIRECTORIES = {
     "build",
     "dist",
     "site",
-    "templates",
 }
 
 
@@ -136,8 +137,17 @@ def _canonical_copy_plan(
                 if name not in _STAGING_EXCLUDED_DIRECTORIES
             )
             for filename in sorted(file_names):
+                relative = (root / filename).relative_to(site_source.source)
                 split = _split_locale(filename)
-                if split is None or not _valid_stem(split[0]):
+                is_document = (
+                    "templates" not in relative.parts
+                    and split is not None
+                    and _valid_stem(split[0])
+                )
+                is_asset = filename.endswith(".md.template") or (
+                    filename == "migration-manifest.csv"
+                )
+                if not is_document and not is_asset:
                     continue
                 source = root / filename
                 try:
@@ -150,10 +160,73 @@ def _canonical_copy_plan(
                     raise DocumentationOperationError(
                         "unsafe documentation site source"
                     )
-                relative = source.relative_to(site_source.source)
                 destination = output / site_source.destination / relative
                 plan.append((source, destination))
     return sorted(plan, key=lambda item: item[1].as_posix())
+
+
+_INLINE_SITE_LINK = re.compile(
+    r"(?P<prefix>\]\(\s*<?)(?P<destination>[^\s)>]+)(?P<suffix>>?)"
+)
+_REFERENCE_SITE_LINK = re.compile(
+    r"(?P<prefix>^\s*\[[^\]]+\]:\s*<?)(?P<destination>[^\s>]+)(?P<suffix>>?)"
+)
+
+
+def _rewrite_site_destination(
+    raw_destination: str,
+    source: Path,
+    staged_source: Path,
+    staged_paths: dict[Path, Path],
+) -> str:
+    raw_path, separator, fragment = raw_destination.partition("#")
+    if (
+        not raw_path
+        or raw_path.startswith("/")
+        or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", raw_path) is not None
+    ):
+        return raw_destination
+    try:
+        target = (source.parent / urllib.parse.unquote(raw_path)).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return raw_destination
+    staged_target = staged_paths.get(target)
+    if staged_target is None:
+        return raw_destination
+    split = _split_locale(staged_target.name)
+    if split is not None:
+        staged_target = staged_target.with_name(f"{split[0]}.md")
+    relative = posixpath.relpath(
+        staged_target.as_posix(), start=staged_source.parent.as_posix()
+    )
+    encoded = urllib.parse.quote(relative, safe="/@:+-._~")
+    return f"{encoded}#{fragment}" if separator else encoded
+
+
+def _rewrite_staged_markdown(
+    source: Path,
+    destination: Path,
+    staged_paths: dict[Path, Path],
+) -> None:
+    text = source.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    mask_lines = tuple(line.rstrip("\r\n") for line in lines)
+    outside_fence = _outside_fence_mask(mask_lines)
+
+    def rewrite_match(match: re.Match[str]) -> str:
+        rewritten = _rewrite_site_destination(
+            match.group("destination"), source, destination, staged_paths
+        )
+        return f'{match.group("prefix")}{rewritten}{match.group("suffix")}'
+
+    rewritten_lines: list[str] = []
+    for index, line in enumerate(lines):
+        if outside_fence[index]:
+            line = _INLINE_SITE_LINK.sub(rewrite_match, line)
+            line = _REFERENCE_SITE_LINK.sub(rewrite_match, line)
+        rewritten_lines.append(line)
+    destination.write_text("".join(rewritten_lines), encoding="utf-8")
+    shutil.copystat(source, destination)
 
 
 def _is_within(path: Path, directory: Path) -> bool:
@@ -233,11 +306,16 @@ def stage_site(repo_root: Path, output: Path) -> int:
             "unsafe or nonempty site staging output"
         ) from error
     try:
+        staged_paths = {
+            source.resolve(): destination for source, destination in plan
+        }
         for source, destination in plan:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
-    except (OSError, ValueError) as error:
+            if _split_locale(source.name) is not None:
+                _rewrite_staged_markdown(source, destination, staged_paths)
+    except (OSError, UnicodeError, ValueError) as error:
         raise DocumentationOperationError(
             "unable to stage documentation site"
         ) from error
-    return len(plan)
+    return sum(_split_locale(source.name) is not None for source, _ in plan)

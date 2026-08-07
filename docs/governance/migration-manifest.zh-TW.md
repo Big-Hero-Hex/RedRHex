@@ -6,13 +6,13 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
 <a id="purpose"></a>
 ## 目的
 
-[遷移清單](migration-manifest.csv)是來源文件遷移所使用、可由機器讀取且不依賴語言的可追溯帳冊。原始來源標題須逐字保留，不翻譯。
+[遷移清單](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/migration-manifest.csv)是來源文件遷移所使用、可由機器讀取且不依賴語言的可追溯帳冊。原始來源標題須逐字保留，不翻譯。
 
 <a id="provenance-and-coverage"></a>
 ## 來源與涵蓋範圍

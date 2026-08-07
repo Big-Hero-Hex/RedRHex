@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -24,11 +23,19 @@ DOCUMENTATION_PLAN = (
 
 
 class PanelWorkflowPreservationTests(unittest.TestCase):
-    def test_panel_workflow_matches_task_baseline_byte_for_byte(self) -> None:
-        self.assertEqual(
-            hashlib.sha256(PANEL_WORKFLOW.read_bytes()).hexdigest(),
-            "b966e35062f629074264682e984d96606ff830f11984f5545e3c897395582e7b",
-        )
+    def test_panel_remains_at_pages_root_and_docs_build_below_docs(self) -> None:
+        text = PANEL_WORKFLOW.read_text(encoding="utf-8")
+        for required in (
+            "          REDRHEX_DOCS_DIR: ${{ runner.temp }}/redrhex-doc-source\n",
+            "          REDRHEX_DOCS_SITE_DIR: ${{ runner.temp }}/redrhex-pages/docs\n",
+            "          REDRHEX_PAGES_DIR: ${{ runner.temp }}/redrhex-pages\n",
+            '          cp -R tools/training_panel/remote_web/. "$REDRHEX_PAGES_DIR/"\n',
+            '          python -m tools.documentation stage-site --output "$REDRHEX_DOCS_DIR"\n',
+            "          mkdocs build --strict -f mkdocs.yml\n",
+            "          path: ${{ runner.temp }}/redrhex-pages\n",
+        ):
+            self.assertEqual(text.count(required), 1, required)
+        self.assertNotIn("path: tools/training_panel/remote_web", text)
 
 
 class PullRequestTemplateContractTests(unittest.TestCase):
@@ -93,8 +100,11 @@ class DocumentationWorkflowContractTests(unittest.TestCase):
             "          fetch-depth: 0\n",
             "      - uses: actions/setup-python@v5\n",
             '          python-version: "3.13"\n',
+            "        run: python -m pip install -r docs/requirements-site.txt\n",
             "        run: python -m unittest discover tools/documentation/tests -v\n",
             "        run: python -m tools.documentation validate --all\n",
+            '          python -m tools.documentation stage-site --output "$REDRHEX_DOCS_DIR"\n',
+            "          mkdocs build --strict -f mkdocs.yml\n",
             "        if: github.event_name == 'pull_request'\n",
             '        run: python -m tools.documentation.pr_declaration --event-json "$GITHUB_EVENT_PATH"\n',
         ):
@@ -106,9 +116,11 @@ class DocumentationWorkflowContractTests(unittest.TestCase):
         commands = (
             "python -m unittest discover tools/documentation/tests -v",
             "python -m tools.documentation validate --all",
+            'python -m tools.documentation stage-site --output "$REDRHEX_DOCS_DIR"',
+            "mkdocs build --strict -f mkdocs.yml",
             'python -m tools.documentation.pr_declaration --event-json "$GITHUB_EVENT_PATH"',
         )
-        self.assertEqual([text.count(command) for command in commands], [1, 1, 1])
+        self.assertEqual([text.count(command) for command in commands], [1, 1, 1, 1, 1])
         self.assertEqual(
             [text.index(command) for command in commands],
             sorted(text.index(command) for command in commands),

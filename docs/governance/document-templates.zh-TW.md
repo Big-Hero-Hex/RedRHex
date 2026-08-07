@@ -6,7 +6,7 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
 <a id="purpose"></a>
@@ -17,15 +17,15 @@ last_reviewed: 2026-08-01
 <a id="template-selection"></a>
 ## 選擇範本
 
-- 入口或區段首頁使用 [index 範本](templates/index.zh-TW.md.template)。
-- `tutorial`、`how-to`、`reference`、`explanation`、`safety` 或 `troubleshooting` 使用 [knowledge 範本](templates/knowledge.zh-TW.md.template)。作者必須選擇一個確切的 `type`，以及治理規則允許該類型使用的一個狀態。
-- ADR 使用 [decision 範本](templates/decision.zh-TW.md.template)。
-- 提案中或已核准的功能或重大變更使用 [design 範本](templates/design.zh-TW.md.template)。
-- 多步驟實作使用 [plan 範本](templates/plan.zh-TW.md.template)。
-- 目前優先事項與未解決未來工作使用 [roadmap 範本](templates/roadmap.zh-TW.md.template)。
-- 已發布行為或有日期的專案里程碑使用 [release 範本](templates/release.zh-TW.md.template)。
-- 會改變基準、建議、決策或結果的證據使用 [experiment-summary 範本](templates/experiment-summary.zh-TW.md.template)。
-- 可長期保存的審查或合規發現使用 [audit 範本](templates/audit.zh-TW.md.template)。
+- 入口或區段首頁使用 [index 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/index.zh-TW.md.template)。
+- `tutorial`、`how-to`、`reference`、`explanation`、`safety` 或 `troubleshooting` 使用 [knowledge 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/knowledge.zh-TW.md.template)。作者必須選擇一個確切的 `type`，以及治理規則允許該類型使用的一個狀態。
+- ADR 使用 [decision 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/decision.zh-TW.md.template)。
+- 提案中或已核准的功能或重大變更使用 [design 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/design.zh-TW.md.template)。
+- 多步驟實作使用 [plan 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/plan.zh-TW.md.template)。
+- 目前優先事項與未解決未來工作使用 [roadmap 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/roadmap.zh-TW.md.template)。
+- 已發布行為或有日期的專案里程碑使用 [release 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/release.zh-TW.md.template)。
+- 會改變基準、建議、決策或結果的證據使用 [experiment-summary 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/experiment-summary.zh-TW.md.template)。
+- 可長期保存的審查或合規發現使用 [audit 範本](https://github.com/JasonLiaoJCS/RedRHex/blob/main/docs/governance/templates/audit.zh-TW.md.template)。
 
 <a id="authoring-contract"></a>
 ## 撰寫契約
@@ -35,4 +35,4 @@ last_reviewed: 2026-08-01
 <a id="template-assets"></a>
 ## 範本資產
 
-範本刻意使用 `.md.template` 結尾；它們是撰寫資產，而不是網站頁面。未取代所有佔位符前，絕不可將範本重新命名為正式輸出。配對英文資產列於[英文範本目錄](document-templates.en.md)。
+範本刻意使用 `.md.template` 結尾；它們是撰寫資產，而不是網站頁面。未取代所有佔位符前，絕不可將範本重新命名為正式輸出。請使用網站語言切換器開啟此目錄的英文版本。

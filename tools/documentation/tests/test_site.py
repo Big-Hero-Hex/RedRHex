@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -301,6 +303,18 @@ class SiteStagingTests(unittest.TestCase):
                 "component/manual/notes.md",
             ):
                 self.write(repo, relative, b"excluded\n")
+            template = self.write(
+                repo,
+                "docs/governance/templates/reference.en.md.template",
+                b"template\n",
+            )
+            manifest = self.write(
+                repo,
+                "docs/governance/migration-manifest.csv",
+                b"source_path,disposition\n",
+            )
+            os.utime(template, ns=(fixed_time, fixed_time))
+            os.utime(manifest, ns=(fixed_time, fixed_time))
 
             output = top / "staged"
             count = stage_site(repo, output)
@@ -316,6 +330,8 @@ class SiteStagingTests(unittest.TestCase):
                 [
                     "components/leg/local.en.md",
                     "components/leg/local.zh-TW.md",
+                    "governance/migration-manifest.csv",
+                    "governance/templates/reference.en.md.template",
                     "guide.en.md",
                     "guide.zh-TW.md",
                     "資料 空間/nested.en.md",
@@ -329,6 +345,65 @@ class SiteStagingTests(unittest.TestCase):
                     destination = output / "components/leg" / Path(relative).name
                 self.assertEqual(destination.read_bytes(), content)
                 self.assertEqual(destination.stat().st_mtime_ns, fixed_time)
+            self.assertEqual(
+                (output / "governance/templates/reference.en.md.template").read_bytes(),
+                b"template\n",
+            )
+            self.assertEqual(
+                (output / "governance/migration-manifest.csv").read_bytes(),
+                b"source_path,disposition\n",
+            )
+
+    def test_staging_rewrites_localized_and_colocated_links_for_mkdocs(self) -> None:
+        from tools.documentation.site import stage_site
+
+        with tempfile.TemporaryDirectory() as directory:
+            top = Path(directory)
+            repo = top / "repo"
+            self.write_manifest(
+                repo,
+                [
+                    {"destination": ".", "source": "docs"},
+                    {
+                        "destination": "components/leg",
+                        "source": "component/manual",
+                    },
+                ],
+            )
+            self.write(
+                repo,
+                "docs/index.en.md",
+                (
+                    "[Local](guide.en.md#start)\n"
+                    "[Component](../component/manual/index.en.md)\n"
+                    "[External](https://example.com/file.en.md)\n"
+                    "```text\n[Literal](guide.en.md)\n```\n"
+                ).encode(),
+            )
+            self.write(repo, "docs/guide.en.md", b"<a id=\"start\"></a>\n## Start\n")
+            self.write(
+                repo,
+                "component/manual/index.en.md",
+                b"[Home](../../docs/index.en.md)\n",
+            )
+
+            output = top / "staged"
+            self.assertEqual(stage_site(repo, output), 3)
+            self.assertEqual(
+                (output / "index.en.md").read_text(encoding="utf-8"),
+                (
+                    "[Local](guide.md#start)\n"
+                    "[Component](components/leg/index.md)\n"
+                    "[External](https://example.com/file.en.md)\n"
+                    "```text\n[Literal](guide.en.md)\n```\n"
+                ),
+            )
+            self.assertEqual(
+                (output / "components/leg/index.en.md").read_text(
+                    encoding="utf-8"
+                ),
+                "[Home](../../index.md)\n",
+            )
 
     def test_copy_plan_collisions_fail_before_output_is_created(self) -> None:
         from tools.documentation.errors import DocumentationOperationError
@@ -362,6 +437,92 @@ class SiteStagingTests(unittest.TestCase):
                 ):
                     stage_site(repo, output)
                 self.assertFalse(output.exists())
+
+
+class SitePublicationTests(unittest.TestCase):
+    def write_manifest(self, repo: Path, sources: list[dict[str, str]]) -> None:
+        path = repo / "docs/site-manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"schema_version": 1, "sources": sources}),
+            encoding="utf-8",
+        )
+
+    def write(self, repo: Path, relative: str, content: bytes) -> Path:
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        return path
+
+    def test_site_dependencies_and_localization_are_pinned(self) -> None:
+        requirements = (PROJECT_ROOT / "docs/requirements-site.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(
+            requirements.splitlines(),
+            [
+                "mkdocs==1.6.1",
+                "mkdocs-material==9.7.7",
+                "mkdocs-static-i18n==1.3.1",
+            ],
+        )
+        config = (PROJECT_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
+        for required in (
+            "docs_structure: suffix",
+            "fallback_to_default: false",
+            "reconfigure_material: true",
+            "reconfigure_search: true",
+            "- locale: en",
+            "- locale: zh-TW",
+            "strict: true",
+        ):
+            self.assertEqual(config.count(required), 1, required)
+        self.assertNotIn("navigation.instant", config)
+
+    @unittest.skipUnless(shutil.which("mkdocs"), "pinned MkDocs is not installed")
+    def test_strict_build_has_both_routes_switching_and_bilingual_search(self) -> None:
+        from tools.documentation.site import stage_site
+
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as site_dir:
+            source = Path(source_dir)
+            site = Path(site_dir)
+            self.assertEqual(stage_site(PROJECT_ROOT, source), 134)
+            environment = dict(os.environ)
+            environment.update(
+                {
+                    "REDRHEX_DOCS_DIR": str(source),
+                    "REDRHEX_DOCS_SITE_DIR": str(site),
+                }
+            )
+            result = subprocess.run(
+                ["mkdocs", "build", "--strict", "-f", "mkdocs.yml"],
+                cwd=PROJECT_ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            english = site / "operators/getting-started/index.html"
+            chinese = site / "zh-TW/operators/getting-started/index.html"
+            self.assertTrue(english.is_file())
+            self.assertTrue(chinese.is_file())
+            self.assertIn(
+                'href="../../zh-TW/operators/getting-started/"',
+                english.read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                'href="../../../operators/getting-started/"',
+                chinese.read_text(encoding="utf-8"),
+            )
+
+            search = json.loads(
+                (site / "search/search_index.json").read_text(encoding="utf-8")
+            )
+            records = json.dumps(search["docs"], ensure_ascii=False)
+            self.assertIn("Operator Documentation", records)
+            self.assertIn("操作人員文件", records)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX file types")
     def test_symlinked_sources_candidates_and_nonregular_files_are_rejected(self) -> None:
