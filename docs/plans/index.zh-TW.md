@@ -6,21 +6,16 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
 <a id="active-plans"></a>
-## 現行計畫
+## 進行中計畫
 
-- [RedRHex 文件系統重整](active/2026-08-01-documentation-system-reorganization.zh-TW.md) — 本次工作的現行計畫。
+- [文件系統重整](active/2026-08-01-documentation-system-reorganization.zh-TW.md)
+- [Windows 遠端啟動器實作](active/2026-08-01-windows-remote-launcher.zh-TW.md)
 
-<a id="legacy-sources"></a>
-## 舊版計畫來源
+<a id="plan-lifecycle"></a>
+## 計畫生命週期
 
-下列現有單一語言計畫尚未完成生命週期狀態正規化。列於此處不代表把已完成或狀態未知的工作歸類為現行：
-
-- [Reward Agent CLI 試驗啟動 — 舊版來源](../superpowers/plans/2026-06-19-reward-agent-cli-trial-launch.md)
-- [Reward Agent 基礎 — 舊版來源](../superpowers/plans/2026-06-19-reward-agent-foundation.md)
-- [Reward Agent 權重調校 — 舊版來源](../superpowers/plans/2026-06-19-reward-agent-weight-tuning.md)
-- [Sim-to-real 校正 MVP — 舊版來源](../superpowers/plans/2026-07-13-sim2real-calibration-mvp.md)
-- [Windows 遠端啟動器 — 舊版來源](../superpowers/plans/2026-08-01-windows-remote-launcher.md)
+計畫是暫時的執行紀錄。計畫完成或取消時，將持久成果保存到維護中文件、決策、發行或路線圖，然後移除計畫。

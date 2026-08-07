@@ -6,18 +6,21 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="active-designs"></a>
-## 現行設計
+<a id="approved-designs"></a>
+## 已核准設計
 
-- [RedRHex 雙語文件系統設計](active/2026-08-01-documentation-system-design.zh-TW.md) — 已核准，並在本次重整期間維持現行狀態。
+- [雙語文件系統](active/2026-08-01-documentation-system-design.zh-TW.md)
+- [Windows 遠端啟動器](active/2026-08-01-windows-remote-launcher.zh-TW.md)
 
-<a id="legacy-sources"></a>
-## 等待遷移的舊版設計
+<a id="proposed-designs"></a>
+## 提案中設計
 
-下列單一語言設計仍待生命週期審查與雙語遷移：
+- [核心優先、模擬優先的軟重啟](active/2026-07-13-core-sim-first-soft-reboot.zh-TW.md) — 從保留分支以提案身分匯入，不代表目前實作。
 
-- [Windows 遠端啟動器設計 — 舊版來源](../superpowers/specs/2026-08-01-windows-remote-launcher-design.md)
-- [Reward Agent Lab 設計 — 舊版來源](../superpowers/specs/2026-06-19-reward-agent-lab-design.md)
+<a id="design-lifecycle"></a>
+## 設計生命週期
+
+仍可執行的 proposed 與 approved designs 留在此處。解決後，持久成果移入 architecture、ADR、release 或 roadmap，暫時設計則移除。

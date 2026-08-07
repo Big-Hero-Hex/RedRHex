@@ -6,29 +6,36 @@ audience: operator
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="audience"></a>
-## Audience
+<a id="start-here"></a>
+## Start here
 
-This path is for people setting up, training, monitoring, evaluating, exporting, deploying, calibrating, or troubleshooting RedRHex.
+Begin with [Getting started](getting-started.en.md), then select the workflow you need.
 
-<a id="planned-journey"></a>
-## Planned journey
+<a id="training-and-evaluation"></a>
+## Training and evaluation
 
-The maintained operator journey will cover getting started, training, the training panel, deployment, calibration, and troubleshooting. Paired guides will replace the sources below during Phase 4 and Phase 5 migration.
+- [Launch a training run](training/launch-training.en.md)
+- [Use staged training](training/staged-training.en.md)
+- [Monitor training](training/monitor-training.en.md)
+- [Play, export, and record video](evaluation/play-export-video.en.md)
+- [Operate the Training Panel](panel/training-panel.en.md)
 
-<a id="legacy-sources"></a>
-## Legacy sources awaiting migration
+<a id="deployment-and-support"></a>
+## Deployment and support
 
-These links are legacy single-language sources, not compliant canonical pairs:
+- [Check deployment readiness](deployment/deployment-readiness.en.md)
+- [Calibrate physics for sim-to-real](calibration/physics-calibration.en.md)
+- [Bring up ROS 2 safely](../../ros2_ws/src/redrhex_rl_controller/docs/bring-up.en.md)
+- [Deploy to hardware in stages](../../ros2_ws/src/redrhex_rl_controller/docs/deployment.en.md)
+- [Troubleshoot training](troubleshooting/training-troubleshooting.en.md)
+- [Troubleshoot ROS 2 deployment](../../ros2_ws/src/redrhex_rl_controller/docs/troubleshooting.en.md)
 
-- [Command reference — legacy source](../COMMANDS.md)
-- [Training and play guide — legacy source](../redrhex_train_play_guide.md)
-- [Sim-to-real calibration guide — legacy source](../sim2real_calibration.md)
-- [Training panel README — legacy source](../../tools/training_panel/README.md)
-- [Training panel English manual — legacy source](../../tools/training_panel/docs/MANUAL_EN.md)
-- [Training panel Traditional Chinese manual — legacy source](../../tools/training_panel/docs/MANUAL_ZH.md)
-- [RedRHex To Go Traditional Chinese manual — legacy source](../../tools/training_panel/docs/REDRHEX_TO_GO_MANUAL_ZH.md)
-- [ROS deployment README — legacy source](../../ros2_ws/src/redrhex_rl_controller/README.md)
+<a id="operator-reference"></a>
+## Operator reference
+
+- [Command reference](../reference/command-reference.en.md)
+- [Runtime paths and artifacts](../reference/runtime-layout.en.md)
+- [Version and compatibility matrix](../reference/compatibility.en.md)

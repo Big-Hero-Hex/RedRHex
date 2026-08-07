@@ -6,18 +6,21 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="active-designs"></a>
-## Active designs
+<a id="approved-designs"></a>
+## Approved designs
 
-- [RedRHex bilingual documentation-system design](active/2026-08-01-documentation-system-design.en.md) — approved and active during this reorganization.
+- [Bilingual documentation system](active/2026-08-01-documentation-system-design.en.md)
+- [Windows remote launcher](active/2026-08-01-windows-remote-launcher.en.md)
 
-<a id="legacy-sources"></a>
-## Legacy designs awaiting migration
+<a id="proposed-designs"></a>
+## Proposed designs
 
-These single-language designs await lifecycle review and bilingual migration:
+- [Core-first, simulation-first soft reboot](active/2026-07-13-core-sim-first-soft-reboot.en.md) — imported from its preserved branch as a proposal, not current implementation.
 
-- [Windows remote launcher design — legacy source](../superpowers/specs/2026-08-01-windows-remote-launcher-design.md)
-- [Reward Agent Lab design — legacy source](../superpowers/specs/2026-06-19-reward-agent-lab-design.md)
+<a id="design-lifecycle"></a>
+## Design lifecycle
+
+Actionable proposed and approved designs remain here. Once resolved, their durable outcome moves into architecture, an ADR, a release, or the roadmap and the temporary design is removed.

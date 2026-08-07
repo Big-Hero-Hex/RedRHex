@@ -6,15 +6,15 @@ audience: shared
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="purpose"></a>
-## 目的
+<a id="current-roadmap"></a>
+## 目前路線圖
 
-長期維護的路線圖將記錄目前優先事項與未解的未來工作，不會與已完成工作或歷史報告混在一起。
+- [目前優先事項](current-priorities.zh-TW.md)
 
-<a id="current-state"></a>
-## 目前狀態
+<a id="roadmap-policy"></a>
+## 路線圖政策
 
-報告與專案遷移期間會先審查狀態與證據，再加入未解工作。審查完成前，本入口不會虛構或排序優先事項。
+路線圖包含尚未解決的優先事項，不包含已交付工作。完成項目移入 release 或 dated milestone records；實作細節應放在已核准 design 與暫時計畫。

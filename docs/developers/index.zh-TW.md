@@ -6,31 +6,37 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="audience"></a>
-## 適用讀者
+<a id="architecture"></a>
+## 架構
 
-此入口提供給理解、測試、擴充、審查或維護 RedRHex 軟體及其文件的人員。
+- [系統總覽](architecture/system-overview.zh-TW.md)
+- [訓練與策略架構](architecture/training-and-policy.zh-TW.md)
+- [Reward 與能量模型](architecture/reward-and-energy.zh-TW.md)
+- [Sim-to-real 校正架構](architecture/sim-to-real.zh-TW.md)
+- [ROS 2 部署架構](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.zh-TW.md)
+- [Reward Agent 架構](../../tools/reward_agent/docs/architecture.zh-TW.md)
+- [Training Panel 架構](../../tools/training_panel/docs/architecture.zh-TW.md)
 
-<a id="planned-journey"></a>
-## 規劃中的使用旅程
+<a id="change-and-validate"></a>
+## 修改與驗證
 
-持續維護的開發人員旅程將涵蓋架構、開發、測試、子系統、決策／設計／計畫，以及版本／證據。遷移會整理這些主題，不會重複歷史報告中的架構主張。
+- [修改環境或 rewards](development/environment-and-reward-changes.zh-TW.md)
+- [測試與驗證 RedRHex](testing/validation.zh-TW.md)
+- [子系統所有權與文件](subsystems/ownership.zh-TW.md)
+- [策略契約](../reference/policy-contract.zh-TW.md)
+- [以 Reward Agent 調整 weights](../../tools/reward_agent/docs/weight-tuning.zh-TW.md)
+- [移植 Training Panel](../../tools/training_panel/docs/porting.zh-TW.md)
 
-<a id="system-work"></a>
-## 已核准的文件系統工作
-
-- [雙語文件系統設計](../designs/active/2026-08-01-documentation-system-design.zh-TW.md)
-- [文件系統重整計畫](../plans/active/2026-08-01-documentation-system-reorganization.zh-TW.md)
-
-<a id="central-portals"></a>
-## 中央入口
+<a id="project-records"></a>
+## 專案紀錄與治理
 
 - [決策](../decisions/index.zh-TW.md)
 - [設計](../designs/index.zh-TW.md)
 - [計畫](../plans/index.zh-TW.md)
-- [參考資料](../reference/index.zh-TW.md)
-- [版本發布](../releases/index.zh-TW.md)
+- [路線圖](../roadmap/index.zh-TW.md)
+- [發行](../releases/index.zh-TW.md)
 - [研究與證據](../research/index.zh-TW.md)
+- [文件治理](../governance/index.zh-TW.md)

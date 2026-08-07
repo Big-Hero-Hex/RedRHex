@@ -6,24 +6,17 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="evidence-model"></a>
-## Two-tier evidence model
+<a id="published-evidence"></a>
+## Published evidence
 
-Tier one is source evidence: existing reports, measurements, and run material remain inputs for review. Tier two is canonical published evidence: a paired experiment summary is created only when reviewed evidence changes a baseline, recommendation, decision, or result; published summaries are immutable and corrections use dated addenda.
+- [2026-07-09 project audit](2026-07-09-project-audit.en.md)
+- [2026-07-10 training-stack evidence](2026-07-10-training-stack-evidence.en.md)
+- [Locomotion literature and design rationale](locomotion-literature.en.md)
 
-<a id="legacy-sources"></a>
-## Legacy sources awaiting curation
+<a id="evidence-policy"></a>
+## Evidence policy
 
-The following single-language reports remain tier-one legacy sources until their durable claims and limitations are curated:
-
-- [Energy-aware reward integration report — legacy source](../energy_aware_reward_integration_report.md)
-- [2026 midterm report — legacy source](../2026_Midterm.md)
-- [ForwardFast professor report — legacy source](../redrhex_forwardfast_professor_report.md)
-- [Training report — legacy source](../redrhex_train_report.md)
-- [Meeting report — legacy source](../redrhex_meeting_report.md)
-- [Improvement strategy report — legacy source](../redrhex_improvement_strategy_full.md)
-- [July project review — legacy source](../project_review_2026-07-09.md)
-- [Sim-to-real calibration report — legacy source](../sim2real_calibration.md)
+Raw logs and run notes remain outside canonical documentation. A bilingual experiment summary is committed only when reviewed evidence changes a baseline, recommendation, decision, or published result. Published summaries are immutable; corrections use dated addenda.

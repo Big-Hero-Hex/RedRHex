@@ -6,23 +6,15 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="purpose"></a>
-## Purpose
+<a id="accepted-decisions"></a>
+## Accepted decisions
 
-Architecture Decision Records (ADRs) preserve durable cross-cutting decisions, their context, and their consequences without rewriting history.
+- [ADR-0001: Five-stage training curriculum](adr-0001-five-stage-curriculum.en.md)
 
-<a id="lifecycle-and-naming"></a>
-## Lifecycle and naming
+<a id="decision-policy"></a>
+## Decision policy
 
-ADRs use sequential names such as `adr-0001-slug.<locale>.md`. An ADR is `accepted` or `superseded`; both remain in the repository, and a later ADR supersedes an earlier one.
-
-- [Naming conventions](../governance/naming-conventions.en.md)
-- [Document lifecycle](../governance/document-lifecycle.en.md)
-
-<a id="current-state"></a>
-## Current state
-
-No ADR has been migrated into this portal yet. Historical reports are not decisions unless they are deliberately curated into a compliant ADR pair.
+ADRs permanently preserve cross-cutting decisions, context, and consequences. Names are sequential, and an accepted ADR is superseded by a new ADR rather than silently rewritten. See [naming conventions](../governance/naming-conventions.en.md) and the [document lifecycle](../governance/document-lifecycle.en.md).

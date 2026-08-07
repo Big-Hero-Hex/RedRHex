@@ -29,12 +29,40 @@ class SiteManifestTests(unittest.TestCase):
             json.loads(checked_in.read_text(encoding="utf-8")),
             {
                 "schema_version": 1,
-                "sources": [{"destination": ".", "source": "docs"}],
+                "sources": [
+                    {"destination": ".", "source": "docs"},
+                    {
+                        "destination": "components/training-panel",
+                        "source": "tools/training_panel/docs",
+                    },
+                    {
+                        "destination": "components/reward-agent",
+                        "source": "tools/reward_agent/docs",
+                    },
+                    {
+                        "destination": "components/ros2-deployment",
+                        "source": "ros2_ws/src/redrhex_rl_controller/docs",
+                    },
+                ],
             },
         )
         self.assertEqual(
             load_site_sources(PROJECT_ROOT),
-            (SiteSource(PROJECT_ROOT / "docs", Path(".")),),
+            (
+                SiteSource(PROJECT_ROOT / "docs", Path(".")),
+                SiteSource(
+                    PROJECT_ROOT / "tools/training_panel/docs",
+                    Path("components/training-panel"),
+                ),
+                SiteSource(
+                    PROJECT_ROOT / "tools/reward_agent/docs",
+                    Path("components/reward-agent"),
+                ),
+                SiteSource(
+                    PROJECT_ROOT / "ros2_ws/src/redrhex_rl_controller/docs",
+                    Path("components/ros2-deployment"),
+                ),
+            ),
         )
 
         with tempfile.TemporaryDirectory() as directory:

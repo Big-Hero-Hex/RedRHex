@@ -6,29 +6,36 @@ audience: operator
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="audience"></a>
-## 適用讀者
+<a id="start-here"></a>
+## 從這裡開始
 
-此入口提供給設定、訓練、監控、評估、匯出、部署、校正或疑難排解 RedRHex 的人員。
+先閱讀[開始使用](getting-started.zh-TW.md)，再選擇需要的工作流程。
 
-<a id="planned-journey"></a>
-## 規劃中的使用旅程
+<a id="training-and-evaluation"></a>
+## 訓練與評估
 
-持續維護的操作人員旅程將涵蓋入門、訓練、訓練 panel、部署、校正及疑難排解。第四及第五階段遷移時，正式雙語指南將取代下列來源。
+- [啟動訓練](training/launch-training.zh-TW.md)
+- [使用分階段訓練](training/staged-training.zh-TW.md)
+- [監控訓練](training/monitor-training.zh-TW.md)
+- [播放、匯出與錄影](evaluation/play-export-video.zh-TW.md)
+- [操作 Training Panel](panel/training-panel.zh-TW.md)
 
-<a id="legacy-sources"></a>
-## 等待遷移的舊版來源
+<a id="deployment-and-support"></a>
+## 部署與支援
 
-下列連結是舊版單一語言來源，並非符合規範的正式配對：
+- [檢查部署就緒狀態](deployment/deployment-readiness.zh-TW.md)
+- [進行 sim-to-real 物理校正](calibration/physics-calibration.zh-TW.md)
+- [安全啟動 ROS 2](../../ros2_ws/src/redrhex_rl_controller/docs/bring-up.zh-TW.md)
+- [分階段部署至硬體](../../ros2_ws/src/redrhex_rl_controller/docs/deployment.zh-TW.md)
+- [排解訓練問題](troubleshooting/training-troubleshooting.zh-TW.md)
+- [排解 ROS 2 部署問題](../../ros2_ws/src/redrhex_rl_controller/docs/troubleshooting.zh-TW.md)
 
-- [命令參考 — 舊版來源](../COMMANDS.md)
-- [訓練與播放指南 — 舊版來源](../redrhex_train_play_guide.md)
-- [Sim-to-real 校正指南 — 舊版來源](../sim2real_calibration.md)
-- [訓練 panel README — 舊版來源](../../tools/training_panel/README.md)
-- [訓練 panel 英文手冊 — 舊版來源](../../tools/training_panel/docs/MANUAL_EN.md)
-- [訓練 panel 繁體中文手冊 — 舊版來源](../../tools/training_panel/docs/MANUAL_ZH.md)
-- [RedRHex To Go 繁體中文手冊 — 舊版來源](../../tools/training_panel/docs/REDRHEX_TO_GO_MANUAL_ZH.md)
-- [ROS 部署 README — 舊版來源](../../ros2_ws/src/redrhex_rl_controller/README.md)
+<a id="operator-reference"></a>
+## 操作參考
+
+- [命令參考](../reference/command-reference.zh-TW.md)
+- [執行路徑與產物](../reference/runtime-layout.zh-TW.md)
+- [版本與相容性矩陣](../reference/compatibility.zh-TW.md)

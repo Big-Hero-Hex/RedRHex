@@ -6,19 +6,20 @@ audience: shared
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="scope"></a>
-## Scope
+<a id="current-references"></a>
+## Current references
 
-Canonical command, configuration, version, compatibility, and glossary references will be added here as migration verifies their facts against the repository.
+- [Command reference](command-reference.en.md)
+- [Runtime paths and artifacts](runtime-layout.en.md)
+- [Training and deployment policy contract](policy-contract.en.md)
+- [Version and compatibility matrix](compatibility.en.md)
 
-<a id="legacy-sources"></a>
-## Legacy sources awaiting migration
+<a id="component-references"></a>
+## Component references
 
-These links are legacy single-language sources, not canonical references:
-
-- [Command reference — legacy source](../COMMANDS.md)
-- [Training panel English changelog — legacy source](../../tools/training_panel/docs/CHANGELOG_EN.md)
-- [Training panel Traditional Chinese changelog — legacy source](../../tools/training_panel/docs/CHANGELOG_ZH.md)
+- [Training Panel documentation](../../tools/training_panel/docs/index.en.md)
+- [ROS 2 policy contract](../../ros2_ws/src/redrhex_rl_controller/docs/policy-contract.en.md)
+- [Reward Agent weight-tuning workflow](../../tools/reward_agent/docs/weight-tuning.en.md)

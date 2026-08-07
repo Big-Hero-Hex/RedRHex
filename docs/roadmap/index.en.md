@@ -6,15 +6,15 @@ audience: shared
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="purpose"></a>
-## Purpose
+<a id="current-roadmap"></a>
+## Current roadmap
 
-The durable roadmap will record current priorities and unresolved future work without mixing them with completed work or historical reports.
+- [Current priorities](current-priorities.en.md)
 
-<a id="current-state"></a>
-## Current state
+<a id="roadmap-policy"></a>
+## Roadmap policy
 
-Unresolved work will be populated during report and project migration after its status and evidence are reviewed. This portal does not invent or rank priorities before that review.
+The roadmap contains unresolved priorities, not shipped work. Completed items move into release or dated milestone records; implementation details belong in an approved design and temporary plan.

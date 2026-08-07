@@ -6,31 +6,37 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 ---
 
-<a id="audience"></a>
-## Audience
+<a id="architecture"></a>
+## Architecture
 
-This path is for people who understand, test, extend, review, or maintain RedRHex software and its documentation.
+- [System overview](architecture/system-overview.en.md)
+- [Training and policy architecture](architecture/training-and-policy.en.md)
+- [Reward and energy model](architecture/reward-and-energy.en.md)
+- [Sim-to-real calibration architecture](architecture/sim-to-real.en.md)
+- [ROS 2 deployment architecture](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.en.md)
+- [Reward Agent architecture](../../tools/reward_agent/docs/architecture.en.md)
+- [Training Panel architecture](../../tools/training_panel/docs/architecture.en.md)
 
-<a id="planned-journey"></a>
-## Planned journey
+<a id="change-and-validate"></a>
+## Change and validate
 
-The maintained developer journey will cover architecture, development, testing, subsystems, decisions/designs/plans, and releases/evidence. Migration will curate those topics rather than repeat architecture claims from historical reports.
+- [Change the environment or rewards](development/environment-and-reward-changes.en.md)
+- [Test and validate RedRHex](testing/validation.en.md)
+- [Subsystem ownership and documentation](subsystems/ownership.en.md)
+- [Policy contract](../reference/policy-contract.en.md)
+- [Tune weights with Reward Agent](../../tools/reward_agent/docs/weight-tuning.en.md)
+- [Port the Training Panel](../../tools/training_panel/docs/porting.en.md)
 
-<a id="system-work"></a>
-## Approved documentation-system work
-
-- [Bilingual documentation-system design](../designs/active/2026-08-01-documentation-system-design.en.md)
-- [Documentation-system reorganization plan](../plans/active/2026-08-01-documentation-system-reorganization.en.md)
-
-<a id="central-portals"></a>
-## Central portals
+<a id="project-records"></a>
+## Project records and governance
 
 - [Decisions](../decisions/index.en.md)
 - [Designs](../designs/index.en.md)
 - [Plans](../plans/index.en.md)
-- [Reference](../reference/index.en.md)
+- [Roadmap](../roadmap/index.en.md)
 - [Releases](../releases/index.en.md)
 - [Research and evidence](../research/index.en.md)
+- [Documentation governance](../governance/index.en.md)
