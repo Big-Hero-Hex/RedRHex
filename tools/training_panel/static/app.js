@@ -318,7 +318,10 @@ function setStatusTone(message, tone = "info", linkUrl = "") {
   region.append(toast);
 
   while (region.querySelectorAll(".toast").length > TOAST_MAX) {
-    dismissToast(region.querySelector(".toast"));
+    // Drop the oldest *non-error* toast first so routine chatter can never push
+    // out an unread failure. When every slot is an error, drop the oldest one.
+    const toasts = Array.from(region.querySelectorAll(".toast"));
+    dismissToast(toasts.find((node) => node.dataset.tone !== "error") || toasts[0]);
   }
   restartToastTimer(toast, tone);
 }
@@ -1711,6 +1714,7 @@ async function loadDeployForSelectedRun() {
     return;
   }
   beginLoading("deploy");
+  if (!state.deployData) renderDeployPanel();  // skeleton while the fetch is in flight
   try {
     state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
   } finally {
@@ -2173,6 +2177,9 @@ function scheduleRunsRefresh() {
 
 async function loadRuns() {
   beginLoading("runs");
+  // Paint the skeleton now, while the fetch below is still in flight. Rendering
+  // only after the await would mean the loading flag is never observed.
+  if (!state.runs.length) renderRuns();
   try {
     const selectedId = state.selectedRun && state.selectedRun.id;
     const scrollState = captureHistoryScroll();
@@ -2203,6 +2210,8 @@ async function loadRuns() {
         clearRunDetailState({ render: false });
       }
     }
+    // Not redundant with the `finally` below: the post-fetch render must see the
+    // flag already cleared, or a genuinely empty result paints a skeleton forever.
     endLoading("runs");
     renderRuns();
     renderRunDetails();
@@ -2250,7 +2259,9 @@ async function selectRun(runId) {
   ]);
   if (!state.selectedRun || state.selectedRun.id !== runId) return;
   $("#notes-editor").value = notesData.notes;
-  setStatus(run.latest_checkpoint ? `Latest checkpoint: ${run.latest_checkpoint}` : "No checkpoint available yet.");
+  // No toast here: checkpoint state is metadata, not an event, and the details
+  // pane already reports it ("Checkpoint: iter N" / "no checkpoint"). A toast on
+  // every run click would evict unread errors three clicks later.
   setDebugTarget({ type: "run", id: runId });
 }
 
@@ -3102,7 +3113,7 @@ async function tweakFromLastRun() {
     await applyTweakPayload(await api("/api/tweaks/last-run"));
   } catch (error) {
     $("#train-status").textContent = error.message;
-    setStatus(error.message);
+    setStatusTone(error.message, "error");
   }
 }
 
@@ -3110,7 +3121,7 @@ async function tweakFromRun(runId) {
   try {
     await applyTweakPayload(await api(`/api/runs/${encodeURIComponent(runId)}/tweak`));
   } catch (error) {
-    setStatus(error.message);
+    setStatusTone(error.message, "error");
   }
 }
 
@@ -3314,6 +3325,7 @@ function selectPresetForEdit(presetId) {
 
 async function loadRewardsPage() {
   beginLoading("rewards");
+  if (!state.presets.length) renderPresets();  // skeleton while the fetch is in flight
   let presetsData;
   let tweakData;
   try {
@@ -3645,6 +3657,7 @@ function selectTerrainPresetForEdit(presetId) {
 
 async function loadTerrainPage() {
   beginLoading("terrain");
+  if (!state.terrainPresets.length) renderTerrainPresets();  // skeleton while the fetch is in flight
   let presetsData;
   let terrainData;
   try {
@@ -4342,7 +4355,7 @@ function renderActivityEvent(event) {
 
 function renderActivityGroups(events) {
   if (!events.length) {
-    return isLoading("activity") && !events.length
+    return isLoading("activity")
       ? skeletonHtml(3)
       : `<article class="empty-panel">No activity recorded yet.</article>`;
   }
@@ -4572,6 +4585,7 @@ function renderActivity() {
 
 async function loadActivity() {
   beginLoading("activity");
+  if (!state.activityEvents.length) renderActivity();  // skeleton while the fetch is in flight
   try {
     const params = new URLSearchParams({
       limit: "160",
@@ -4760,7 +4774,7 @@ $("#train-form").addEventListener("submit", startTraining);
 $("#smoke-button").addEventListener("click", () => applyPreset("smoke"));
 $("#debug-button").addEventListener("click", () => applyPreset("debug"));
 $("#clear-resume").addEventListener("click", clearResume);
-$("#refresh-button").addEventListener("click", () => refreshAll().catch((error) => setStatus(error.message)));
+$("#refresh-button").addEventListener("click", () => refreshAll().catch((error) => setStatusTone(error.message, "error")));
 $("#save-name").addEventListener("click", () => saveName().catch(handleActionError));
 $("#run-name").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -4978,5 +4992,5 @@ updateBulkToolbar();
 startCurvesPolling();
 setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
 refreshAll()
-  .catch((error) => setStatus(error.message))
+  .catch((error) => setStatusTone(error.message, "error"))
   .then(() => applyHashRoute().catch(handleActionError));

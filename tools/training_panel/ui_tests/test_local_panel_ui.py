@@ -380,6 +380,67 @@ def test_repeated_message_collapses_with_counter(panel, page):
     expect(page.locator("#panel-status .toast-count")).to_contain_text("3")
 
 
+def test_error_toast_survives_a_flood_of_info_toasts(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.evaluate("setStatusTone('Deploy blew up.', 'error')")
+    page.evaluate("setStatus('one'); setStatus('two'); setStatus('three'); setStatus('four')")
+    # Eviction must drop info toasts first — an unread failure may not be pushed out.
+    expect(page.locator("#panel-status .toast")).to_have_count(3)
+    expect(page.locator("#panel-status .toast.toast-error")).to_contain_text("Deploy blew up.")
+
+
+def test_selecting_a_run_does_not_emit_a_toast(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card").first.click()
+    page.wait_for_timeout(800)
+    # Checkpoint metadata belongs in the details pane, not in a corner toast that
+    # would evict unread errors on every ordinary click.
+    expect(page.locator("#panel-status .toast")).to_have_count(0)
+
+
+def test_refresh_failure_leaves_a_persistent_error_toast(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "System probe exploded."}),
+        ),
+    )
+    page.locator("#refresh-button").click()
+    toast = page.locator("#panel-status .toast.toast-error")
+    expect(toast).to_contain_text("System probe exploded.")
+    page.wait_for_timeout(7000)
+    expect(toast).to_be_visible()  # must not erase itself after 6s
+
+
+def test_action_failure_outside_history_reaches_the_screen(panel, page):
+    """The bug Task 1 fixed: a failure raised while a non-History view is active."""
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="rewards"]').click()
+    page.wait_for_selector(".preset-card")
+
+    def fail_writes(route):
+        if route.request.method == "POST":
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"error": "Preset store is read-only."}),
+            )
+        else:
+            route.continue_()
+
+    page.route("**/api/presets", fail_writes)
+    page.on("dialog", lambda dialog: dialog.accept("Copy of baseline"))
+    page.locator(".preset-card").first.click()
+    page.locator("#preset-duplicate-btn").click()
+    toast = page.locator("#panel-status .toast.toast-error")
+    expect(toast).to_contain_text("Preset store is read-only.")
+
+
 def test_view_switch_updates_hash(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")
@@ -527,6 +588,53 @@ def test_menu_does_not_reopen_on_a_later_render(panel, page):
     expect(page.locator(".run-menu[data-open='true']")).to_have_count(0)
 
 
+# Holds every GET /api/runs open until the test releases it, so a skeleton can be
+# observed during a genuinely in-flight fetch rather than by hand-setting state.
+RUNS_FETCH_GATE = """
+(() => {
+  const realFetch = window.fetch.bind(window);
+  window.__pendingRuns = [];
+  window.fetch = (input, init) => {
+    const url = String(typeof input === "string" ? input : input.url);
+    if (url.split("?")[0].endsWith("/api/runs")) {
+      return new Promise((resolve, reject) => {
+        window.__pendingRuns.push(() => realFetch(input, init).then(resolve, reject));
+      });
+    }
+    return realFetch(input, init);
+  };
+  window.__releaseRuns = () => {
+    const queued = window.__pendingRuns;
+    window.__pendingRuns = [];
+    queued.forEach((run) => run());
+    return queued.length;
+  };
+})();
+"""
+
+
+def test_skeleton_shows_during_an_in_flight_runs_fetch(panel, page):
+    page.add_init_script(RUNS_FETCH_GATE)
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="history"]').click()
+
+    # The real boot path — no hand-set state — must paint a skeleton.
+    expect(page.locator("#runs .skeleton-row").first).to_be_visible()
+    expect(page.locator(".run-card")).to_have_count(0)
+
+    page.evaluate("window.__releaseRuns()")
+    expect(page.locator(".run-card").first).to_be_visible()
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+
+    # A background refresh of already-loaded data must not reflash the skeleton.
+    page.evaluate("loadRuns()")
+    page.wait_for_function("window.__pendingRuns.length > 0")
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+    expect(page.locator(".run-card").first).to_be_visible()
+    page.evaluate("window.__releaseRuns()")
+    expect(page.locator("#runs .skeleton-row")).to_have_count(0)
+
+
 def test_skeleton_shows_before_runs_arrive(panel, page):
     page.goto(panel["url"])
     page.locator('.nav-button[data-view="history"]').click()
@@ -560,6 +668,8 @@ def test_freshness_reports_live_after_a_successful_poll(panel, page):
 
 
 def test_freshness_reports_failed_when_the_backend_stops(panel, page):
+    # The 45s margin below assumes the fixture seeds a queued run, which keeps the
+    # panel on its 10s active poll interval rather than the 30s idle one.
     page.goto(panel["url"])
     page.wait_for_function("document.querySelector('#freshness')?.dataset.state === 'live'")
     panel["proc"].terminate()
