@@ -480,6 +480,30 @@ def test_refresh_failure_leaves_a_persistent_error_toast(panel, page):
     expect(toast).to_be_visible()  # must not erase itself after 6s
 
 
+def test_action_failure_outside_history_reaches_the_screen(panel, page):
+    """The bug Task 1 fixed: a failure raised while a non-History view is active."""
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="rewards"]').click()
+    page.wait_for_selector(".preset-card")
+
+    def fail_writes(route):
+        if route.request.method == "POST":
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"error": "Preset store is read-only."}),
+            )
+        else:
+            route.continue_()
+
+    page.route("**/api/presets", fail_writes)
+    page.on("dialog", lambda dialog: dialog.accept("Copy of baseline"))
+    page.locator(".preset-card").first.click()
+    page.locator("#preset-duplicate-btn").click()
+    toast = page.locator("#panel-status .toast.toast-error")
+    expect(toast).to_contain_text("Preset store is read-only.")
+
+
 def test_view_switch_updates_hash(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")
