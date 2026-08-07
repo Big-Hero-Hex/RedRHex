@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tools.training_panel.training_panel.commands import TrainingParams, VideoParams
+from tools.training_panel.training_panel.commands import DEFAULT_TASK, TrainingParams, VideoParams, resolve_spring_backend
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.history import HistoryStore
 from tools.training_panel.training_panel.processes import (
@@ -416,7 +416,15 @@ class ProcessRegistryTests(unittest.TestCase):
                 "terrain:\n  terrain_type: plane\nterrain_curriculum_enable: false\n",
                 encoding="utf-8",
             )
-            history.add_run({"id": "run_one", "source": "training_panel", "status": "completed", "log_dir": str(log_dir)})
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                    "params": {"spring_backend": "native"},
+                }
+            )
             registry = ProcessRegistry(paths, history)
             result = registry.start_play("run_one", str(checkpoint), device="cpu")
             try:
@@ -426,6 +434,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertIsNone(debug["returncode"])
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("scripts/rsl_rl/play.py", debug["command"])
+                self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
                 self.assertIn("--camera_eye -3.0 -2.4 1.6", debug["command"])
@@ -473,6 +482,7 @@ class ProcessRegistryTests(unittest.TestCase):
                     "status": "completed",
                     "created_at": "2026-05-15T11:00:00",
                     "log_dir": str(log_dir),
+                    "params": {"spring_backend": "native"},
                 }
             )
             registry = ProcessRegistry(paths, history)
@@ -488,12 +498,14 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertEqual(debug["kind"], "video")
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("--headless", debug["command"])
+                self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--video", debug["command"])
                 self.assertIn("--video_length 1200", debug["command"])
                 self.assertIn("--video_width 1920", debug["command"])
                 self.assertIn("--video_height 1080", debug["command"])
                 self.assertIn("--video_fps 30", debug["command"])
                 self.assertIn("--rendering_mode quality", debug["command"])
+                self.assertNotIn("--initial_command", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
                 self.assertIn("--camera_lookat 0.45 0.0 0.35", debug["command"])
@@ -511,6 +523,308 @@ class ProcessRegistryTests(unittest.TestCase):
                 if proc:
                     proc.wait(timeout=8)
                 time.sleep(0.1)
+
+    def test_manual_forward_fast_video_recording_starts_forward(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "forward_fast",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {
+                        "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                        "spring_backend": "native",
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry.start_video_recording("forward_fast", "/tmp/model_7.pt", device="cpu")
+
+            self.assertIn("--initial_command forward", spawn.call_args.args[1])
+
+    def test_forward_fast_process_log_resolves_logged_root_for_live_and_completed_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            log_dir = experiment_root / "2026-06-01_12-00-00_forward_fast_reform_v1"
+            log_dir.mkdir(parents=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                "Exact experiment name requested from command line: 2026-06-01_12-00-00\n",
+                encoding="utf-8",
+            )
+            run = {
+                "id": "forward_fast",
+                "source": "training_panel",
+                "status": "running",
+                "process_log": str(process_log),
+            }
+            history.add_run(run)
+            registry = ProcessRegistry(paths, history)
+
+            self.assertEqual(registry._log_dir_from_process_log("forward_fast"), str(log_dir))
+            self.assertEqual(registry._completed_log_for_run(run), str(log_dir))
+
+    def test_explicit_forward_fast_root_without_match_does_not_fallback_to_legacy_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            (paths.rsl_rl_log_root / f"{timestamp}_wheg_locomotion").mkdir(parents=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            run = {"id": "forward_fast", "process_log": str(process_log)}
+            history.add_run(run)
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("forward_fast"))
+            self.assertIsNone(registry._completed_log_for_run(run))
+
+    def test_explicit_experiment_root_with_spaces_is_resolved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            experiment_root = root / "logs" / "rsl_rl" / "Forward Fast Runs"
+            log_dir = experiment_root / f"{timestamp}_forward_fast_reform_v1"
+            log_dir.mkdir(parents=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "forward_fast", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertEqual(registry._log_dir_from_process_log("forward_fast"), str(log_dir))
+
+    def test_explicit_experiment_root_rejects_symlinked_candidate_outside_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            outside_log = root / "outside" / f"{timestamp}_forward_fast_reform_v1"
+            outside_log.mkdir(parents=True)
+            experiment_root.mkdir(parents=True)
+            (experiment_root / outside_log.name).symlink_to(outside_log, target_is_directory=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "forward_fast", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("forward_fast"))
+
+    def test_out_of_tree_experiment_root_is_not_used_or_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            experiment_root = root / "outside experiment root"
+            (experiment_root / f"{timestamp}_forward_fast_reform_v1").mkdir(parents=True)
+            (paths.rsl_rl_log_root / f"{timestamp}_wheg_locomotion").mkdir(parents=True)
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "forward_fast", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("forward_fast"))
+
+    def test_legacy_exact_name_rejects_symlinked_candidate_outside_log_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            timestamp = "2026-06-01_12-00-00"
+            outside_log = root / "outside" / f"{timestamp}_wheg_locomotion"
+            outside_log.mkdir(parents=True)
+            paths.rsl_rl_log_root.mkdir(parents=True)
+            (paths.rsl_rl_log_root / outside_log.name).symlink_to(
+                outside_log, target_is_directory=True
+            )
+            process_log = paths.process_log_dir / "legacy.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"Exact experiment name requested from command line: {timestamp}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "legacy", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("legacy"))
+
+    def test_textual_log_path_rejects_symlinked_directory_outside_log_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            outside_log = root / "outside" / "2026-06-01_12-00-00_wheg_locomotion"
+            outside_log.mkdir(parents=True)
+            paths.rsl_rl_log_root.mkdir(parents=True)
+            symlinked_log = paths.rsl_rl_log_root / outside_log.name
+            symlinked_log.symlink_to(outside_log, target_is_directory=True)
+            process_log = paths.process_log_dir / "legacy.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"saved {symlinked_log / 'events.out.tfevents.test'}\n",
+                encoding="utf-8",
+            )
+            history.add_run({"id": "legacy", "process_log": str(process_log)})
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._log_dir_from_process_log("legacy"))
+
+    def test_completed_legacy_exact_name_without_match_does_not_time_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            process_log = paths.process_log_dir / "legacy.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                "Exact experiment name requested from command line: 2026-06-01_12-00-00\n",
+                encoding="utf-8",
+            )
+            neighbor_log = paths.rsl_rl_log_root / "2026-06-01_12-01-00_wheg_locomotion"
+            neighbor_log.mkdir(parents=True)
+            run = {"process_log": str(process_log), "created_at": "2000-01-01T00:00:00"}
+            registry = ProcessRegistry(paths, history)
+
+            self.assertIsNone(registry._completed_log_for_run(run))
+
+    def test_completed_forward_fast_training_starts_native_video_for_source_task(self):
+        class CompletedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            experiment_root = root / "logs" / "rsl_rl" / "redrhex_forward_fast"
+            log_dir = experiment_root / "2026-06-01_12-00-00_forward_fast_reform_v1"
+            log_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_7.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            process_log = paths.process_log_dir / "forward_fast.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                f"[INFO] Logging experiment in directory: {experiment_root}\n"
+                "Exact experiment name requested from command line: 2026-06-01_12-00-00\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "forward_fast",
+                    "source": "training_panel",
+                    "status": "running",
+                    "process_log": str(process_log),
+                    "params": {
+                        "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                        "spring_backend": "native",
+                        "device": "cpu",
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry._monitor_training("forward_fast", CompletedProcess(), 0)
+
+            command = spawn.call_args.args[1]
+            self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", command)
+            self.assertIn("--spring-backend native", command)
+            self.assertIn("--initial_command forward", command)
+            self.assertIn(f"--checkpoint {checkpoint}", command)
+
+    def test_play_and_onnx_export_use_source_run_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "forward_fast",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {"task": "Template-Redrhex-ForwardFast-Direct-v0", "spring_backend": "native"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch.object(registry, "_raise_if_immediate_exit"), patch(
+                "tools.training_panel.training_panel.processes.threading.Thread"
+            ) as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry.start_play("forward_fast", "/tmp/model_7.pt", device="cpu")
+                registry.start_onnx_export("forward_fast", "/tmp/model_7.pt", device="cpu")
+
+            commands = [call.args[1] for call in spawn.call_args_list]
+            self.assertTrue(all("--task Template-Redrhex-ForwardFast-Direct-v0" in command for command in commands))
+            self.assertTrue(all("--spring-backend native" in command for command in commands))
+            self.assertTrue(all("--initial_command" not in command for command in commands))
+
+    def test_play_and_onnx_export_default_task_for_legacy_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run({"id": "legacy", "source": "rsl_rl", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(
+                registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
+            ) as spawn, patch.object(registry, "_raise_if_immediate_exit"), patch(
+                "tools.training_panel.training_panel.processes.threading.Thread"
+            ) as thread_cls:
+                thread_cls.return_value.start = Mock()
+                registry.start_play("legacy", "/tmp/model_7.pt", device="cpu")
+                registry.start_onnx_export("legacy", "/tmp/model_7.pt", device="cpu")
+
+            commands = [call.args[1] for call in spawn.call_args_list]
+            self.assertTrue(all(f"--task {DEFAULT_TASK}" in command for command in commands))
 
     def test_process_terrain_override_falls_back_to_run_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -575,6 +889,186 @@ class ProcessRegistryTests(unittest.TestCase):
             registry = ProcessRegistry(paths, history)
             self.assertIsNone(registry._write_process_terrain_override("play_test", "old_run"))
 
+    def test_play_resolves_native_backend_from_discovered_run_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "discovered_run"
+            params_dir = log_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text(
+                "spring_backend: native\n  spring_backend: explicit\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "discovered_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))) as spawn, patch.object(
+                registry, "_raise_if_immediate_exit"
+            ):
+                registry.start_play("discovered_run", str(checkpoint), device="cpu")
+
+            self.assertIn("--spring-backend native", spawn.call_args.args[1])
+
+    def test_play_uses_explicit_backend_for_legacy_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run({"id": "legacy_run", "source": "rsl_rl", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))) as spawn, patch.object(
+                registry, "_raise_if_immediate_exit"
+            ):
+                registry.start_play("legacy_run", "/tmp/model_10.pt", device="cpu")
+
+            self.assertIn("--spring-backend explicit", spawn.call_args.args[1])
+
+    def test_invalid_stored_backend_raises_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "invalid_run",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {"spring_backend": "unsupported"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(ValueError, "spring_backend"):
+                    registry.start_play("invalid_run", "/tmp/model_10.pt", device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_invalid_yaml_backend_raises_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "invalid_yaml_run"
+            params_dir = log_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: unsupported\n", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "invalid_yaml_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(ValueError, "spring_backend"):
+                    registry.start_play("invalid_yaml_run", str(checkpoint), device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_unreadable_yaml_backend_raises_with_path_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            yaml_path = Path(tmp) / "params" / "torsion_spring.yaml"
+            yaml_path.parent.mkdir()
+            yaml_path.write_text("spring_backend: native\n", encoding="utf-8")
+
+            with patch("tools.training_panel.training_panel.commands.Path.read_text", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(OSError, str(yaml_path)):
+                    resolve_spring_backend({"log_dir": str(yaml_path.parent.parent)})
+
+    def test_yaml_backend_path_directory_raises_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "directory_yaml_run"
+            (log_dir / "params" / "torsion_spring.yaml").mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "directory_yaml_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(OSError, "torsion_spring.yaml"):
+                    registry.start_play("directory_yaml_run", str(checkpoint), device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_duplicate_top_level_yaml_backends_raise_before_spawning_play(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "duplicate_yaml_run"
+            params_dir = log_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text(
+                "spring_backend: native\nspring_backend: unsupported\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "duplicate_yaml_run",
+                    "source": "rsl_rl",
+                    "status": "completed",
+                    "log_dir": str(log_dir),
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                with self.assertRaisesRegex(ValueError, "Duplicate"):
+                    registry.start_play("duplicate_yaml_run", str(checkpoint), device="cpu")
+
+            spawn.assert_not_called()
+
+    def test_play_resolves_native_backend_from_checkpoint_parent_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            checkpoint_dir = root / "checkpoint_parent"
+            params_dir = checkpoint_dir / "params"
+            params_dir.mkdir(parents=True)
+            checkpoint = checkpoint_dir / "model_10.pt"
+            checkpoint.write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
+            history.add_run({"id": "run_without_log_dir", "source": "rsl_rl", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))) as spawn, patch.object(
+                registry, "_raise_if_immediate_exit"
+            ):
+                registry.start_play("run_without_log_dir", str(checkpoint), device="cpu")
+
+            self.assertIn("--spring-backend native", spawn.call_args.args[1])
+
     def test_onnx_export_process_uses_export_only_flags_and_updates_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -591,6 +1085,7 @@ class ProcessRegistryTests(unittest.TestCase):
                     "status": "completed",
                     "created_at": "2026-05-15T11:00:00",
                     "log_dir": str(log_dir),
+                    "params": {"spring_backend": "native"},
                 }
             )
             registry = ProcessRegistry(paths, history)
@@ -601,6 +1096,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertEqual(debug["kind"], "onnx")
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("--headless", debug["command"])
+                self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--export_policy_only", debug["command"])
                 self.assertIn("attach_command", debug)
                 run = history.get_run("run_one")
@@ -812,9 +1308,20 @@ class ProcessRegistryTests(unittest.TestCase):
         )
         observed = (
             "python scripts/rsl_rl/train.py "
-            "--device cuda:0 --max_iterations 10 --num_envs 4 --task Template-Redrhex-Direct-v0"
+            "--device cuda:0 --max_iterations 10 --num_envs 4 --task Template-Redrhex-Direct-v0 --spring-backend explicit"
         )
         self.assertTrue(ProcessRegistry._training_commands_match(recorded, observed))
+
+    def test_training_command_match_rejects_different_spring_backends(self):
+        recorded = (
+            "python scripts/rsl_rl/train.py "
+            "--task Template-Redrhex-Direct-v0 --num_envs 4 --max_iterations 10 --device cuda:0 --spring-backend native"
+        )
+        observed = (
+            "python scripts/rsl_rl/train.py "
+            "--task Template-Redrhex-Direct-v0 --num_envs 4 --max_iterations 10 --device cuda:0 --spring-backend explicit"
+        )
+        self.assertFalse(ProcessRegistry._training_commands_match(recorded, observed))
 
     def test_running_isaac_processes_includes_onnx_exports(self):
         with tempfile.TemporaryDirectory() as tmp:

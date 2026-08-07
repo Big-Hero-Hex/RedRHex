@@ -67,6 +67,7 @@ def make_fixture_root(root: Path) -> dict:
     beta = write_run(log_root, "run_beta", (0, 10))
     (beta / "params").mkdir()
     (beta / "params" / "env.yaml").write_text("env: test\n", encoding="utf-8")
+    (beta / "params" / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
     (beta / "videos" / "play").mkdir(parents=True)
     (beta / "videos" / "play" / "rl-video-step-0.mp4").write_text("video", encoding="utf-8")
     (beta / "exported").mkdir()
@@ -318,6 +319,68 @@ def test_history_mobile_layout_has_no_horizontal_overflow(panel, page):
     expect(page.locator("#details-title")).to_be_visible()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 1
+
+
+def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
+    submitted_payloads = []
+
+    def capture_training_start(route):
+        submitted_payloads.append(route.request.post_data_json)
+        route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps({"id": "native_submit", "status": "queued", "display_name": ""}),
+        )
+
+    page.route("**/api/training/start", capture_training_start)
+    page.goto(panel["url"])
+
+    backend = page.locator('select[name="spring_backend"]')
+    assert backend.locator('option[value="explicit"]').count() == 1
+    assert backend.locator('option[value="native"]').count() == 1
+    expect(backend).to_have_value("explicit")
+    backend.select_option("native")
+    page.locator("#train-form button[type=submit]").click()
+    expect(page.locator("#train-status")).to_contain_text("Queued native_submit")
+    assert submitted_payloads == [{
+        "task": "Template-Redrhex-Direct-v0",
+        "display_name": "",
+        "num_envs": 4,
+        "max_iterations": 1,
+        "device": "cuda:0",
+        "spring_backend": "native",
+        "seed": "",
+        "checkpoint": "",
+        "headless": True,
+        "resume": False,
+        "reward_preset_id": "baseline",
+        "reward_overrides": {},
+        "terrain_preset_id": "baseline",
+        "terrain_overrides": {},
+    }]
+
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#runs")).to_contain_text("spring backend: native")
+    expect(page.locator("#run-info-grid")).to_contain_text("Spring Backend")
+    expect(page.locator("#run-info-grid")).to_contain_text("native")
+
+    page.locator("#resume-run").click()
+    expect(page.locator('select[name="spring_backend"]')).to_have_value("native")
+
+    page.locator('.nav-button[data-view="history"]').click()
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    page.locator("#tweak-run").click()
+    expect(page.locator('select[name="spring_backend"]')).to_have_value("native")
+
+    page.locator('.nav-button[data-view="history"]').click()
+    page.locator(".run-card", has_text="run_alpha").click()
+    expect(page.locator("#details-title")).to_have_text("run_alpha")
+    beta_card = page.locator(".run-card", has_text="Beta Foldered")
+    beta_card.locator(".run-menu-trigger").click()
+    beta_card.locator('button[data-action="compare"]').click()
+    expect(page.locator(".comparison-grid")).to_contain_text("Spring Backend")
+    expect(page.locator(".comparison-grid")).to_contain_text("native")
 
 
 def test_deploy_tab_renders_report_and_controls(panel, page):

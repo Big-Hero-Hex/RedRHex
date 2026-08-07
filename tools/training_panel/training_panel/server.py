@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from tools.training_panel import __version__
 
 from .activity import ActivityStore
-from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams
+from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams, resolve_spring_backend
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
 from .history import HistoryStore
@@ -941,10 +941,16 @@ class PanelHandler(BaseHTTPRequestHandler):
         video = Path(str(run.get("latest_video"))) if run and run.get("latest_video") else None
         if not video or not video.exists() or not video.is_file():
             return self._json({"error": "No recorded video found for run"}, status=404)
+        log_dir = Path(str(run.get("log_dir"))) if run and run.get("log_dir") else None
+        if not log_dir or not log_dir.exists() or not log_dir.is_dir():
+            return self._json({"error": "No log directory found for run"}, status=404)
         resolved_video = video.resolve()
-        resolved_root = self.state.paths.rsl_rl_log_root.resolve()
-        if resolved_video != resolved_root and resolved_root not in resolved_video.parents:
-            return self._json({"error": "Video path is outside the RSL-RL log root"}, status=403)
+        resolved_log_dir = log_dir.resolve()
+        resolved_root = (self.state.paths.repo_root / "logs" / "rsl_rl").resolve()
+        if not _is_within(resolved_log_dir, resolved_root):
+            return self._json({"error": "Run log directory is outside the RSL-RL log root"}, status=403)
+        if not _is_within(resolved_video, resolved_log_dir):
+            return self._json({"error": "Video path is outside the selected run log directory"}, status=403)
         self._send_file_response(resolved_video, "video/mp4")
 
     def _send_run_mujoco_video(self, run_id: str) -> None:
@@ -1051,6 +1057,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.state.processes.reconcile_stale_history()
         runs = self.state.history.list_runs()
         for run in runs:
+            run["effective_spring_backend"] = resolve_spring_backend(run)
             latest = latest_deploy_report(run)
             if latest:
                 run["deploy_latest_report"] = {

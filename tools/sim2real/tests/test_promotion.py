@@ -16,7 +16,10 @@ from tools.sim2real.contracts import CalibrationProfileV1, ContractError, load_p
 from tools.sim2real.metrics import compute_subsystem_metrics
 from tools.sim2real.profile_measurements import apply_measurements_to_profile
 from tools.sim2real.promotion import (
+    _expected_condition_metadata,
+    _required_measurement_source_keys,
     _validate_changed_field_evidence,
+    _validate_identifiable_changes,
     _validate_measurement_sources,
     evaluate_promotion,
 )
@@ -28,6 +31,280 @@ from tools.sim2real.traces import (
     sha256_path,
     write_trace,
 )
+
+
+def test_promotion_metadata_contract_includes_signed_spring_annotations() -> None:
+    units, frames = _expected_condition_metadata(load_scenario("torsion-spring"))
+
+    assert units["torque_direction"] == "1"
+    assert units["sweep_branch"] == "1"
+    assert frames["torque_direction"] == "damper_0"
+    assert frames["sweep_branch"] == "damper_0"
+
+
+def test_representative_spring_source_covers_all_six_changed_stiffness_fields() -> None:
+    aliases = [f"damper_{index}" for index in range(6)]
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "spring-baseline",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+    candidate = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "spring-candidate",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {
+                "passive_spring": {
+                    alias: {"stiffness": 200.0} for alias in aliases
+                }
+            },
+            "measurement_sources": {
+                "passive_spring:damper_0": {
+                    "trace_sha256": "a" * 64,
+                    "metadata_sha256": "b" * 64,
+                    "scenario_id": "torsion-spring",
+                    "scenario_sha256": "c" * 64,
+                    "source": "real",
+                    "metric_kind": "torsional_spring",
+                    "frame": "damper_0",
+                    "repeat_count": 3,
+                    "dataset_id": "spring-bench",
+                    "episode_id": "representative-spring",
+                    "applies_to": aliases,
+                    "rest_position_rad": 0.0,
+                    "episode_path": "/datasets/spring-calibration",
+                }
+            },
+        }
+    )
+
+    assert _required_measurement_source_keys(baseline, candidate) == {
+        "passive_spring:damper_0"
+    }
+
+
+def test_representative_spring_profile_can_replace_legacy_damping_only_with_zero() -> None:
+    aliases = [f"damper_{index}" for index in range(6)]
+    source = {
+        "trace_sha256": "a" * 64,
+        "metadata_sha256": "b" * 64,
+        "scenario_id": "torsion-spring",
+        "scenario_sha256": "c" * 64,
+        "source": "real",
+        "metric_kind": "torsional_spring",
+        "frame": "damper_0",
+        "repeat_count": 3,
+        "dataset_id": "spring-bench",
+        "episode_id": "representative-spring",
+        "applies_to": aliases,
+        "rest_position_rad": 0.0,
+        "episode_path": "/datasets/spring-calibration",
+    }
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "legacy-damped-springs",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {
+                "passive_spring": {
+                    alias: {"stiffness": 200.0, "damping": 20.0}
+                    for alias in aliases
+                }
+            },
+        }
+    )
+    payload = baseline.to_dict()
+    payload["profile_id"] = "static-calibrated-springs"
+    for spring in payload["simulation_physics"]["passive_spring"].values():
+        spring["damping"] = 0.0
+    payload["measurement_sources"] = {"passive_spring:damper_0": source}
+    candidate = CalibrationProfileV1.from_dict(payload)
+
+    _validate_identifiable_changes(baseline, candidate)
+    assert _required_measurement_source_keys(baseline, candidate) == {
+        "passive_spring:damper_0"
+    }
+
+    nonzero_payload = candidate.to_dict()
+    nonzero_payload["profile_id"] = "invented-dynamic-damping"
+    nonzero_payload["simulation_physics"]["passive_spring"]["damper_2"][
+        "damping"
+    ] = 0.1
+    with pytest.raises(ContractError, match="unidentifiable.*damping"):
+        _validate_identifiable_changes(
+            baseline, CalibrationProfileV1.from_dict(nonzero_payload)
+        )
+
+
+def test_representative_spring_source_without_holdout_cannot_be_promoted(
+    tmp_path: Path,
+) -> None:
+    aliases = [f"damper_{index}" for index in range(6)]
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "spring-source-baseline",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+    spring = _write_managed_trace(
+        tmp_path,
+        dataset_id="representative-spring-data",
+        scenario_id="torsion-spring",
+        episode_id="promotion-representative-spring",
+        arrays=_promotion_torsion_spring_arrays(),
+        metadata=_direct_measurement_metadata("torsion-spring"),
+    )
+    candidate = apply_measurements_to_profile(
+        baseline,
+        profile_id="promotion-spring-candidate",
+        trace_paths=[spring.directory],
+    )
+    scenario = load_scenario("torsion-spring")
+
+    with pytest.raises(ContractError, match="accepted.*holdout"):
+        _validate_measurement_sources(
+            baseline,
+            candidate,
+            {
+                "representative-spring": {
+                    "role": "calibration",
+                    "scenario": scenario,
+                    "real_traces": [spring],
+                }
+            },
+        )
+
+
+def test_accepted_spring_quality_source_binds_the_exact_holdout_trace(
+    tmp_path: Path,
+) -> None:
+    baseline = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "spring-quality-source-baseline",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+    calibration = _write_managed_trace(
+        tmp_path,
+        dataset_id="representative-spring-quality-data",
+        scenario_id="torsion-spring",
+        episode_id="promotion-spring-calibration",
+        arrays=_promotion_torsion_spring_arrays(),
+        metadata=_direct_measurement_metadata("torsion-spring"),
+    )
+    holdout = _write_managed_trace(
+        tmp_path,
+        dataset_id="representative-spring-holdout-data",
+        scenario_id="torsion-spring-holdout",
+        episode_id="promotion-spring-holdout",
+        arrays=_promotion_torsion_spring_arrays(
+            envelope_fractions=(0.3, 0.5, 0.7)
+        ),
+        metadata=_direct_measurement_metadata("torsion-spring-holdout"),
+    )
+    candidate = apply_measurements_to_profile(
+        baseline,
+        profile_id="promotion-spring-quality-candidate",
+        trace_paths=[calibration.directory, holdout.directory],
+    )
+    conditions = {
+        "spring-calibration": {
+            "role": "calibration",
+            "scenario": load_scenario("torsion-spring"),
+            "real_traces": [calibration],
+        },
+        "spring-holdout": {
+            "role": "holdout",
+            "scenario": load_scenario("torsion-spring-holdout"),
+            "real_traces": [holdout],
+        },
+    }
+
+    source_report = _validate_measurement_sources(baseline, candidate, conditions)
+    assert source_report["pass"] is True
+    assert source_report["spring_calibration_status"] == "calibrated"
+
+    for field, value in (("damping", 0.1), ("rest_position_rad", 0.1)):
+        invalid_payload = candidate.to_dict()
+        invalid_payload["profile_id"] = f"invalid-spring-{field.replace('_', '-')}"
+        invalid_payload["simulation_physics"]["passive_spring"]["damper_0"][
+            field
+        ] = value
+        with pytest.raises(ContractError, match=field):
+            _validate_measurement_sources(
+                baseline,
+                CalibrationProfileV1.from_dict(invalid_payload),
+                conditions,
+            )
+
+    tampered_payload = candidate.to_dict()
+    tampered_payload["profile_id"] = "swapped-spring-holdout"
+    tampered_payload["measurement_sources"]["passive_spring:damper_0"][
+        "quality_validation"
+    ]["holdout_trace_sha256"] = "9" * 64
+    with pytest.raises(ContractError, match="bind exactly one"):
+        _validate_measurement_sources(
+            baseline,
+            CalibrationProfileV1.from_dict(tampered_payload),
+            conditions,
+        )
+
+
+def test_unchanged_file_backed_spring_source_is_reverified(tmp_path: Path) -> None:
+    uncalibrated = CalibrationProfileV1.from_dict(
+        {
+            "schema_version": 1,
+            "profile_id": "before-spring-calibration",
+            "hardware_mapping": {},
+            "sensor_timing": {},
+            "simulation_physics": {},
+        }
+    )
+    calibration = _write_managed_trace(
+        tmp_path,
+        dataset_id="unchanged-spring-calibration-data",
+        scenario_id="torsion-spring",
+        episode_id="unchanged-spring-calibration",
+        arrays=_promotion_torsion_spring_arrays(),
+        metadata=_direct_measurement_metadata("torsion-spring"),
+    )
+    holdout = _write_managed_trace(
+        tmp_path,
+        dataset_id="unchanged-spring-holdout-data",
+        scenario_id="torsion-spring-holdout",
+        episode_id="unchanged-spring-holdout",
+        arrays=_promotion_torsion_spring_arrays(
+            envelope_fractions=(0.3, 0.5, 0.7)
+        ),
+        metadata=_direct_measurement_metadata("torsion-spring-holdout"),
+    )
+    calibrated = apply_measurements_to_profile(
+        uncalibrated,
+        profile_id="calibrated-baseline",
+        trace_paths=[calibration.directory, holdout.directory],
+    )
+    candidate_payload = calibrated.to_dict()
+    candidate_payload["profile_id"] = "unrelated-change-candidate"
+    candidate = CalibrationProfileV1.from_dict(candidate_payload)
+
+    source_report = _validate_measurement_sources(calibrated, candidate, {})
+
+    assert source_report["required"] == []
+    assert source_report["spring_calibration_status"] == "calibrated"
+    assert source_report["spring_calibration_verification_error"] is None
 
 
 def _profile(profile_id: str, damping: float) -> CalibrationProfileV1:
@@ -384,9 +661,36 @@ def _direct_measurement_metadata(
             "repeat_index": "annotation",
             "settled": "annotation",
         }
+    elif scenario.experiment_kind == "spring":
+        units = {
+            "load_force": "N",
+            "lever_arm": "m",
+            "angle": "rad",
+            "repeat_index": "1",
+        }
+        if "torque_direction" in scenario.required_channels:
+            units["torque_direction"] = "1"
+        if "sweep_branch" in scenario.required_channels:
+            units["sweep_branch"] = "1"
+        frames = {name: scenario.joint for name in units}
     else:  # pragma: no cover - test helper guard
         raise AssertionError(scenario.experiment_kind)
     calibration_constants: dict[str, object] = {}
+    if scenario.scenario_id.startswith("torsion-spring"):
+        calibration_constants.update(
+            {
+                "rest_position_rad": 0.0,
+                "mechanical_owner_approval": {
+                    "owner": "mechanical-owner",
+                    "fixture_id": "torsion-spring-bench-v1",
+                    "maximum_safe_deflection_rad": 0.5,
+                },
+            }
+        )
+        if scenario.split == "calibration":
+            calibration_constants["applies_to_spring_aliases"] = [
+                f"damper_{index}" for index in range(6)
+            ]
     if load_coordinate is not None:
         calibration_constants["condition_coordinates"] = {"load": load_coordinate}
     return {
@@ -410,6 +714,31 @@ def _abad_arrays(
         "position": scale * command + offset,
         "repeat_index": repeats,
         "settled": np.ones(command.size),
+    }
+
+
+def _promotion_torsion_spring_arrays(
+    *, envelope_fractions: tuple[float, ...] = (0.2, 0.4, 0.6, 0.8)
+) -> dict[str, np.ndarray]:
+    levels = np.asarray(envelope_fractions) * 0.5
+    one_repeat = np.concatenate(
+        (-levels, levels, -levels[::-1], levels[::-1])
+    )
+    angle = np.tile(one_repeat, 3)
+    time_s = np.arange(angle.size, dtype=float) * 0.1
+    torque = angle * 10.0
+    return {
+        "angle_time_s": time_s,
+        "angle": angle,
+        "load_force_time_s": time_s,
+        "load_force": np.abs(torque) / 0.1,
+        "lever_arm_time_s": time_s,
+        "lever_arm": np.full(angle.size, 0.1),
+        "torque_direction": np.sign(torque),
+        "sweep_branch": np.tile(
+            np.repeat([1.0, -1.0], 2 * len(levels)), 3
+        ),
+        "repeat_index": np.repeat(np.arange(3), one_repeat.size),
     }
 
 
@@ -720,6 +1049,7 @@ def _sweep_evidence(
         "characterization_runner_sha256": "c" * 64,
         "sweep_runner_sha256": "d" * 64,
         "runtime_bundle_sha256": "e" * 64,
+        "spring_backend": "explicit",
     }
 
     def argument(command: list[str], flag: str) -> str:
@@ -766,6 +1096,7 @@ def _sweep_evidence(
                 "trace_sha256": trace.manifest.provenance["trace_sha256"],
                 "profile_id": profile.profile_id,
                 "runtime_audit": "runtime_audit.json",
+                "spring_backend": "explicit",
                 **replay_bindings,
             },
         )
@@ -975,7 +1306,9 @@ def test_promotion_resolves_artifacts_and_derives_repetitions_metrics_and_fitted
 
     result = evaluate_promotion(profile, evidence, artifact_root=tmp_path)
 
-    assert result["eligible_for_review"] is True
+    assert result["eligible_for_review"] is False
+    assert result["measurement_sources"]["spring_calibration_status"] == "uncalibrated"
+    assert any("spring profile is uncalibrated" in item for item in result["failures"])
     assert result["promotion_requires_reviewed_config_change"] is True
     assert set(result["subsystems"]) == {"main_drive"}
     assert result["subsystems"]["main_drive"]["pass"] is True
@@ -1431,9 +1764,9 @@ def test_validate_promotion_cli_resolves_paths_relative_to_evidence(
     )
 
     emitted = json.loads(capsys.readouterr().out)
-    assert code == 0
+    assert code == 3
     assert emitted == json.loads(output_path.read_text())
-    assert emitted["eligible_for_review"] is True
+    assert emitted["eligible_for_review"] is False
 
 
 def _direct_measurement_fixture(
@@ -1585,16 +1918,18 @@ def _direct_measurement_fixture(
 
 
 @pytest.mark.parametrize("subsystem", ["abad", "contact"])
-def test_promotion_accepts_authenticated_direct_measurement_and_distinct_holdout(
+def test_promotion_accepts_direct_evidence_but_blocks_uncalibrated_springs(
     tmp_path: Path, subsystem: str
 ) -> None:
     candidate, evidence = _direct_measurement_fixture(tmp_path, subsystem=subsystem)
 
     result = evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
 
-    assert result["eligible_for_review"] is True
+    assert result["eligible_for_review"] is False
     assert result["subsystems"][subsystem]["pass"] is True
     assert result["measurement_sources"]["pass"] is True
+    assert result["measurement_sources"]["spring_calibration_status"] == "uncalibrated"
+    assert any("spring profile is uncalibrated" in item for item in result["failures"])
 
 
 def test_promotion_rejects_candidate_measurement_source_not_bound_as_calibration(
@@ -1810,8 +2145,14 @@ def test_direct_manual_subsystem_route_uses_independent_holdout_measurement(
 
     result = evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
 
-    assert result["eligible_for_review"] is True
-    assert result["subsystems"][subsystem]["pass"] is True
+    if subsystem == "spring":
+        assert result["eligible_for_review"] is False
+        assert result["subsystems"][subsystem]["pass"] is True
+        assert any("uncalibrated" in item for item in result["failures"])
+    else:
+        assert result["eligible_for_review"] is False
+        assert result["subsystems"][subsystem]["pass"] is True
+        assert any("spring profile is uncalibrated" in item for item in result["failures"])
     assert result["subsystems"][subsystem]["holdout_conditions"][0]["metrics"]
 
 
@@ -1952,7 +2293,9 @@ def test_effort_candidate_itself_must_match_confirmed_known_load_envelope(
 ) -> None:
     candidate, evidence = _known_load_promotion_fixture(tmp_path)
     passed = evaluate_promotion(candidate, evidence, artifact_root=tmp_path)
-    assert passed["eligible_for_review"] is True
+    assert passed["eligible_for_review"] is False
+    assert passed["subsystems"]["main_drive"]["pass"] is True
+    assert any("spring profile is uncalibrated" in item for item in passed["failures"])
 
     payload = candidate.to_dict()
     payload["profile_id"] = "effort-mismatch"

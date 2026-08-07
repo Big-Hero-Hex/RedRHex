@@ -139,8 +139,12 @@ class MujocoRolloutTests(unittest.TestCase):
                 mujoco_only=True,
                 mujoco_model_path=str(MUJOCO_MODEL),
             )
-            self.assertEqual([stage.name for stage in report.stages], ["mujoco_readiness"])
-            stage = report.stages[0]
+            self.assertEqual(
+                [stage.name for stage in report.stages],
+                ["spring_calibration", "mujoco_readiness"],
+            )
+            self.assertEqual(report.stages[0].status, "fail")
+            stage = report.stages[1]
             self.assertEqual(stage.status, "warn")
             self.assertTrue(Path(stage.artifacts["rollout_model"]).is_file())
             self.assertTrue(Path(stage.artifacts["metrics"]).is_file())

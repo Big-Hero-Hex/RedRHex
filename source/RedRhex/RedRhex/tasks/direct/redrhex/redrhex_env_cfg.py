@@ -168,8 +168,7 @@ REDRHEX_CFG = ArticulationCfg(
             "Revolute_21": 0.0,  # 左後腿
             
             # =====================================================
-            # 避震關節 (Damper) - 吸收衝擊用
-            # 這些關節會被鎖定，保持固定角度
+            # 扭轉彈簧關節 - 被動吸收衝擊與儲放能量
             # =====================================================
             "Revolute_5": 45.0 * math.pi / 180,    # 45°
             "Revolute_8": 45.0 * math.pi / 180,    # 45°
@@ -233,24 +232,22 @@ REDRHEX_CFG = ArticulationCfg(
         ),
         
         # =================================================================
-        # 【避震關節】被動式，不由 AI 控制
+        # 【扭轉彈簧關節】被動式，不由 AI 控制
         # =================================================================
-        # 控制方式：固定位置（用極高剛性鎖住）
-        # 用途：像汽車避震器一樣吸收衝擊，保護機身
-        # 
-        # 設計理念：
-        # - 這些關節不在 AI 的「動作空間」中
-        # - 用超高剛性讓它們保持初始角度
-        # - 高阻尼防止任何振動
+        # 預設 explicit backend 由環境在每個 physics substep 施加
+        # tau = -k(q-q0)-c*qdot，因此 PhysX drive gains 必須為零。
+        # native backend 會在 runtime 寫入相同的 k/c 與固定 q0 target。
         "damper": ImplicitActuatorCfg(
             joint_names_expr=[
                 "Revolute_5", "Revolute_8", "Revolute_13",
                 "Revolute_25", "Revolute_26", "Revolute_27",
             ],
-            effort_limit_sim=50.0,   # PhysX 高力矩：能抵抗外力維持位置
-            velocity_limit_sim=1.0,  # PhysX 極低速度限制：防止快速移動
-            stiffness=200.0,         # 超高剛性：像彈簧一樣強力拉回原位
-            damping=20.0,            # 高阻尼：吸收任何震動
+            # Non-binding numerical solver limits. The spring law itself is not
+            # clipped and the continuous joints have no artificial speed brake.
+            effort_limit_sim=1.0e9,
+            velocity_limit_sim=1.0e6,
+            stiffness=0.0,
+            damping=0.0,
         ),
     },
 )
@@ -1659,11 +1656,15 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     }
 
     # =========================================================================
-    # 【彈簧/阻尼器物理常數】用於節能 reward 計算
+    # 【扭轉彈簧物理常數】同時驅動物理與節能 diagnostics
     # =========================================================================
-    # 這些值必須與 REDRHEX_CFG.actuators["damper"] 的設定一致
-    damper_stiffness = 200.0    # N·m/rad — 扭轉彈簧剛度
-    damper_damping = 20.0       # N·m·s/rad — 阻尼係數
+    spring_backend = "explicit"
+    spring_stiffness_nm_per_rad = (200.0,) * 6
+    spring_damping_nm_s_per_rad = (0.0,) * 6
+    spring_calibrated = False
+    # Backward-compatible scalar aliases used by older profiles and reports.
+    damper_stiffness = 200.0
+    damper_damping = 0.0
     robot_mass_kg = 14.0        # 整機質量（保留供 diagnostics / eval 使用）
     energy_per_distance_max = 500.0
     energy_distance_eps = 1e-4
