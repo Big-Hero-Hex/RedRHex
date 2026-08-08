@@ -1,0 +1,35 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: <tutorial|how-to|reference|explanation|safety|troubleshooting>
+status: <status-allowed-for-selected-type>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="outcome"></a>
+## 成果
+
+<說明讀者將理解、完成或解決的事項。>
+
+<a id="prerequisites-and-context"></a>
+## 前置條件與背景
+
+<列出必要背景、存取權、輸入或先備知識。>
+
+<a id="instructions-or-explanation"></a>
+## 指示或說明
+
+<依所選類型提供有順序的程序、精確參考、診斷內容或概念說明。>
+
+<a id="verification"></a>
+## 驗證
+
+<說明讀者如何驗證預期成果。>
+
+<a id="troubleshooting-and-limits"></a>
+## 疑難排解與限制
+
+<說明已知失敗訊號、復原指引、假設及限制。>

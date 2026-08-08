@@ -1,0 +1,35 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: decision
+status: <accepted|superseded>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="context"></a>
+## Context
+
+<Describe the forces and constraints that require a durable decision.>
+
+<a id="decision"></a>
+## Decision
+
+<State the chosen direction and its boundaries.>
+
+<a id="alternatives"></a>
+## Alternatives
+
+<List the material alternatives and why they were not selected.>
+
+<a id="consequences"></a>
+## Consequences
+
+<Describe positive, negative, and follow-up consequences.>
+
+<a id="supersession"></a>
+## Supersession
+
+<Link the superseding decision, or state the condition for future supersession.>

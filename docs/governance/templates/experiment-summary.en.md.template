@@ -1,0 +1,45 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: experiment-summary
+status: published
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="question"></a>
+## Question
+
+<State the question and decision this evidence informs.>
+
+<a id="baseline"></a>
+## Baseline
+
+<Describe the comparison baseline and its provenance.>
+
+<a id="method"></a>
+## Method
+
+<Describe inputs, controls, procedure, and evaluation measures.>
+
+<a id="results"></a>
+## Results
+
+<Report measured results without extending beyond the evidence.>
+
+<a id="decision-impact"></a>
+## Decision impact
+
+<State how the results change or preserve a baseline, recommendation, or decision.>
+
+<a id="limitations"></a>
+## Limitations
+
+<Describe uncertainty, exclusions, and threats to interpretation.>
+
+<a id="artifacts-and-addenda"></a>
+## Artifacts and addenda
+
+<Link durable evidence and append dated corrections without silently rewriting results.>

@@ -84,3 +84,11 @@ repos:
       - id: rst-backticks
       - id: rst-directive-colons
       - id: rst-inline-touching-normal
+  - repo: local
+    hooks:
+      - id: redrhex-documentation
+        name: RedRHex bilingual documentation validation
+        entry: python -m tools.documentation validate --staged
+        language: system
+        pass_filenames: false
+        always_run: true

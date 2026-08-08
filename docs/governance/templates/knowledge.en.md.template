@@ -1,0 +1,35 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: <tutorial|how-to|reference|explanation|safety|troubleshooting>
+status: <status-allowed-for-selected-type>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="outcome"></a>
+## Outcome
+
+<State what the reader will know, accomplish, or resolve.>
+
+<a id="prerequisites-and-context"></a>
+## Prerequisites and context
+
+<List required context, access, inputs, or prior knowledge.>
+
+<a id="instructions-or-explanation"></a>
+## Instructions or explanation
+
+<Provide the ordered procedure, exact reference, diagnosis, or conceptual explanation appropriate to the selected type.>
+
+<a id="verification"></a>
+## Verification
+
+<Explain how the reader verifies the expected outcome.>
+
+<a id="troubleshooting-and-limits"></a>
+## Troubleshooting and limits
+
+<Describe known failure signals, recovery guidance, assumptions, and limits.>

@@ -5,6 +5,12 @@ on:
     branches: [main]
     paths:
       - "tools/training_panel/remote_web/**"
+      - "tools/training_panel/docs/**"
+      - "tools/reward_agent/docs/**"
+      - "ros2_ws/src/redrhex_rl_controller/docs/**"
+      - "docs/**"
+      - "tools/documentation/**"
+      - "mkdocs.yml"
       - ".github/workflows/training-panel-pages.yml"
   workflow_dispatch:
 
@@ -25,9 +31,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install pinned documentation site dependencies
+        run: python -m pip install -r docs/requirements-site.txt
       - uses: actions/configure-pages@v5
+      - name: Stage remote panel and bilingual documentation
+        env:
+          REDRHEX_DOCS_DIR: ${{ runner.temp }}/redrhex-doc-source
+          REDRHEX_DOCS_SITE_DIR: ${{ runner.temp }}/redrhex-pages/docs
+          REDRHEX_PAGES_DIR: ${{ runner.temp }}/redrhex-pages
+        run: |
+          mkdir -p "$REDRHEX_DOCS_DIR" "$REDRHEX_DOCS_SITE_DIR" "$REDRHEX_PAGES_DIR"
+          cp -R tools/training_panel/remote_web/. "$REDRHEX_PAGES_DIR/"
+          python -m tools.documentation validate --all
+          python -m tools.documentation stage-site --output "$REDRHEX_DOCS_DIR"
+          mkdocs build --strict -f mkdocs.yml
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: tools/training_panel/remote_web
+          path: ${{ runner.temp }}/redrhex-pages
       - id: deployment
         uses: actions/deploy-pages@v4

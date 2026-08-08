@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "destination": ".",
+      "source": "docs"
+    },
+    {
+      "destination": "components/training-panel",
+      "source": "tools/training_panel/docs"
+    },
+    {
+      "destination": "components/reward-agent",
+      "source": "tools/reward_agent/docs"
+    },
+    {
+      "destination": "components/ros2-deployment",
+      "source": "ros2_ws/src/redrhex_rl_controller/docs"
+    }
+  ]
+}

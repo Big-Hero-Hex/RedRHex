@@ -1,0 +1,30 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: roadmap
+status: active
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="horizon"></a>
+## Horizon
+
+<Define the time or outcome horizon covered by this roadmap.>
+
+<a id="current-priorities"></a>
+## Current priorities
+
+1. <Priority and intended outcome>.
+
+<a id="dependencies"></a>
+## Dependencies
+
+- <Dependency, owner, or prerequisite>.
+
+<a id="exit-criteria"></a>
+## Exit criteria
+
+- [ ] <Condition for moving completed work to its durable record>.

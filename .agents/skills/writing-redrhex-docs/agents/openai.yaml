@@ -1,0 +1,6 @@
+interface:
+  display_name: "Write RedRHex Docs"
+  short_description: "Create consistent bilingual RedRHex documentation"
+  default_prompt: "Use $writing-redrhex-docs to create or update a bilingual RedRHex document."
+policy:
+  allow_implicit_invocation: true

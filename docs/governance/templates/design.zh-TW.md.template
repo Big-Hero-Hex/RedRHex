@@ -1,0 +1,41 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: design
+status: <proposed|approved|implemented|rejected|superseded>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="problem"></a>
+## 問題
+
+<定義問題、受影響的讀者或系統，以及限制。>
+
+<a id="goals-and-non-goals"></a>
+## 目標與非目標
+
+- 目標：<必要成果>。
+- 非目標：<明確排除的範圍>。
+
+<a id="proposal-and-interfaces"></a>
+## 提案與介面
+
+<說明設計、界線、資料流及受影響介面。>
+
+<a id="failure-modes"></a>
+## 失敗模式
+
+<說明預期失敗、偵測、控制及復原。>
+
+<a id="acceptance"></a>
+## 驗收
+
+- [ ] <可觀察的驗收條件>。
+
+<a id="resolution"></a>
+## 結果
+
+<解決後記錄已實作、已拒絕或被取代的結果。>

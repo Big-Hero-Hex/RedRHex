@@ -1,0 +1,36 @@
+---
+id: <document-id>
+title: <English title>
+lang: en
+audience: <audience>
+type: release
+status: published
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="version-and-date"></a>
+## Version and date
+
+- Version or milestone: <verified identifier>
+- Date: <YYYY-MM-DD>
+
+<a id="summary"></a>
+## Summary
+
+<Summarize the shipped outcome and affected readers.>
+
+<a id="changes"></a>
+## Changes
+
+- <Verified shipped change>.
+
+<a id="compatibility-and-migration"></a>
+## Compatibility and migration
+
+<Describe compatibility constraints, required migration, or confirmed absence of migration.>
+
+<a id="verification-and-evidence"></a>
+## Verification and evidence
+
+<Link or describe the evidence supporting this release record.>

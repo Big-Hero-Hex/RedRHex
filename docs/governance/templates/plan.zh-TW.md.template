@@ -1,0 +1,39 @@
+---
+id: <document-id>
+title: <繁體中文標題>
+lang: zh-TW
+audience: <audience>
+type: plan
+status: <draft|active|blocked|completed|cancelled>
+owner: <owner>
+last_reviewed: <YYYY-MM-DD>
+---
+
+<a id="objective"></a>
+## 目標
+
+<說明此計畫必須交付的成果。>
+
+<a id="context"></a>
+## 背景
+
+<說明核准輸入、限制、相依性及排除項目。>
+
+<a id="phased-checklist"></a>
+## 分階段檢查清單
+
+<a id="phase-name"></a>
+### <階段名稱>
+
+- [ ] <具體實作步驟>。
+- [ ] <具體驗證步驟>。
+
+<a id="verification"></a>
+## 驗證
+
+<列出完成前所需的命令、檢查或證據。>
+
+<a id="completion-summary"></a>
+## 完成摘要
+
+<解決後摘要已交付成果、驗證及剩餘工作。>
