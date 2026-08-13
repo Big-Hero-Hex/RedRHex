@@ -6,7 +6,7 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="branch-roles"></a>
@@ -21,6 +21,8 @@ last_reviewed: 2026-08-13
 ## 變更流程
 
 新工作從目前的 `origin/main` 開始，每個分支只處理一個完整且一致的關注點，並儘早開啟 draft pull request。只有存在真正依賴時，stacked branch 才可把另一個 feature branch 當作目標；依賴合併後，必須將後續 pull request retarget 或 rebase 到 `main`。已合併或被取代的變更分支，只有在其 tip 已可從 `main` 或有紀錄的 archive ref 到達後才可刪除。
+
+當 recovered code 適合檢視，但 evidence gates 尚未完成時，可暫時保留 `*-wip` branch。它必須使用 draft pull request、列出未完成 gates，且不得宣稱 branch 已 shipped 或 hardware-ready。
 
 每個 pull request 都必須遵循 repository documentation-impact declaration。完成有紀錄的 2026-08-13 切換後，禁止直接 push、force push 或刪除 `main`。
 

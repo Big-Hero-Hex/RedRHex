@@ -6,7 +6,7 @@ audience: developer
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="branch-roles"></a>
@@ -21,6 +21,8 @@ last_reviewed: 2026-08-13
 ## Change flow
 
 Start new work from current `origin/main`, keep one coherent concern per branch, and open a draft pull request early. A stacked branch may target another feature branch only when it has a real dependency; after the dependency merges, retarget or rebase the dependent pull request onto `main`. Delete merged or superseded change branches after their tip is reachable from `main` or a recorded archive ref.
+
+A `*-wip` branch may remain temporarily when recovered code is useful for inspection but its evidence gates are incomplete. It must use a draft pull request, state the missing gates, and avoid claims that the branch is shipped or hardware-ready.
 
 Every pull request follows the repository documentation-impact declaration. Direct pushes, force pushes, and deletion of `main` are prohibited after the documented 2026-08-13 cutover.
 

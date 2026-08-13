@@ -6,13 +6,13 @@ audience: developer
 type: plan
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="objective"></a>
 ## 目標
 
-建立唯一受保護的 `main`，保留所有重要歷史與未完成變更，在角色明確的分支上完整重建 torsion、Training Panel 與 Windows launcher 工作，並且只有在保存證明通過後才移除多餘的分支與 worktree。
+建立唯一受保護的 `main`，保留所有重要歷史與未完成變更，在角色明確的分支上完整重建 torsion、Training Panel、remote launcher 與 Student V2 工作，隔離 calibration WIP，並且只有在保存證明通過後才移除多餘的分支與 worktree。
 
 <a id="context"></a>
 ## 背景
@@ -35,14 +35,18 @@ last_reviewed: 2026-08-13
 - [x] 將原始 torsion source tip merge 到已審查的 main，並把暫時文件的獨特內容遷移到 canonical bilingual files。
 - [x] 將原始 Training Panel V3.6 tip 疊在 torsion 上，再逐 hunk 移植兩個 recovery snapshots，不得覆寫較新的修正。
 - [x] 從 main 獨立重建 Windows launcher，包括 PowerShell test 與 canonical bilingual operator/developer documentation。
+- [x] 重建並 merge macOS launcher 作為 implementation candidate；workstation smoke 仍 pending。
+- [x] 重建並 merge Student Distillation V2 core；把共同開發的 Panel browser 與 physics/calibration 工作隔離到分開的 draft proposal。
+- [x] 將兩代 root recovery 與 generated research report 保存在已驗證的 local-only commits 與 bundles。
 - [x] 在 preservation manifest 記錄每個 source commit、dirty path、stash hunk、duplicate、generated exception 與 destination。
 
 <a id="cutover"></a>
 ### 切換
 
 - [x] 從 fresh clone 或 bundle restore 驗證 archive refs 與重建分支。
-- [ ] 由已審查的整合 SHA force-update 遠端 `main`，隨即啟用受保護的 PR-only 規則。
-- [x] 發布 draft feature PR：torsion 優先、Training Panel 疊在 torsion 上、Windows 則平行從 main 開始。
+- [x] 由已審查的整合 SHA force-update 遠端 `main`。
+- [ ] 為 `main` 啟用並驗證受保護的 PR-only 規則。
+- [x] 發布、驗證並 merge torsion、Training Panel、Windows、macOS 與 Student V2 PR；Panel physics/calibration 保留為 draft PR #12。
 
 <a id="contract"></a>
 ### 收斂
@@ -60,9 +64,10 @@ last_reviewed: 2026-08-13
 ## 未完成 gate
 
 - 遠端 `main` 現已指向 reviewed line，但仍需 repository-owner authentication 才能啟用並檢查 branch protection；因此 combined cutover checkbox 維持未完成。
-- Torsion 與 stacked Panel PR 在 physical spring calibration、backend selection 與必要 retraining evidence 完成前維持 draft。
-- Windows launcher PR 在 Windows 通過 PowerShell 5.1 與 Tailscale/SSH smoke checklist 前維持 draft。
-- Protection 啟用前，remote/local obsolete-ref contraction 維持 pending。Root worktree contraction 也會等待使用者決定 snapshot 後新增的 untracked `docs/reports/` path 如何處理。
+- Torsion 與 Panel V3.6 已作為 status-honest implementation candidates merge；physical spring calibration 與 production retraining 仍是分開且 pending 的 evidence。
+- Windows 與 macOS launcher 已作為 implementation candidates merge；各自 named workstation smoke checklist 仍 pending。
+- Student V2 core 已 merge，但未宣稱 production-length、multi-seed、recorded-sensor 或 hardware 結果。Panel physics/calibration 維持 draft PR #12。
+- Remote/local obsolete-ref contraction 只剩 protection gate；所有先前 dirty root material 現在都有 exact local recovery commit 與 verified bundle。
 
 <a id="completion-summary"></a>
 ## 完成摘要

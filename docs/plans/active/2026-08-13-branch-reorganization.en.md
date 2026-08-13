@@ -6,13 +6,13 @@ audience: developer
 type: plan
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="objective"></a>
 ## Objective
 
-Establish one protected `main`, retain every significant historical and unfinished change, reconstruct the intact torsion, Training Panel, and Windows launcher work on explicit branches, and remove redundant branch and worktree clutter only after preservation proof passes.
+Establish one protected `main`, retain every significant historical and unfinished change, reconstruct the intact torsion, Training Panel, remote-launcher, and Student V2 work on explicit branches, isolate calibration WIP, and remove redundant branch and worktree clutter only after preservation proof passes.
 
 <a id="context"></a>
 ## Context
@@ -35,14 +35,18 @@ The reviewed integration tip is `fix/review-2026-07` after Documentation System 
 - [x] Merge the original torsion source tip onto the reviewed main and migrate unique temporary documentation into canonical bilingual files.
 - [x] Stack the original Training Panel V3.6 tip on torsion, then port both recovery snapshots hunk by hunk without overwriting later fixes.
 - [x] Rebuild the Windows launcher independently from main, including its PowerShell test and canonical bilingual operator/developer documentation.
+- [x] Rebuild and merge the macOS launcher as an implementation candidate with workstation smoke still pending.
+- [x] Reconstruct and merge the Student Distillation V2 core; isolate its co-developed Panel browser and physics/calibration work in a separate draft proposal.
+- [x] Preserve both root recovery generations and the generated research report in verified local-only commits and bundles.
 - [x] Record every source commit, dirty path, stash hunk, duplicate, generated exception, and destination in the preservation manifest.
 
 <a id="cutover"></a>
 ### Cut over
 
 - [x] Verify archive refs and reconstructed branches from a fresh clone or bundle restore.
-- [ ] Force-update remote `main` from the reviewed integration SHA, then immediately enable protected PR-only rules.
-- [x] Publish draft feature PRs with torsion first, Training Panel stacked on torsion, and Windows parallel from main.
+- [x] Force-update remote `main` from the reviewed integration SHA.
+- [ ] Enable and verify protected PR-only rules for `main`.
+- [x] Publish, validate, and merge the torsion, Training Panel, Windows, macOS, and Student V2 PRs; retain Panel physics/calibration as draft PR #12.
 
 <a id="contract"></a>
 ### Contract
@@ -60,9 +64,10 @@ Verification includes exact SHA/ref comparison, `git fsck`, bundle verification,
 ## Open gates
 
 - Remote `main` now points to the reviewed line, but repository-owner authentication is still required to enable and inspect branch protection; the combined cutover checkbox therefore remains open.
-- Torsion and the stacked Panel PR remain draft until physical spring calibration, backend selection, and required retraining evidence are complete.
-- The Windows launcher PR remains draft until its PowerShell 5.1 and Tailscale/SSH smoke checklist passes on Windows.
-- Remote and local obsolete-ref contraction remains pending until protection is enabled. Root worktree contraction also waits for user disposition of the post-snapshot untracked `docs/reports/` path.
+- Torsion and Panel V3.6 are merged as status-honest implementation candidates; physical spring calibration and production retraining remain separate pending evidence.
+- Windows and macOS launchers are merged as implementation candidates; their named workstation smoke checklists remain pending.
+- Student V2 core is merged without production-length, multi-seed, recorded-sensor, or hardware claims. Panel physics/calibration remains draft PR #12.
+- Remote and local obsolete-ref contraction remains pending only until protection is enabled; all previously dirty root material now has an exact local recovery commit and verified bundle.
 
 <a id="completion-summary"></a>
 ## Completion summary
