@@ -378,6 +378,7 @@ def _apply_joint_friction(
 
 
 def _apply_passive_springs(
+    unwrapped: object,
     robot: object,
     springs: dict[str, Any],
     joint_aliases: dict[str, str],
@@ -386,6 +387,111 @@ def _apply_passive_springs(
         return []
     stiffness = _joint_tensor(robot, "joint_stiffness")
     damping = _joint_tensor(robot, "joint_damping")
+    backend = getattr(unwrapped, "_spring_backend", None)
+    managed_backend = backend in ("explicit", "native") and hasattr(
+        unwrapped, "_spring_k"
+    )
+    if managed_backend:
+        runtime_lookup = {name: index for index, name in enumerate(robot.joint_names)}
+        try:
+            damper_indices = [
+                runtime_lookup[joint_aliases[f"damper_{index}"]]
+                for index in range(6)
+            ]
+        except KeyError as exc:
+            raise ContractError(
+                "managed torsion springs require all six runtime damper joints"
+            ) from exc
+
+        effective_stiffness = torch.as_tensor(
+            unwrapped._spring_k,
+            dtype=stiffness.dtype,
+            device=stiffness.device,
+        )
+        if effective_stiffness.ndim == 0:
+            effective_stiffness = effective_stiffness.expand(stiffness.shape[0], 6).clone()
+        elif effective_stiffness.ndim == 1:
+            effective_stiffness = effective_stiffness.unsqueeze(0).expand(
+                stiffness.shape[0], -1
+            ).clone()
+        else:
+            effective_stiffness = effective_stiffness.clone()
+        effective_damping = torch.as_tensor(
+            getattr(unwrapped, "_spring_d", 0.0),
+            dtype=damping.dtype,
+            device=damping.device,
+        )
+        if effective_damping.ndim == 0:
+            effective_damping = effective_damping.expand(damping.shape[0], 6).clone()
+        elif effective_damping.ndim == 1:
+            effective_damping = effective_damping.unsqueeze(0).expand(
+                damping.shape[0], -1
+            ).clone()
+        else:
+            effective_damping = effective_damping.clone()
+        expected_shape = (stiffness.shape[0], 6)
+        if tuple(effective_stiffness.shape) != expected_shape or tuple(
+            effective_damping.shape
+        ) != expected_shape:
+            raise ContractError(
+                "managed torsion-spring tensors must have shape "
+                f"{expected_shape}"
+            )
+        for alias, spring in springs.items():
+            index = int(alias.removeprefix("damper_"))
+            effective_stiffness[:, index] = float(spring["stiffness"])
+            if "damping" in spring:
+                effective_damping[:, index] = float(spring["damping"])
+        unwrapped._spring_k = effective_stiffness.clone()
+        unwrapped._spring_d = effective_damping.clone()
+        stiffness[:, damper_indices] = (
+            effective_stiffness if backend == "native" else 0.0
+        )
+        damping[:, damper_indices] = (
+            effective_damping if backend == "native" else 0.0
+        )
+        robot.write_joint_stiffness_to_sim(stiffness)
+        robot.write_joint_damping_to_sim(damping)
+        robot.data.default_joint_stiffness = stiffness.clone()
+        robot.data.default_joint_damping = damping.clone()
+        if hasattr(unwrapped, "_configure_torsion_spring_backend"):
+            unwrapped._configure_torsion_spring_backend()
+        else:
+            actuators = getattr(robot, "actuators", {})
+            if isinstance(actuators, dict) and "damper" in actuators:
+                actuator = actuators["damper"]
+                canonical_names = [
+                    joint_aliases[f"damper_{index}"] for index in range(6)
+                ]
+                canonical_index = {
+                    name: index for index, name in enumerate(canonical_names)
+                }
+                try:
+                    actuator_order = [
+                        canonical_index[name] for name in actuator.joint_names
+                    ]
+                except KeyError as exc:
+                    raise ContractError(
+                        "damper actuator order does not contain the six managed springs"
+                    ) from exc
+                actuators["damper"].stiffness = (
+                    effective_stiffness[:, actuator_order].clone()
+                    if backend == "native"
+                    else torch.zeros_like(effective_stiffness)
+                )
+                actuators["damper"].damping = (
+                    effective_damping[:, actuator_order].clone()
+                    if backend == "native"
+                    else torch.zeros_like(effective_damping)
+                )
+        if backend == "native" and hasattr(
+            unwrapped, "_set_native_torsion_spring_target"
+        ):
+            unwrapped._set_native_torsion_spring_target()
+        if hasattr(unwrapped, "_reset_torsion_spring_backend"):
+            unwrapped._reset_torsion_spring_backend()
+        return sorted(springs)
+
     _assign_named(
         stiffness,
         robot,
@@ -427,8 +533,16 @@ def _synchronize_spring_bookkeeping(
         raise ContractError(
             "spring energy bookkeeping requires all six runtime damper joints"
         ) from exc
-    stiffness = _joint_tensor(robot, "default_joint_stiffness")[:, indices]
-    damping = _joint_tensor(robot, "default_joint_damping")[:, indices]
+    managed_stiffness = getattr(unwrapped, "_spring_k", None)
+    managed_damping = getattr(unwrapped, "_spring_d", None)
+    if isinstance(managed_stiffness, torch.Tensor):
+        stiffness = managed_stiffness.clone()
+    else:
+        stiffness = _joint_tensor(robot, "default_joint_stiffness")[:, indices]
+    if isinstance(managed_damping, torch.Tensor):
+        damping = managed_damping.clone()
+    else:
+        damping = _joint_tensor(robot, "default_joint_damping")[:, indices]
     if hasattr(unwrapped, "_spring_k"):
         unwrapped._spring_k = stiffness.clone()
     if hasattr(unwrapped, "_spring_d"):
@@ -511,11 +625,12 @@ def apply_profile_to_runtime_env(
         if hasattr(unwrapped, "_robot_mass"):
             unwrapped._robot_mass = float(mass_summary["total_mass_kg"])
     passive_spring_joints = _apply_passive_springs(
-        robot, physics.get("passive_spring", {}), joint_aliases
+        unwrapped, robot, physics.get("passive_spring", {}), joint_aliases
     )
     return {
         "schema_version": 1,
         "profile_id": profile.profile_id,
+        "spring_backend": getattr(unwrapped, "_spring_backend", "native"),
         "mass": mass_summary,
         "contact_material": _apply_contact_material(
             robot, physics.get("ground", {})

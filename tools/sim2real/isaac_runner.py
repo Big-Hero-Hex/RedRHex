@@ -24,16 +24,23 @@ from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply_inverse
-from pxr import Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 from RedRhex.tasks.direct.redrhex import redrhex_env_cfg as _redrhex_env_cfg
 from RedRhex.tasks.direct.redrhex.redrhex_env_cfg import REDRHEX_CFG, RedrhexEnvCfg
+from RedRhex.tasks.direct.redrhex.torsion_spring import (
+    mechanical_power,
+    potential_energy,
+    reorder_joint_parameters,
+    restoring_torque,
+    unwrap_ambiguity_mask,
+    unwrap_continuous_position,
+)
 
 
 assert_redrhex_module_source(_redrhex_env_cfg)
 
 from .characterization import (
-    PHYSICS_DT,
     apply_schedule_delay,
     characterization_channel_metadata,
     load_replay_schedule,
@@ -224,6 +231,8 @@ def _runtime_audit(
     env_cfg: RedrhexEnvCfg,
     *,
     mode: str,
+    physics_dt: float,
+    spring_runtime: SimpleNamespace,
     runtime_profile_application: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     masses = robot.root_physx_view.get_masses()
@@ -288,7 +297,7 @@ def _runtime_audit(
     return {
         "schema_version": 2,
         "mode": mode,
-        "physics_dt_s": PHYSICS_DT,
+        "physics_dt_s": physics_dt,
         "num_envs": 1,
         "is_fixed_base": bool(robot.is_fixed_base),
         "joint_names": list(robot.joint_names),
@@ -308,6 +317,31 @@ def _runtime_audit(
             "disabled coast-drive entries are forced to zero."
         ),
         "actuators": actuator_audit,
+        "torsion_springs": {
+            "backend": spring_runtime._spring_backend,
+            "joint_order": [f"damper_{index}" for index in range(6)],
+            "runtime_joint_names": [
+                robot.joint_names[index] for index in spring_runtime.damper_indices
+            ],
+            "stiffness_nm_per_rad": _to_list(spring_runtime._spring_k[0]),
+            "damping_nm_s_per_rad": _to_list(spring_runtime._spring_d[0]),
+            "neutral_angle_rad": _to_list(spring_runtime._spring_rest_pos[0]),
+            "locked_joint_names": list(
+                getattr(spring_runtime, "fixture_locked_joint_names", [])
+            ),
+            "fixture_limit_half_width_rad": getattr(
+                spring_runtime, "fixture_limit_half_width_rad", None
+            ),
+            "fixture_selected_limit_rad": getattr(
+                spring_runtime, "fixture_selected_limit_rad", None
+            ),
+            "fixture_selected_range_kind": getattr(
+                spring_runtime, "fixture_selected_range_kind", None
+            ),
+            "fixture_constraint_kind": getattr(
+                spring_runtime, "fixture_constraint_kind", None
+            ),
+        },
         "collision_geometry": _collision_geometry(scene),
         "contact_sensors": {
             "foot": {
@@ -331,7 +365,7 @@ def _runtime_audit(
     }
 
 
-def _resolve_selected_joint(scenario: Any, env_cfg: RedrhexEnvCfg, robot: Any) -> int | None:
+def _selected_joint_name(scenario: Any, env_cfg: RedrhexEnvCfg) -> str | None:
     selectors = {
         "main": list(env_cfg.main_drive_joint_names),
         "abad": list(env_cfg.abad_joint_names),
@@ -341,10 +375,101 @@ def _resolve_selected_joint(scenario: Any, env_cfg: RedrhexEnvCfg, robot: Any) -
         return None
     try:
         group, raw_index = scenario.joint.rsplit("_", 1)
-        joint_name = selectors[group][int(raw_index)]
-        return list(robot.joint_names).index(joint_name)
+        return selectors[group][int(raw_index)]
     except (KeyError, ValueError, IndexError) as exc:
         raise ContractError(f"scenario selects unknown simulation joint: {scenario.joint}") from exc
+
+
+def _resolve_selected_joint(scenario: Any, env_cfg: RedrhexEnvCfg, robot: Any) -> int | None:
+    joint_name = _selected_joint_name(scenario, env_cfg)
+    if joint_name is None:
+        return None
+    try:
+        return list(robot.joint_names).index(joint_name)
+    except ValueError as exc:
+        raise ContractError(f"scenario joint is absent from articulation: {joint_name}") from exc
+
+
+def _author_spring_release_fixture(
+    scene: InteractiveScene,
+    env_cfg: RedrhexEnvCfg,
+    selected_joint_name: str,
+) -> None:
+    """Lock every non-tested joint while leaving the tested spring continuous."""
+
+    prefix = "/World/envs/env_0/Robot"
+    sim_utils.make_uninstanceable(prefix, stage=scene.stage)
+    all_joint_names = (
+        list(env_cfg.main_drive_joint_names)
+        + list(env_cfg.abad_joint_names)
+        + list(env_cfg.damper_joint_names)
+    )
+    if len(all_joint_names) != 18 or len(set(all_joint_names)) != 18:
+        raise ContractError("spring fixture requires 18 unique production joints")
+    if selected_joint_name not in env_cfg.damper_joint_names:
+        raise ContractError("spring fixture must select a damper joint")
+    initial_positions = env_cfg.robot_cfg.init_state.joint_pos
+    half_width_deg = math.degrees(1.0e-6)
+    authored: set[str] = set()
+    fixture_scope = "/World/envs/env_0/SpringReleaseFixture"
+    UsdGeom.Scope.Define(scene.stage, fixture_scope)
+    root = scene.stage.GetPrimAtPath(prefix)
+    pending = [root] if root.IsValid() else []
+    while pending:
+        prim = pending.pop()
+        pending.extend(prim.GetFilteredChildren(Usd.TraverseInstanceProxies()))
+        if not prim.IsA(UsdPhysics.RevoluteJoint):
+            continue
+        name = prim.GetName()
+        if name not in all_joint_names:
+            continue
+        if name in authored:
+            raise ContractError(f"spring fixture found duplicate USD joint {name}")
+        if name == selected_joint_name:
+            authored.add(name)
+            continue
+        center_deg = math.degrees(float(initial_positions.get(name, 0.0)))
+        lower_deg = center_deg - half_width_deg
+        upper_deg = center_deg + half_width_deg
+        joint = UsdPhysics.RevoluteJoint(prim)
+        joint.CreateLowerLimitAttr().Set(lower_deg)
+        joint.CreateUpperLimitAttr().Set(upper_deg)
+        source_joint = UsdPhysics.Joint(prim)
+        fixed_joint = UsdPhysics.FixedJoint.Define(
+            scene.stage, f"{fixture_scope}/{name}_lock"
+        )
+        fixed_joint.CreateBody0Rel().SetTargets(
+            source_joint.GetBody0Rel().GetTargets()
+        )
+        fixed_joint.CreateBody1Rel().SetTargets(
+            source_joint.GetBody1Rel().GetTargets()
+        )
+        fixed_joint.CreateLocalPos0Attr().Set(
+            source_joint.GetLocalPos0Attr().Get()
+        )
+        axis_name = str(joint.GetAxisAttr().Get()).upper()
+        axis = {
+            "X": Gf.Vec3d(1.0, 0.0, 0.0),
+            "Y": Gf.Vec3d(0.0, 1.0, 0.0),
+            "Z": Gf.Vec3d(0.0, 0.0, 1.0),
+        }.get(axis_name)
+        if axis is None:
+            raise ContractError(f"spring fixture joint {name} has invalid axis")
+        initial_rotation = Gf.Quatf(Gf.Rotation(axis, center_deg).GetQuat())
+        fixed_joint.CreateLocalRot0Attr().Set(
+            source_joint.GetLocalRot0Attr().Get() * initial_rotation
+        )
+        fixed_joint.CreateLocalPos1Attr().Set(
+            source_joint.GetLocalPos1Attr().Get()
+        )
+        fixed_joint.CreateLocalRot1Attr().Set(
+            source_joint.GetLocalRot1Attr().Get()
+        )
+        fixed_joint.CreateExcludeFromArticulationAttr().Set(True)
+        authored.add(name)
+    if authored != set(all_joint_names):
+        missing = ", ".join(sorted(set(all_joint_names) - authored))
+        raise ContractError(f"spring fixture could not author USD joints: {missing}")
 
 
 def _resolve_main_joint_indices(env_cfg: RedrhexEnvCfg, robot: Any) -> list[int]:
@@ -356,6 +481,219 @@ def _resolve_main_joint_indices(env_cfg: RedrhexEnvCfg, robot: Any) -> list[int]
     except ValueError as exc:
         raise ContractError("replay main joint is absent from the runtime articulation") from exc
     return indices
+
+
+def _configure_runner_torsion_springs(
+    robot: Any,
+    env_cfg: RedrhexEnvCfg,
+    spring_backend: str,
+) -> SimpleNamespace:
+    """Configure the raw characterization articulation like the production env."""
+
+    if spring_backend not in {"explicit", "native"}:
+        raise ContractError(f"unsupported torsion-spring backend: {spring_backend}")
+    damper_names = list(env_cfg.damper_joint_names)
+    if len(damper_names) != 6 or len(set(damper_names)) != 6:
+        raise ContractError("torsion-spring characterization requires six ordered joints")
+    try:
+        damper_indices = [list(robot.joint_names).index(name) for name in damper_names]
+    except ValueError as exc:
+        raise ContractError(
+            "torsion-spring joint is absent from the runtime articulation"
+        ) from exc
+
+    dtype = robot.data.joint_pos.dtype
+    device = robot.data.joint_pos.device
+    stiffness = torch.as_tensor(
+        env_cfg.spring_stiffness_nm_per_rad, dtype=dtype, device=device
+    ).unsqueeze(0)
+    damping = torch.as_tensor(
+        env_cfg.spring_damping_nm_s_per_rad, dtype=dtype, device=device
+    ).unsqueeze(0)
+    if tuple(stiffness.shape) != (1, 6) or tuple(damping.shape) != (1, 6):
+        raise ContractError("torsion-spring configuration must contain six parameters")
+    rest_position = robot.data.default_joint_pos[:, damper_indices].clone()
+
+    joint_stiffness = robot.data.joint_stiffness.clone()
+    joint_damping = robot.data.joint_damping.clone()
+    joint_stiffness[:, damper_indices] = (
+        stiffness if spring_backend == "native" else 0.0
+    )
+    joint_damping[:, damper_indices] = (
+        damping if spring_backend == "native" else 0.0
+    )
+    robot.write_joint_stiffness_to_sim(joint_stiffness)
+    robot.write_joint_damping_to_sim(joint_damping)
+    robot.data.default_joint_stiffness = joint_stiffness.clone()
+    robot.data.default_joint_damping = joint_damping.clone()
+    actuators = getattr(robot, "actuators", {})
+    if isinstance(actuators, dict) and "damper" in actuators:
+        actuator = actuators["damper"]
+        actuators["damper"].stiffness = reorder_joint_parameters(
+            joint_stiffness[:, damper_indices],
+            damper_names,
+            actuator.joint_names,
+        ).clone()
+        actuators["damper"].damping = reorder_joint_parameters(
+            joint_damping[:, damper_indices],
+            damper_names,
+            actuator.joint_names,
+        ).clone()
+
+    zero = torch.zeros_like(rest_position)
+    robot.set_joint_position_target(rest_position, joint_ids=damper_indices)
+    robot.set_joint_velocity_target(zero, joint_ids=damper_indices)
+    robot.set_joint_effort_target(zero, joint_ids=damper_indices)
+    return SimpleNamespace(
+        robot=robot,
+        cfg=env_cfg,
+        _spring_backend=spring_backend,
+        _spring_k=stiffness.clone(),
+        _spring_d=damping.clone(),
+        _spring_rest_pos=rest_position,
+        _spring_wrapped_pos=robot.data.joint_pos[:, damper_indices].clone(),
+        _spring_unwrapped_pos=robot.data.joint_pos[:, damper_indices].clone(),
+        _spring_unwrap_velocity=robot.data.joint_vel[:, damper_indices].clone(),
+        _spring_unwrap_ambiguous=torch.zeros_like(rest_position, dtype=torch.bool),
+        damper_indices=damper_indices,
+    )
+
+
+def _verify_spring_release_fixture(
+    robot: Any,
+    selected_joint: int,
+    spring_runtime: SimpleNamespace,
+) -> None:
+    """Verify and record the pre-authored isolated release fixture."""
+
+    if selected_joint not in spring_runtime.damper_indices:
+        raise ContractError("spring release fixture must select a damper joint")
+    locked_joint_ids = [
+        index for index in range(len(robot.joint_names)) if index != selected_joint
+    ]
+    positions = robot.data.default_joint_pos
+    half_width_rad = 1.0e-6
+    expected_limits = torch.stack(
+        (positions - half_width_rad, positions + half_width_rad), dim=-1
+    )
+    applied_limits = robot.root_physx_view.get_dof_limits().to(
+        device=expected_limits.device, dtype=expected_limits.dtype
+    )
+    if not torch.allclose(
+        applied_limits[:, locked_joint_ids],
+        expected_limits[:, locked_joint_ids],
+        atol=1.0e-5,
+        rtol=0.0,
+    ):
+        maximum_error = float(
+            torch.max(
+                torch.abs(
+                    applied_limits[:, locked_joint_ids]
+                    - expected_limits[:, locked_joint_ids]
+                )
+            ).item()
+        )
+        raise ContractError(
+            "PhysX did not instantiate the isolated spring release fixture "
+            f"(maximum limit error {maximum_error:.6g} rad)"
+        )
+    selected_limits = applied_limits[:, selected_joint]
+    selected_continuous = bool(
+        torch.all(selected_limits[:, 0] <= -1.0e20)
+        and torch.all(selected_limits[:, 1] >= 1.0e20)
+    )
+    if not selected_continuous:
+        raise ContractError(
+            "spring release selected joint must remain continuous without hard stops"
+        )
+    spring_runtime.fixture_locked_joint_ids = locked_joint_ids
+    spring_runtime.fixture_locked_joint_names = [
+        robot.joint_names[index] for index in locked_joint_ids
+    ]
+    spring_runtime.fixture_limit_half_width_rad = half_width_rad
+    spring_runtime.fixture_selected_limit_rad = [None, None]
+    spring_runtime.fixture_selected_range_kind = "continuous"
+    spring_runtime.fixture_constraint_kind = "excluded_fixed_joint"
+
+
+def _update_runner_unwrapped_position(
+    spring_runtime: SimpleNamespace,
+    physics_dt: float,
+) -> torch.Tensor:
+    position = spring_runtime.robot.data.joint_pos[:, spring_runtime.damper_indices]
+    velocity = spring_runtime.robot.data.joint_vel[:, spring_runtime.damper_indices]
+    predicted_delta = 0.5 * (
+        spring_runtime._spring_unwrap_velocity + velocity
+    ) * float(physics_dt)
+    candidate = unwrap_continuous_position(
+        position,
+        spring_runtime._spring_wrapped_pos,
+        spring_runtime._spring_unwrapped_pos,
+        predicted_delta=predicted_delta,
+    )
+    changed = position != spring_runtime._spring_wrapped_pos
+    unwrapped = torch.where(
+        changed, candidate, spring_runtime._spring_unwrapped_pos
+    )
+    maximum_velocity = torch.maximum(
+        torch.abs(spring_runtime._spring_unwrap_velocity), torch.abs(velocity)
+    )
+    spring_runtime._spring_unwrap_ambiguous.copy_(
+        unwrap_ambiguity_mask(maximum_velocity, float(physics_dt))
+    )
+    spring_runtime._spring_wrapped_pos.copy_(position)
+    spring_runtime._spring_unwrapped_pos.copy_(unwrapped)
+    spring_runtime._spring_unwrap_velocity.copy_(velocity)
+    return spring_runtime._spring_unwrapped_pos
+
+
+def _apply_runner_explicit_spring(
+    spring_runtime: SimpleNamespace,
+    physics_dt: float,
+) -> torch.Tensor:
+    """Return the shared spring law and apply it only for the explicit backend."""
+
+    robot = spring_runtime.robot
+    indices = spring_runtime.damper_indices
+    spring_position = _update_runner_unwrapped_position(spring_runtime, physics_dt)
+    spring_velocity = robot.data.joint_vel[:, indices]
+    torque = restoring_torque(
+        spring_position,
+        spring_velocity,
+        spring_runtime._spring_rest_pos,
+        spring_runtime._spring_k,
+        spring_runtime._spring_d,
+    )
+    if spring_runtime._spring_backend == "explicit":
+        robot.set_joint_effort_target(torque, joint_ids=indices)
+    return torque
+
+
+def _articulation_kinetic_energy(robot: Any) -> torch.Tensor:
+    """Return rigid-body kinetic energy for each fixed-base release instance."""
+
+    linear_velocity = robot.data.body_com_lin_vel_w
+    angular_velocity_w = robot.data.body_com_ang_vel_w
+    body_quaternion_w = robot.data.body_quat_w
+    masses = robot.root_physx_view.get_masses().to(
+        device=linear_velocity.device, dtype=linear_velocity.dtype
+    )
+    inertias = robot.root_physx_view.get_inertias().to(
+        device=linear_velocity.device, dtype=linear_velocity.dtype
+    )
+    inertia_matrix = inertias.reshape(*inertias.shape[:2], 3, 3)
+    angular_velocity_body = quat_apply_inverse(
+        body_quaternion_w.reshape(-1, 4),
+        angular_velocity_w.reshape(-1, 3),
+    ).reshape_as(angular_velocity_w)
+    translational = 0.5 * masses * torch.square(linear_velocity).sum(dim=-1)
+    rotational = 0.5 * torch.einsum(
+        "ebi,ebij,ebj->eb",
+        angular_velocity_body,
+        inertia_matrix,
+        angular_velocity_body,
+    )
+    return (translational + rotational).sum(dim=1)
 
 
 def _required_aliases(
@@ -404,6 +742,11 @@ def _trace_metadata(
     audit: Mapping[str, Any],
     *,
     mode: str,
+    physics_dt: float,
+    spring_backend: str,
+    spring_calibration_status: str,
+    profile_sha256: str | None,
+    seed: int,
     replay_trace_sha256: str | None,
     replay_initial_state: Mapping[str, Any] | None,
     replay_initial_state_sha256: str | None,
@@ -416,7 +759,9 @@ def _trace_metadata(
         "joint_order": list(robot.joint_names),
         "clock": {
             "source": "isaac_physics_step",
-            "timestamp_semantics": "post_step_relative_monotonic",
+            "timestamp_semantics": (
+                "channel_time_bases_pre_and_post_step_relative_monotonic"
+            ),
             "time_unit": "s",
         },
         "scenario_schema_version": scenario.schema_version,
@@ -428,7 +773,14 @@ def _trace_metadata(
         "isaaclab_version": runtime_provenance["isaaclab_version"],
         "isaacsim_version": runtime_provenance["isaacsim_version"],
         "characterization_runner_sha256": runtime_provenance["characterization_runner_sha256"],
+        "torsion_spring_model_sha256": runtime_provenance[
+            "torsion_spring_model_sha256"
+        ],
         "runtime_bundle_sha256": runtime_provenance["runtime_bundle_sha256"],
+        "spring_backend": spring_backend,
+        "calibration_status": spring_calibration_status,
+        "profile_sha256": profile_sha256,
+        "seed": seed,
         "calibration_constants": {
             "profile_id": profile.profile_id if profile is not None else None,
             "runtime_audit_sha256": sha256_json(audit),
@@ -438,7 +790,10 @@ def _trace_metadata(
                 else {}
             ),
             "hardware_mapping": profile.hardware_mapping if profile is not None else {},
-            "physics_dt_s": PHYSICS_DT,
+            "physics_dt_s": physics_dt,
+            "seed": seed,
+            "spring_backend": spring_backend,
+            "spring_calibration_status": spring_calibration_status,
             "mode": mode,
             "fixed_base": bool(audit["is_fixed_base"]),
             "replay_trace_sha256": replay_trace_sha256,
@@ -458,11 +813,15 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     scenario = load_scenario(args.scenario)
     validate_scenario_mode(scenario, args.mode)
     validate_simulated_experiment(scenario)
-    steps = resolve_scenario_steps(scenario, args.steps, PHYSICS_DT)
+    physics_hz = int(getattr(args, "physics_hz", 120))
+    if physics_hz not in {120, 240}:
+        raise ContractError("spring characterization supports 120 or 240 Hz")
+    requested_physics_dt = 1.0 / physics_hz
+    steps = resolve_scenario_steps(scenario, args.steps, requested_physics_dt)
     request = validate_run_request(
         mode=args.mode,
         steps=steps,
-        physics_dt=PHYSICS_DT,
+        physics_dt=requested_physics_dt,
         require_contact=args.require_contact,
     )
     physics_dt = request.physics_dt
@@ -472,7 +831,15 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     torch.manual_seed(int(args.seed))
     np.random.seed(int(args.seed))
     env_cfg = RedrhexEnvCfg()
+    env_cfg.spring_backend = str(args.spring_backend)
     profile_application = apply_profile_to_config(env_cfg, profile)
+    spring_backend = str(env_cfg.spring_backend)
+    spring_calibration_status = (
+        "calibrated"
+        if bool(getattr(env_cfg, "spring_calibrated", False))
+        else "uncalibrated"
+    )
+    profile_sha256 = sha256_json(profile.to_dict()) if profile is not None else None
     env_cfg.robot_cfg.spawn.articulation_props.fix_root_link = request.mode == "fixed-base"
 
     requested_schedule = scenario_schedule(scenario, request.steps, physics_dt)
@@ -505,12 +872,19 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     sim_cfg.dt = physics_dt
     sim_cfg.render_interval = 1
     sim_cfg.device = str(args.device)
+    if scenario.experiment_kind == "spring_release":
+        sim_cfg.gravity = (0.0, 0.0, 0.0)
     sim = sim_utils.SimulationContext(sim_cfg)
 
     scene_cfg = CharacterizationSceneCfg(num_envs=1, env_spacing=env_cfg.scene.env_spacing)
     scene_cfg.robot = copy.deepcopy(env_cfg.robot_cfg).replace(prim_path="{ENV_REGEX_NS}/Robot")
     scene_cfg.ground.spawn.physics_material = copy.deepcopy(env_cfg.terrain.physics_material)
     scene = InteractiveScene(scene_cfg)
+    selected_joint_name = _selected_joint_name(scenario, env_cfg)
+    if scenario.experiment_kind == "spring_release":
+        if selected_joint_name is None:
+            raise ContractError("spring_release requires one selected damper joint")
+        _author_spring_release_fixture(scene, env_cfg, selected_joint_name)
     sim.reset()
 
     robot = scene["robot"]
@@ -547,9 +921,16 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         initial_joint_position, initial_joint_velocity
     )
     scene.reset()
-    runtime_profile_application = apply_profile_to_runtime_env(
-        SimpleNamespace(robot=robot, cfg=env_cfg), profile
+    spring_runtime = _configure_runner_torsion_springs(
+        robot, env_cfg, spring_backend
     )
+    runtime_profile_application = apply_profile_to_runtime_env(
+        spring_runtime, profile
+    )
+    if scenario.experiment_kind == "spring_release":
+        if selected_joint is None:
+            raise ContractError("spring_release requires one selected damper joint")
+        _verify_spring_release_fixture(robot, selected_joint, spring_runtime)
 
     # Record the effective PhysX state before the experiment can alter it.
     audit = _runtime_audit(
@@ -559,6 +940,8 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         scene,
         env_cfg,
         mode=request.mode,
+        physics_dt=physics_dt,
+        spring_runtime=spring_runtime,
         runtime_profile_application=runtime_profile_application,
     )
 
@@ -587,16 +970,71 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
     root_angular_velocity_log: list[np.ndarray] = []
     foot_contact_force_log: list[np.ndarray] = []
     body_contact_force_log: list[np.ndarray] = []
+    spring_deflection_log: list[np.ndarray] = []
+    spring_model_torque_log: list[np.ndarray] = []
+    spring_applied_torque_estimate_log: list[np.ndarray] = []
+    spring_potential_energy_log: list[np.ndarray] = []
+    spring_mechanical_power_log: list[np.ndarray] = []
+    spring_passivity_residual_log: list[np.ndarray] = []
+    spring_release_start_log: list[float] = []
+    spring_fixture_position_error_log: list[float] = []
+    spring_fixture_velocity_log: list[float] = []
+    spring_unwrap_ambiguous_log: list[float] = []
+    initial_spring_energy = potential_energy(
+        robot.data.joint_pos[:, spring_runtime.damper_indices],
+        spring_runtime._spring_rest_pos,
+        spring_runtime._spring_k,
+    ).sum(dim=1)
+    spring_energy_reference = initial_spring_energy.clone()
+    previous_release_key: tuple[int, str, float] | None = None
 
     for step_index in range(request.steps):
         requested_scheduled = requested_schedule[step_index]
         applied_scheduled = applied_schedule[step_index]
+        release_key = (
+            int(applied_scheduled.repeat_index),
+            str(applied_scheduled.label),
+            float(applied_scheduled.value),
+        )
+        release_start = bool(
+            scenario.experiment_kind == "spring_release"
+            and release_key != previous_release_key
+        )
+        if release_start:
+            if selected_joint is None:
+                raise ContractError("spring_release requires one selected damper joint")
+            reset_position = default_position.clone()
+            reset_velocity = torch.zeros_like(robot.data.joint_vel)
+            spring_slot = spring_runtime.damper_indices.index(selected_joint)
+            reset_position[:, selected_joint] = (
+                spring_runtime._spring_rest_pos[:, spring_slot]
+                + float(applied_scheduled.value)
+            )
+            reset_velocity[:, selected_joint] = 0.0
+            robot.write_joint_state_to_sim(reset_position, reset_velocity)
+            reset_spring_position = robot.data.joint_pos[
+                :, spring_runtime.damper_indices
+            ]
+            spring_runtime._spring_wrapped_pos.copy_(reset_spring_position)
+            spring_runtime._spring_unwrapped_pos.copy_(reset_spring_position)
+            spring_runtime._spring_unwrap_velocity.copy_(
+                robot.data.joint_vel[:, spring_runtime.damper_indices]
+            )
+            spring_runtime._spring_unwrap_ambiguous.zero_()
+            spring_energy_reference = potential_energy(
+                spring_runtime._spring_unwrapped_pos,
+                spring_runtime._spring_rest_pos,
+                spring_runtime._spring_k,
+            ).sum(dim=1)
+            previous_release_key = release_key
         position_target = default_position.clone()
         velocity_target = zero_velocity.clone()
         requested = torch.zeros_like(zero_velocity)
         if selected_joint is not None:
             requested[:, selected_joint] = requested_scheduled.value
-            if scenario.experiment_kind == "abad_static":
+            if scenario.experiment_kind == "spring_release":
+                pass
+            elif scenario.experiment_kind == "abad_static":
                 abad_rest_rad = float(default_position[0, selected_joint].item())
                 abad_limit_rad = float(env_cfg.abad_pos_limit_rad)
                 position_target[:, selected_joint] = apply_abad_target_mapping(
@@ -621,9 +1059,39 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
 
         robot.set_joint_position_target(position_target)
         robot.set_joint_velocity_target(velocity_target)
+        spring_velocity_pre = robot.data.joint_vel[:, spring_runtime.damper_indices].clone()
+        spring_torque_pre = _apply_runner_explicit_spring(
+            spring_runtime, physics_dt
+        )
+        spring_position_pre = spring_runtime._spring_unwrapped_pos.clone()
+        spring_energy_pre = potential_energy(
+            spring_position_pre,
+            spring_runtime._spring_rest_pos,
+            spring_runtime._spring_k,
+        )
+        spring_power_pre = mechanical_power(spring_torque_pre, spring_velocity_pre)
         scene.write_data_to_sim()
+        spring_applied_torque_pre = robot.data.applied_torque[
+            :, spring_runtime.damper_indices
+        ].clone()
+        if selected_joint is not None and not applied_scheduled.actuator_enabled:
+            spring_slot = spring_runtime.damper_indices.index(selected_joint)
+            spring_applied_torque_pre[:, spring_slot] = 0.0
         sim.step(render=not bool(args.headless))
         scene.update(physics_dt)
+
+        spring_position_post = _update_runner_unwrapped_position(
+            spring_runtime, physics_dt
+        )
+        spring_energy_post = potential_energy(
+            spring_position_post,
+            spring_runtime._spring_rest_pos,
+            spring_runtime._spring_k,
+        ).sum(dim=1)
+        spring_system_energy = spring_energy_post + _articulation_kinetic_energy(robot)
+        spring_passivity_residual = (
+            spring_system_energy - spring_energy_reference
+        )
 
         applied = position_target if scenario.experiment_kind == "abad_static" else velocity_target
         requested_log.append(requested[0].detach().cpu().numpy().copy())
@@ -644,12 +1112,59 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         body_contact_force_log.append(
             body_contact_sensor.data.net_forces_w[0].detach().cpu().numpy().copy()
         )
+        spring_deflection_log.append(
+            (
+                spring_position_pre[0] - spring_runtime._spring_rest_pos[0]
+            ).detach().cpu().numpy().copy()
+        )
+        spring_model_torque_log.append(
+            spring_torque_pre[0].detach().cpu().numpy().copy()
+        )
+        spring_applied_torque_estimate_log.append(
+            spring_applied_torque_pre[0].detach().cpu().numpy().copy()
+        )
+        spring_potential_energy_log.append(
+            spring_energy_pre[0].detach().cpu().numpy().copy()
+        )
+        spring_mechanical_power_log.append(
+            spring_power_pre[0].detach().cpu().numpy().copy()
+        )
+        spring_passivity_residual_log.append(
+            spring_passivity_residual.detach().cpu().numpy().copy()
+        )
+        spring_release_start_log.append(1.0 if release_start else 0.0)
+        spring_unwrap_ambiguous_log.append(
+            float(spring_runtime._spring_unwrap_ambiguous.any().item())
+        )
+        if scenario.experiment_kind == "spring_release":
+            locked_ids = spring_runtime.fixture_locked_joint_ids
+            locked_position = robot.data.joint_pos[:, locked_ids]
+            locked_default = default_position[:, locked_ids]
+            locked_position_error = torch.remainder(
+                locked_position - locked_default + math.pi,
+                2.0 * math.pi,
+            ) - math.pi
+            spring_fixture_position_error_log.append(
+                float(torch.max(torch.abs(locked_position_error)).item())
+            )
+            spring_fixture_velocity_log.append(
+                float(
+                    torch.max(
+                        torch.abs(robot.data.joint_vel[:, locked_ids])
+                    ).item()
+                )
+            )
+        else:
+            spring_fixture_position_error_log.append(0.0)
+            spring_fixture_velocity_log.append(0.0)
 
     sim_time = np.arange(1, request.steps + 1, dtype=np.float64) * physics_dt
+    spring_pre_step_time = np.arange(request.steps, dtype=np.float64) * physics_dt
     foot_contact_force = np.asarray(foot_contact_force_log, dtype=np.float64)
     body_contact_force = np.asarray(body_contact_force_log, dtype=np.float64)
     traces: dict[str, np.ndarray] = {
         "sim_time_s": sim_time,
+        "spring_pre_step_time_s": spring_pre_step_time,
         "requested_command": np.asarray(requested_log, dtype=np.float64),
         "applied_command": np.asarray(applied_log, dtype=np.float64),
         "joint_position": np.asarray(joint_position_log, dtype=np.float64),
@@ -663,12 +1178,47 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         "contact_force_n": np.linalg.norm(foot_contact_force, axis=-1),
         "body_contact_force_w": body_contact_force,
         "body_contact_force_n": np.linalg.norm(body_contact_force, axis=-1),
+        "spring_deflection": np.asarray(spring_deflection_log, dtype=np.float64),
+        "spring_model_torque": np.asarray(spring_model_torque_log, dtype=np.float64),
+        "spring_applied_torque_estimate": np.asarray(
+            spring_applied_torque_estimate_log, dtype=np.float64
+        ),
+        "spring_potential_energy": np.asarray(
+            spring_potential_energy_log, dtype=np.float64
+        ),
+        "spring_mechanical_power": np.asarray(
+            spring_mechanical_power_log, dtype=np.float64
+        ),
+        "spring_passivity_residual": np.asarray(
+            spring_passivity_residual_log, dtype=np.float64
+        ),
+        "spring_release_start": np.asarray(
+            spring_release_start_log, dtype=np.float64
+        ),
+        "spring_fixture_position_error": np.asarray(
+            spring_fixture_position_error_log, dtype=np.float64
+        ),
+        "spring_fixture_velocity": np.asarray(
+            spring_fixture_velocity_log, dtype=np.float64
+        ),
+        "spring_unwrap_ambiguous": np.asarray(
+            spring_unwrap_ambiguous_log, dtype=np.float64
+        ),
     }
     time_bases = {
         name: "sim_time_s"
         for name in traces
-        if name != "sim_time_s"
+        if name not in {"sim_time_s", "spring_pre_step_time_s"}
     }
+    for name in (
+        "spring_deflection",
+        "spring_model_torque",
+        "spring_applied_torque_estimate",
+        "spring_potential_energy",
+        "spring_mechanical_power",
+        "spring_release_start",
+    ):
+        time_bases[name] = "spring_pre_step_time_s"
 
     _required_aliases(
         scenario,
@@ -698,6 +1248,11 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         profile_application,
         audit,
         mode=request.mode,
+        physics_dt=physics_dt,
+        spring_backend=spring_backend,
+        spring_calibration_status=spring_calibration_status,
+        profile_sha256=profile_sha256,
+        seed=int(args.seed),
         replay_trace_sha256=replay_trace_sha256,
         replay_initial_state=replay_initial_state,
         replay_initial_state_sha256=replay_initial_state_sha256,
@@ -720,6 +1275,11 @@ def run_characterization(args: argparse.Namespace) -> dict[str, Any]:
         "physics_dt_s": request.physics_dt,
         "trace_sha256": manifest.provenance["trace_sha256"],
         "profile_id": profile.profile_id if profile is not None else None,
+        "profile_sha256": profile_sha256,
+        "spring_backend": spring_backend,
+        "calibration_status": spring_calibration_status,
+        "seed": int(args.seed),
+        "effective_spring_parameters": audit["torsion_springs"],
         "command_delay_steps": delay_steps,
         "effective_command_delay_s": delay_steps * physics_dt,
         "replay_trace_sha256": replay_trace_sha256,

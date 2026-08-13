@@ -20,6 +20,15 @@ def build_parser() -> argparse.ArgumentParser:
     importer.add_argument("--output", required=True, type=Path)
     importer.add_argument("--units-json", default="{}")
     importer.add_argument("--frames-json", default="{}")
+    importer.add_argument(
+        "--calibration-constants-json",
+        default="{}",
+        help=(
+            "Immutable operator-approved measurement constants, including the "
+            "torsion-spring rest angle, fixture approval, safe envelope, and "
+            "representative alias declaration."
+        ),
+    )
     importer.add_argument("--latency-clock", default=None)
     importer.add_argument("--time-bases-json", default="{}")
     importer.add_argument("--dataset-id", required=True)
@@ -56,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--isaaclab-root", type=Path, default=None)
     sweep.add_argument("--device", default="cuda:0")
     sweep.add_argument("--seed", type=int, default=0)
+    sweep.add_argument(
+        "--spring-backend",
+        choices=("explicit", "native"),
+        default="explicit",
+        help="Passive torsion-spring implementation used for every candidate run.",
+    )
     sweep.add_argument(
         "--headless", action=argparse.BooleanOptionalAction, default=True
     )
@@ -122,6 +137,39 @@ def build_parser() -> argparse.ArgumentParser:
     simulation.add_argument("--seed", type=int, default=0)
     simulation.add_argument("--headless", action="store_true", default=False)
     simulation.add_argument("--device", default="cuda:0")
+    simulation.add_argument(
+        "--physics-hz",
+        type=int,
+        choices=(120, 240),
+        default=120,
+        help="Physics frequency for spring characterization and timestep comparison.",
+    )
+    simulation.add_argument(
+        "--spring-backend",
+        choices=("explicit", "native"),
+        default="explicit",
+        help="Passive torsion-spring implementation used by the characterization run.",
+    )
+
+    selection = subparsers.add_parser(
+        "select-spring-backend",
+        help="Apply the deterministic gates to explicit/native 120/240 Hz releases.",
+    )
+    selection.add_argument("--explicit-120", type=Path, required=True)
+    selection.add_argument("--explicit-240", type=Path, required=True)
+    selection.add_argument("--native-120", type=Path, required=True)
+    selection.add_argument("--native-240", type=Path, required=True)
+    selection.add_argument("--output", type=Path, required=True)
+
+    policy = subparsers.add_parser(
+        "validate-policy-acceptance",
+        help="Apply the fixed three-seed ForwardFast or Direct rollout gates.",
+    )
+    policy.add_argument("--stage", choices=("forwardfast", "direct"), required=True)
+    for seed in (42, 43, 44):
+        policy.add_argument(f"--seed-{seed}-command", type=Path, required=True)
+        policy.add_argument(f"--seed-{seed}-summary", type=Path, required=True)
+    policy.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -214,6 +262,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             frames=_json_object(args.frames_json, "--frames-json"),
             latency_clock=args.latency_clock,
             time_bases=_json_object(args.time_bases_json, "--time-bases-json"),
+            metadata={
+                "calibration_constants": _json_object(
+                    args.calibration_constants_json,
+                    "--calibration-constants-json",
+                )
+            },
             profile=load_profile(args.profile) if args.profile is not None else None,
             replay_fixture=(
                 _json_file_object(args.replay_fixture, "--replay-fixture")
@@ -328,6 +382,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             headless=args.headless,
             seed=args.seed,
             device=args.device,
+            spring_backend=args.spring_backend,
             provenance=provenance,
             provenance_provider=production_runtime_provenance,
             command_prefix=command_prefix,
@@ -343,6 +398,34 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         from .isaac_main import run
 
         return run(args)
+    if args.command == "select-spring-backend":
+        from .spring_backend_selection import evaluate_backend_runs
+
+        if args.output.exists():
+            raise ValueError(f"output already exists: {args.output}")
+        result = evaluate_backend_runs(
+            explicit_120=args.explicit_120,
+            explicit_240=args.explicit_240,
+            native_120=args.native_120,
+            native_240=args.native_240,
+        )
+        _write_json(args.output, result)
+        return result
+    if args.command == "validate-policy-acceptance":
+        from .policy_acceptance import evaluate_policy_acceptance
+
+        if args.output.exists():
+            raise ValueError(f"output already exists: {args.output}")
+        result = evaluate_policy_acceptance(
+            stage=args.stage,
+            runs=[
+                (args.seed_42_command, args.seed_42_summary),
+                (args.seed_43_command, args.seed_43_summary),
+                (args.seed_44_command, args.seed_44_summary),
+            ],
+        )
+        _write_json(args.output, result)
+        return result
     raise ValueError(f"unknown command: {args.command}")
 
 
@@ -353,6 +436,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command != "run-sim":
             _emit(result)
         if args.command == "validate-promotion" and not result["eligible_for_review"]:
+            return 3
+        if args.command == "select-spring-backend" and not result["eligible"]:
+            return 3
+        if args.command == "validate-policy-acceptance" and not result["eligible"]:
             return 3
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:

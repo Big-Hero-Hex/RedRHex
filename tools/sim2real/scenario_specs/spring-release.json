@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "scenario_id": "spring-release",
+  "name": "Torsion-spring backend release characterization",
+  "description": "Compare explicit and native torsion springs with deterministic signed fixed-base, zero-gravity releases.",
+  "subsystem": "spring",
+  "experiment_kind": "spring_release",
+  "joint": "damper_0",
+  "command_segments": [
+    {"duration_s": 0.25, "value": 0.1, "label": "release_positive_low"},
+    {"duration_s": 0.25, "value": -0.1, "label": "release_negative_low"},
+    {"duration_s": 0.25, "value": 0.2, "label": "release_positive_high"},
+    {"duration_s": 0.25, "value": -0.2, "label": "release_negative_high"}
+  ],
+  "repeats": 1,
+  "required_channels": [
+    "spring_deflection",
+    "spring_model_torque",
+    "spring_applied_torque_estimate",
+    "spring_potential_energy",
+    "spring_mechanical_power",
+    "spring_passivity_residual",
+    "spring_release_start",
+    "spring_fixture_position_error",
+    "spring_fixture_velocity",
+    "spring_unwrap_ambiguous",
+    "repeat_index"
+  ],
+  "time_bases": {
+    "spring_deflection": "spring_pre_step_time_s",
+    "spring_model_torque": "spring_pre_step_time_s",
+    "spring_applied_torque_estimate": "spring_pre_step_time_s",
+    "spring_potential_energy": "spring_pre_step_time_s",
+    "spring_mechanical_power": "spring_pre_step_time_s",
+    "spring_passivity_residual": "sim_time_s",
+    "spring_release_start": "spring_pre_step_time_s",
+    "spring_fixture_position_error": "sim_time_s",
+    "spring_fixture_velocity": "sim_time_s",
+    "spring_unwrap_ambiguous": "sim_time_s",
+    "repeat_index": "sim_time_s"
+  },
+  "split": "holdout",
+  "scene_mode": "fixed_base",
+  "safety_class": "simulation_only"
+}

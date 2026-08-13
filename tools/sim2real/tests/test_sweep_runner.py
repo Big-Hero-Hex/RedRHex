@@ -397,6 +397,7 @@ def _write_sim_artifact(
     profile_override=None,
     metadata_override=None,
     replay_mutation: tuple[str, str, str] | None = None,
+    spring_backend_mutation: tuple[str, str] | None = None,
 ) -> None:
     scenario = load_scenario(_argument(command, "--scenario"))
     profile = profile_override or load_profile(_argument(command, "--physics-profile"))
@@ -420,8 +421,22 @@ def _write_sim_artifact(
             selected.pop(field)
         else:
             selected[field] = "f" * 64
+    spring_backend = _argument(command, "--spring-backend")
     metadata = metadata_override or _trace_metadata(scenario)
+    metadata["spring_backend"] = spring_backend
     metadata["calibration_constants"].update(trace_bindings)
+    result_spring_backend: str | None = spring_backend
+    if spring_backend_mutation is not None:
+        target, mutation = spring_backend_mutation
+        if target == "metadata":
+            if mutation == "missing":
+                metadata.pop("spring_backend")
+            else:
+                metadata["spring_backend"] = "explicit" if spring_backend == "native" else "native"
+        elif mutation == "missing":
+            result_spring_backend = None
+        else:
+            result_spring_backend = "explicit" if spring_backend == "native" else "native"
     manifest = write_trace(
         output,
         _response_arrays(scale=0.8),
@@ -431,22 +446,23 @@ def _write_sim_artifact(
         metadata=metadata,
     )
     (output / "runtime_audit.json").write_text("{}\n", encoding="utf-8")
+    result_payload = {
+        "schema_version": 1,
+        "scenario_id": scenario.scenario_id,
+        "mode": _argument(command, "--mode"),
+        "steps": 2,
+        "physics_dt_s": 1.0 / 120.0,
+        "trace_sha256": manifest.provenance["trace_sha256"],
+        "profile_id": profile.profile_id,
+        "contact_validation": None,
+        "runtime_audit": "runtime_audit.json",
+        "spring_backend": result_spring_backend,
+        **result_bindings,
+    }
+    if result_spring_backend is None:
+        result_payload.pop("spring_backend")
     (output / "results.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "scenario_id": scenario.scenario_id,
-                "mode": _argument(command, "--mode"),
-                "steps": 2,
-                "physics_dt_s": 1.0 / 120.0,
-                "trace_sha256": manifest.provenance["trace_sha256"],
-                "profile_id": profile.profile_id,
-                "contact_validation": None,
-                "runtime_audit": "runtime_audit.json",
-                **result_bindings,
-            }
-        )
-        + "\n",
+        json.dumps(result_payload) + "\n",
         encoding="utf-8",
     )
 
@@ -480,6 +496,34 @@ def test_execution_rejects_candidate_without_matching_replay_bindings(
         )
 
 
+@pytest.mark.parametrize(
+    ("target", "mutation"),
+    [
+        (target, mutation)
+        for target in ("metadata", "results")
+        for mutation in ("missing", "mismatch")
+    ],
+)
+def test_execution_rejects_candidate_without_matching_spring_backend_provenance(
+    tmp_path: Path, target: str, mutation: str
+) -> None:
+    def run_process(command, **_kwargs):
+        command = list(command)
+        _write_sim_artifact(
+            command,
+            spring_backend_mutation=(target, mutation),
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(ContractError, match="spring.backend|spring_backend"):
+        _execute(
+            tmp_path / f"bad-backend-{target}-{mutation}",
+            candidates=_candidates(1),
+            spring_backend="native",
+            run_process=run_process,
+        )
+
+
 def _execute(
     output: Path,
     *,
@@ -492,6 +536,7 @@ def _execute(
     audit_artifact_root: str | Path | None = None,
     provenance: dict[str, Any] | None = None,
     provenance_provider=lambda: _runtime_provenance(),
+    spring_backend: str = "explicit",
 ) -> dict[str, Any]:
     from tools.sim2real.sweep_runner import execute_sweep
 
@@ -527,6 +572,7 @@ def _execute(
         headless=True,
         seed=17,
         device="cpu",
+        spring_backend=spring_backend,
         provenance=provenance or {},
         provenance_provider=provenance_provider,
         command_prefix=("/opt/isaaclab/isaaclab.sh", "-p", "-m", "tools.sim2real"),
@@ -537,6 +583,41 @@ def _execute(
         audit_artifact_root=audit_artifact_root,
         run_process=run_process,
     )
+
+
+def test_execute_sweep_forwards_backend_and_binds_it_to_provenance(
+    tmp_path: Path,
+) -> None:
+    commands: list[list[str]] = []
+
+    def run_process(command, **_kwargs):
+        command = list(command)
+        commands.append(command)
+        _write_sim_artifact(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    output = tmp_path / "native-sweep"
+    _execute(
+        output,
+        candidates=_candidates(1),
+        spring_backend="native",
+        run_process=run_process,
+    )
+
+    assert _argument(commands[0], "--spring-backend") == "native"
+    provenance = json.loads((output / "provenance.json").read_text(encoding="utf-8"))
+    assert provenance["spring_backend"] == "native"
+
+
+def test_execute_sweep_rejects_unsupported_spring_backend(tmp_path: Path) -> None:
+    with pytest.raises(ContractError, match="unsupported spring_backend"):
+        _execute(
+            tmp_path / "invalid-backend",
+            candidates=_candidates(1),
+            spring_backend="invalid",
+            generate_only=True,
+            run_process=None,
+        )
 
 
 def test_execute_sweep_runs_fresh_process_per_candidate_and_verifies_outputs(
@@ -1398,6 +1479,8 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
             "23",
             "--device",
             "cpu",
+            "--spring-backend",
+            "native",
             "--headless",
             "--real-trace",
             str(tmp_path / "real-reference"),
@@ -1419,6 +1502,7 @@ def test_sweep_cli_defaults_to_execution_and_forwards_runner_settings(
     assert captured["scene_mode"] == "fixed-base"
     assert captured["seed"] == 23
     assert captured["device"] == "cpu"
+    assert captured["spring_backend"] == "native"
     assert captured["headless"] is True
     assert captured["real_trace"] == tmp_path / "real-reference"
     assert captured["known_load_trace"] is None
