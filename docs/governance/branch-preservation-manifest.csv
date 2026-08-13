@@ -60,4 +60,4 @@ stash-hunk,a33dced:tools/training_panel/static/index.html,a33dceda4890c290e8cb23
 stash-hunk,a33dced:tools/training_panel/ui_tests/test_local_panel_ui.py,a33dceda4890c290e8cb23ad00b10757b228bfbd,panel-test-duplicate,refs/heads/feature/training-panel-v3.6,all-added-lines-present,already-present
 stash-hunk,a33dced:tools/windows/README.md,a33dceda4890c290e8cb23ad00b10757b228bfbd,component-documentation,d5a934bce90e808206afb4e8fef583b6abf128a2,content-migrated-to-router-and-pair,migrated
 stash-hunk,a33dced:tools/windows/redrhex_remote.ps1,a33dceda4890c290e8cb23ad00b10757b228bfbd,windows-implementation,112e676f1f600cdc53df9c6fc228b053614e34b3,exact-blob,applied
-worktree-path,root:docs/reports,not-applicable,post-snapshot-untracked,not-yet-classified,user-owned-and-untouched,pending-user-disposition
+worktree-path,root:docs/reports,02ebb53cf9da8db47952d3cf264801f44f27d82c,generated-research-report,refs/heads/recovery/2026-08-13/research-roadmap-report;docs/research/2026-08-13-research-readiness-audit.*,secret-scan-clean;canonical-migration-2dff78e2410350defcf1603b9ca67f09bec030d3,local-recovery-preserved-public-archive-pending

@@ -35,7 +35,7 @@ The 2026-08-13 remote audit found zero unclassified branch tips. Significant unm
 <a id="pending-contraction"></a>
 ## Pending contraction
 
-No obsolete remote ref may be deleted until `main` protection is verified with repository-owner authority. Feature PRs remain draft until their physical torsion or Windows acceptance gates pass. Local worktree/ref contraction remains pending because the root contains the post-snapshot untracked path `docs/reports/`; that path is user-owned and has not been modified or classified by this migration.
+No obsolete remote ref may be deleted until `main` protection is verified with repository-owner authority. Feature PRs remain draft until their physical torsion or Windows acceptance gates pass. The post-snapshot `docs/reports/` path is no longer unclassified: its exact generated bundle is preserved in local recovery commit `02ebb53cf9da8db47952d3cf264801f44f27d82c`, and its durable findings were migrated in documentation commit `2dff78e2410350defcf1603b9ca67f09bec030d3` (PR #8). Publishing the raw PDF, HTML, previews, scripts, and SQL to the public remote archive remains pending explicit authorization. Local worktree/ref contraction therefore remains gated by that archive decision and `main` protection.
 
 <a id="recovery"></a>
 ## Recovery

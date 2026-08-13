@@ -35,7 +35,7 @@ Machine-readable `docs/governance/branch-preservation-manifest.csv` 記錄切換
 <a id="pending-contraction"></a>
 ## 待完成 contraction
 
-使用 repository-owner authority 驗證 `main` protection 前，不得刪除 obsolete remote ref。Feature PR 在 physical torsion 或 Windows acceptance gate 通過前維持 draft。Local worktree/ref contraction 仍待處理，因為 root 包含 snapshot 後新增的 untracked path `docs/reports/`；此 path 屬於使用者，本 migration 未修改或分類它。
+使用 repository-owner authority 驗證 `main` protection 前，不得刪除 obsolete remote ref。Feature PR 在 physical torsion 或 Windows acceptance gate 通過前維持 draft。Snapshot 後新增的 `docs/reports/` path 已完成分類：exact generated bundle 保存在 local recovery commit `02ebb53cf9da8db47952d3cf264801f44f27d82c`，durable finding 已透過 documentation commit `2dff78e2410350defcf1603b9ca67f09bec030d3`（PR #8）遷移。將 raw PDF、HTML、preview、script 與 SQL 發布到 public remote archive，仍待明確授權。因此 local worktree/ref contraction 仍受該 archive decision 與 `main` protection gate 限制。
 
 <a id="recovery"></a>
 ## 復原
