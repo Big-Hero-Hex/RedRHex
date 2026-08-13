@@ -351,3 +351,57 @@ def send_convergence_notification(
             results["discord"] = {"ok": False, "error": str(exc)}
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Divergence notifications
+# ---------------------------------------------------------------------------
+
+def divergence_event(run: dict, result: "DivergenceResult", remote_url: str = "") -> dict:
+    """Build a divergence event dict, parallel to convergence_event()."""
+    from .convergence import DivergenceResult  # local import avoids circular dependency
+
+    return {
+        **_base_run_payload(run, remote_url=remote_url),
+        "event_type": "training_diverged",
+        "divergence_kind": result.kind,
+        "iteration": result.iteration,
+        "reason": result.reason,
+        "tag": result.tag,
+    }
+
+
+def _divergence_discord_message(event: dict) -> dict:
+    kind = "NaN/inf" if event.get("divergence_kind") == "nan" else "reward collapse"
+    return {
+        "content": (
+            f"**Training diverged** ({kind})\n"
+            f"Run: `{event.get('display_name') or 'unknown'}`\n"
+            f"Iteration: {event.get('iteration')}\n"
+            f"{event.get('reason') or ''}"
+        )
+    }
+
+
+def send_divergence_notification(
+    run: dict,
+    result: "DivergenceResult",
+    discord_webhook: str = "",
+    remote_url: str = "",
+) -> dict:
+    """Send a Discord notification for a divergence event. Never raises."""
+    import os
+
+    discord_webhook = discord_webhook or os.environ.get("REDRHEX_DISCORD_WEBHOOK_URL", "")
+    event = divergence_event(run, result, remote_url=remote_url)
+    results: dict = {}
+    if discord_webhook:
+        try:
+            body = json.dumps(_divergence_discord_message(event)).encode()
+            req = Request(discord_webhook, data=body, method="POST",
+                          headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=10) as resp:
+                results["discord"] = {"ok": resp.status < 300, "status": resp.status}
+        except Exception as exc:
+            results["discord"] = {"ok": False, "error": str(exc)}
+    return results

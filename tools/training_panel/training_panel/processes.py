@@ -33,6 +33,7 @@ from .commands import (
     tensorboard_argv,
     training_argv,
 )
+from .provenance import git_provenance
 from .config import PanelPaths, timestamp_id
 from .deploy import latest_deploy_report
 from .history import HistoryStore, latest_checkpoint, latest_onnx, latest_video, tail_file
@@ -186,6 +187,7 @@ class ProcessRegistry:
             "updated_at": queued_at,
             "queued_at": queued_at,
             "params": params.to_dict(),
+            "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
             "log_dir": None,
@@ -229,6 +231,7 @@ class ProcessRegistry:
             "started_at": started_at,
             "queued_at": (existing_record or {}).get("queued_at"),
             "params": params.to_dict(),
+            "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
             "log_dir": None,
@@ -2073,10 +2076,13 @@ class ProcessRegistry:
         checker = ConvergenceChecker()
         convergence_detected = False
         convergence_notified_at: float | None = None
+        divergence_detected = False
         log_dir: str | None = None
         log_poll_interval = 2.0
         convergence_poll_interval = 60.0
         next_convergence_check = 0.0
+        progress_poll_interval = 5.0
+        next_progress_check = 0.0
 
         # Poll while training is running, checking for convergence each cycle.
         while proc.poll() is None:
@@ -2116,6 +2122,40 @@ class ProcessRegistry:
                                     self.history.update_run(run_id, queue_video_on_completion=True)
                 except Exception:
                     pass  # never let convergence logic crash the monitor thread
+            if log_dir and not divergence_detected and should_check_convergence:
+                try:
+                    cfg = load_convergence_config(self.paths.convergence_config_file)
+                    divergence = checker.check_divergence(Path(log_dir), cfg)
+                    if divergence.detected:
+                        divergence_detected = True
+                        self.history.update_run(
+                            run_id,
+                            divergence_detected=True,
+                            divergence_iteration=divergence.iteration,
+                            divergence_kind=divergence.kind,
+                            divergence_reason=divergence.reason,
+                        )
+                        try:
+                            from .notifications import send_divergence_notification
+
+                            send_divergence_notification(self.history.get_run(run_id) or {}, divergence)
+                        except Exception:
+                            pass  # notification failure must not affect the run
+                        if cfg.divergence_action == "stop":
+                            self.stop(run_id)
+                except Exception:
+                    pass  # never let divergence logic crash the monitor thread
+            if now >= next_progress_check:
+                next_progress_check = now + progress_poll_interval
+                try:
+                    from .progress import progress_snapshot
+
+                    process_log = self.paths.process_log_dir / f"{run_id}.log"
+                    snapshot = progress_snapshot(tail_file(process_log, max_chars=20000))
+                    if snapshot:
+                        self.history.update_run(run_id, progress=snapshot)
+                except Exception:
+                    pass  # progress display must never kill the monitor thread
             time.sleep(log_poll_interval)
 
         returncode = proc.wait()
