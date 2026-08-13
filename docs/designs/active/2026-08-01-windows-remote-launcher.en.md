@@ -6,7 +6,7 @@ audience: developer
 type: design
 status: approved
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="goal"></a>
@@ -48,4 +48,4 @@ Dependency-free PowerShell tests cover deterministic arguments, install paths, a
 <a id="status"></a>
 ## Status boundary
 
-This design is approved, but its implementation is not part of the documentation source branch. Do not describe the launcher as shipped until the implementation and Windows smoke evidence are committed and a release record is published.
+This design remains approved. The preserved implementation and dependency-free test source are now committed on the feature branch, but the PowerShell 5.1 and end-to-end Windows smoke evidence is still pending. Do not describe the launcher as shipped until that evidence is committed and a release record is published.
