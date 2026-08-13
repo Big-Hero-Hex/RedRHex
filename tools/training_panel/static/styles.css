@@ -2345,6 +2345,109 @@ pre {
   width: 100%;
 }
 
+.physics-toolbar {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.physics-toolbar > label:first-child {
+  flex: 1 1 320px;
+}
+
+.physics-toolbar input[type="search"] {
+  width: 100%;
+}
+
+.physics-changed-filter {
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+}
+
+.physics-note {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.physics-category-header .status-badge {
+  margin-left: auto;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.physics-row {
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 0.7fr);
+  align-items: start;
+}
+
+.physics-row.is-overridden {
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+
+.physics-control-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.physics-input-line {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(64px, auto) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.physics-row input.physics-row-input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  text-align: right;
+}
+
+.physics-unit,
+.physics-default {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.physics-unit {
+  overflow-wrap: anywhere;
+}
+
+.physics-default {
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .physics-editor-section .reward-editor-actions {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .physics-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .physics-input-line {
+    grid-template-columns: minmax(90px, 1fr) minmax(56px, auto) auto;
+  }
+
+  .physics-category-header {
+    flex-wrap: wrap;
+  }
+}
+
 .reference-section {
   background: var(--surface);
   border: 1px solid var(--line);

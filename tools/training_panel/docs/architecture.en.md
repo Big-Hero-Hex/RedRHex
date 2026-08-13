@@ -6,7 +6,7 @@ audience: developer
 type: explanation
 status: active
 owner: panel
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="components"></a>
@@ -19,6 +19,13 @@ The local mother is a Python `ThreadingHTTPServer` with static assets and APIs b
 
 `TrainingParams` builds the established `train.py` interface and passes `--panel_overrides`. The process registry serializes Isaac/GPU work, records commands and logs, reconciles RSL-RL artifacts, and associates panel request IDs with discovered run directories. History writes are guarded by an `RLock` and atomic replacement.
 
+<a id="physics-profile-contract"></a>
+## Physics profile contract
+
+`physics.py` owns the browser-facing schema and the local sparse preset store. Its 113 fields are the independently adjustable `CalibrationProfileV1` values consumed by the current Isaac integration. API and command payloads accept only schema keys and finite bounded numbers. Cross-field validation is delegated to `CalibrationProfileV1`; coupled ground friction and passive-spring requirements are completed while materializing the candidate.
+
+The process registry writes each non-empty candidate to `logs/training_panel/process_overrides/<process>_physics.json` and forwards it with `--physics-profile`. `train.py` applies the profile through the sim2real integration and snapshots the exact applied contract under the run's `params/`. History stores preset identity, sparse values, and candidate path. Evaluation and export prefer the immutable run snapshot and reconstruct only when no snapshot exists. Empty Baseline passes no profile and removes a stale process candidate.
+
 <a id="remote-contract"></a>
 ## Remote contract
 
@@ -27,7 +34,7 @@ Remote roles and job types are defined centrally in `remote_config.py`. A heartb
 <a id="spring-contract"></a>
 ## Spring-backend contract
 
-Run creation accepts only `explicit` or `native` and records the selection in parameters and history. Training, Play, automatic video, export, deployment validation, and remote synchronization reuse the stored backend and fail closed on missing or invalid spring metadata. ForwardFast automatic recording alone adds `--initial_command forward`; interactive Play and full Direct recordings do not.
+Run creation accepts only `explicit` or `native` and records the selection in parameters and history. Training, Play, automatic video, export, deployment validation, and remote synchronization reuse the stored backend and fail closed on missing or invalid spring metadata. Play and recording explicitly add `--initial_command forward`; export does not add a motion command.
 
 <a id="security"></a>
 ## Security boundary

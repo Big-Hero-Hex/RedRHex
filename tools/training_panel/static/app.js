@@ -52,6 +52,15 @@ const state = {
   selectedTerrainPresetId: null,
   terrainDefaults: {},
   terrainSchema: [],
+  // Physics / sparse CalibrationProfileV1 presets
+  physicsPresets: [],
+  activePhysicsPresetId: "baseline",
+  selectedPhysicsPresetId: null,
+  physicsDraftPreset: null,
+  physicsSchema: [],
+  physicsDraftValues: {},
+  physicsSearch: "",
+  physicsChangedOnly: false,
   deployDefaults: null,
   deploySelectedRunId: "",
   deployData: null,
@@ -476,6 +485,7 @@ function setView(name) {
     train: ["Train", "Start a controlled RSL-RL run with the repo defaults."],
     rewards: ["Rewards", "Tune reward weights with presets and see which settings each run used."],
     terrain: ["Terrain", "Tune terrain generator, curriculum, and sub-terrain mix with presets."],
+    physics: ["Physics", "Tune validated mass, limits, contact, actuator, joint, spring, timing, and calibration quantities."],
     history: ["History", "Review runs, notes, checkpoints, TensorBoard, and playbacks."],
     deploy: ["Deploy", "Validate exported policies before Jetson ROS2 bring-up."],
     convergence: ["Convergence", "Define reward plateau detection and automatic result-video behavior."],
@@ -559,6 +569,20 @@ function terrainOverridesForTraining() {
   return preset?.values || state.activeTerrainPresetOverrides || {};
 }
 
+function physicsPresetIdForTraining() {
+  if (state.selectedPhysicsPresetId && physicsPresetById(state.selectedPhysicsPresetId)) {
+    return state.selectedPhysicsPresetId;
+  }
+  return state.activePhysicsPresetId || "baseline";
+}
+
+function physicsOverridesForTraining() {
+  const presetId = physicsPresetIdForTraining();
+  if (state.selectedPhysicsPresetId === presetId) return { ...state.physicsDraftValues };
+  const preset = physicsPresetById(presetId);
+  return { ...(preset?.values || {}) };
+}
+
 function updateTrainingPresetIndicators() {
   const rewardId = rewardPresetIdForTraining();
   const rewardPreset = rewardPresetById(rewardId) || { name: rewardId };
@@ -569,6 +593,11 @@ function updateTrainingPresetIndicators() {
   const terrainPreset = state.terrainPresets.find((preset) => preset.id === terrainId) || { name: terrainId };
   const terrainEl = $("#train-active-terrain-preset-name");
   if (terrainEl) terrainEl.textContent = terrainPreset.name || terrainId;
+
+  const physicsId = physicsPresetIdForTraining();
+  const physicsPreset = physicsPresetById(physicsId) || { name: physicsId };
+  const physicsEl = $("#train-active-physics-preset-name");
+  if (physicsEl) physicsEl.textContent = physicsPreset.name || physicsId;
 }
 
 function formData(form) {
@@ -578,10 +607,15 @@ function formData(form) {
   data.resume = Boolean(data.checkpoint);
   data.num_envs = Number(data.num_envs);
   data.max_iterations = Number(data.max_iterations);
+  data.teacher_iterations = Number(data.teacher_iterations || 1500);
+  data.distillation_iterations = Number(data.distillation_iterations || 800);
+  data.ppo_iterations = Number(data.ppo_iterations || 1500);
   data.reward_preset_id = rewardPresetIdForTraining();
   data.reward_overrides = rewardOverridesForTraining();
   data.terrain_preset_id = terrainPresetIdForTraining();
   data.terrain_overrides = terrainOverridesForTraining();
+  data.physics_preset_id = physicsPresetIdForTraining();
+  data.physics_overrides = physicsOverridesForTraining();
   if (state.rewardDraftPreset?.source_run_id && data.reward_preset_id === state.rewardDraftPreset.id) {
     data.tweak_source_run_id = state.rewardDraftPreset.source_run_id;
     data.tweak_source_label = state.rewardDraftPreset.source_label || state.rewardDraftPreset.source_run_id;
@@ -929,7 +963,18 @@ function runParamSummary(run) {
   const parts = [];
   if (run.params?.task) parts.push(`task: ${run.params.task}`);
   if (run.params?.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params?.max_iterations !== undefined) parts.push(`iters: ${run.params.max_iterations}`);
+  if (run.params.training_route && run.params.training_route !== "standard") {
+    parts.push(`route: ${run.params.training_route}`);
+  }
+  if (run.params.task) parts.push(`task: ${run.params.task}`);
+  if (run.params.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
+  if (run.params.training_route === "sensor_v2_full") {
+    parts.push(
+      `iters: ${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}`
+    );
+  } else if (run.params.max_iterations !== undefined) {
+    parts.push(`iters: ${run.params.max_iterations}`);
+  }
   parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
 }
@@ -1384,6 +1429,12 @@ function renderRuns() {
               ? `<small><span class="terrain-diff-badge">${escapeHtml(String(run.terrain_diff_count))} terrain override${run.terrain_diff_count !== 1 ? "s" : ""}</span></small>`
               : ""}
           ${progressBarHtml(run)}
+          ${run.physics_preset_id && run.physics_preset_id !== "baseline"
+            ? `<small><span class="terrain-diff-badge">physics: ${escapeHtml(run.physics_preset_id)}</span></small>`
+            : Object.keys(run.physics_overrides || run.params?.physics_overrides || {}).length > 0
+              ? `<small><span class="terrain-diff-badge">${escapeHtml(String(Object.keys(run.physics_overrides || run.params?.physics_overrides || {}).length))} physics overrides</span></small>`
+              : ""}
+          ${progressBarHtml(run)}
           ${queued ? `<small>waiting for GPU queue</small>` : ""}
           ${moving ? `<small>moving to folder...</small>` : ""}
           ${compacting ? `<small>compacting checkpoints...</small>` : ""}
@@ -1577,8 +1628,9 @@ function renderRunDetails() {
     const dur = formatDuration(run.started_at || run.created_at, runEndTime(run));
     if (dur) rows.push(["Duration", dur]);
     if (run.params?.task) rows.push(["Task", run.params.task]);
+    if (run.params?.training_route && run.params.training_route !== "standard")
+      rows.push(["Route", run.params.training_route]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
-    if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
     rows.push(["Spring Backend", runSpringBackend(run)]);
     if (run.params?.seed != null) rows.push(["Seed", run.params.seed]);
     if (run.git?.short) rows.push(["Commit", `${run.git.short}${run.git.dirty ? " (dirty)" : ""}`]);
@@ -1592,6 +1644,12 @@ function renderRunDetails() {
       if (stepsText) rows.push(["Throughput", stepsText]);
       if (typeof progress.mean_reward === "number") rows.push(["Mean reward", progress.mean_reward.toFixed(2)]);
     }
+    if (run.params?.training_route === "sensor_v2_full") {
+      rows.push([
+        "F1/F2/F3 iters",
+        `${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}`,
+      ]);
+    } else if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
     const ckptIter = checkpointIteration(run.latest_checkpoint);
     if (ckptIter !== null) rows.push(["Checkpoint", `iter ${ckptIter}`]);
     const onnxText = onnxProcessId ? "exporting" : (run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing"));
@@ -1600,6 +1658,10 @@ function renderRunDetails() {
       rows.push(["Reward preset", run.reward_preset_id]);
     if (run.terrain_preset_id && run.terrain_preset_id !== "baseline")
       rows.push(["Terrain preset", run.terrain_preset_id]);
+    const physicsPresetId = run.physics_preset_id || run.params?.physics_preset_id;
+    const physicsOverrides = run.physics_overrides || run.params?.physics_overrides || {};
+    if (physicsPresetId && physicsPresetId !== "baseline") rows.push(["Physics preset", physicsPresetId]);
+    if (Object.keys(physicsOverrides).length) rows.push(["Physics overrides", Object.keys(physicsOverrides).length]);
     if (run.convergence_detected)
       rows.push(["Converged", `iter ${run.convergence_iteration} (Δ ${run.convergence_improvement_pct?.toFixed(1)}%)`]);
     if (run.divergence_detected)
@@ -3080,19 +3142,59 @@ function applyTrainingParamsToForm(params) {
   const form = $("#train-form");
   if (!form || !params) return;
   form.elements.task.value = params.task || "Template-Redrhex-Direct-v0";
+  form.elements.training_route.value = params.training_route || "standard";
   form.elements.num_envs.value = params.num_envs ?? 4;
   form.elements.max_iterations.value = params.max_iterations ?? 1;
+  form.elements.teacher_iterations.value = params.teacher_iterations ?? 1500;
+  form.elements.distillation_iterations.value = params.distillation_iterations ?? 800;
+  form.elements.ppo_iterations.value = params.ppo_iterations ?? 1500;
   form.elements.device.value = params.device || "cuda:0";
   form.elements.spring_backend.value = params.spring_backend || "explicit";
   form.elements.seed.value = params.seed ?? "";
   form.elements.checkpoint.value = "";
   form.elements.headless.checked = params.headless !== false;
+  updateTrainingRouteForm();
+}
+
+function updateTrainingRouteForm() {
+  const form = $("#train-form");
+  if (!form) return;
+  const route = form.elements.training_route.value || "standard";
+  const isSensor = route.startsWith("sensor_v2");
+  const isPipeline = route === "sensor_v2_full";
+  if (isSensor) {
+    form.elements.task.value = "Template-Redrhex-ForwardSensorV2-Direct-v0";
+  } else if (form.elements.task.value === "Template-Redrhex-ForwardSensorV2-Direct-v0") {
+    form.elements.task.value = "Template-Redrhex-ForwardFast-Direct-v0";
+  }
+  if (isPipeline) form.elements.checkpoint.value = "";
+  document.querySelectorAll(".sensor-v2-pipeline-field").forEach((element) => {
+    element.hidden = !isPipeline;
+  });
+  const singleIterations = $("#single-stage-iterations-field");
+  if (singleIterations) singleIterations.hidden = isPipeline;
+  const checkpointField = $("#training-checkpoint-field");
+  if (checkpointField) checkpointField.hidden = isPipeline;
+  document.querySelectorAll("#train-form .preset-indicator").forEach((element) => {
+    element.hidden = isSensor && !element.querySelector("#train-active-physics-preset-name");
+  });
+  const help = $("#training-route-help");
+  if (!help) return;
+  const messages = {
+    standard: "Uses the selected reward and terrain presets.",
+    sensor_v2_full: "Runs F1 Teacher, F2 sensor distillation, then F3 student PPO in sequence. V2 uses its fixed forward reward contract; Panel reward overrides are not applied.",
+    sensor_v2_teacher: "Trains a strict teacher_v2 checkpoint. A selected checkpoint resumes the same Teacher stage.",
+    sensor_v2_distillation: "Requires a teacher_v2 source checkpoint selected from History.",
+    sensor_v2_ppo: "Requires a student_distilled_v2 source checkpoint selected from History.",
+  };
+  help.textContent = messages[route] || "";
 }
 
 async function applyTweakPayload(payload) {
   if (!payload || !payload.training_params || !payload.reward_preset) return;
   if (!state.presets.length) await loadRewardsPage();
   if (!state.terrainPresets.length) await loadTerrainPage();
+  if (!state.physicsPresets.length) await loadPhysicsPage();
   const params = payload.training_params;
   applyTrainingParamsToForm(params);
   state.rewardDraftPreset = {
@@ -3107,8 +3209,20 @@ async function applyTweakPayload(payload) {
   state.activeTerrainPresetId = params.terrain_preset_id || "baseline";
   state.selectedTerrainPresetId = state.activeTerrainPresetId;
   state.activeTerrainPresetOverrides = params.terrain_overrides || {};
+  state.physicsDraftPreset = {
+    id: `physics-${state.rewardDraftPreset.id}`,
+    name: `Physics from ${state.rewardDraftPreset.source_label || "run"}`,
+    description: `Unsaved physical overrides copied from ${state.rewardDraftPreset.source_label || "run"}.`,
+    values: { ...(params.physics_overrides || {}) },
+    built_in: false,
+    draft: true,
+  };
+  state.selectedPhysicsPresetId = state.physicsDraftPreset.id;
+  state.activePhysicsPresetId = state.physicsDraftPreset.id;
+  state.physicsDraftValues = { ...state.physicsDraftPreset.values };
   renderPresets();
   renderTerrainPresets();
+  renderPhysicsPresets();
   setView("rewards");
   selectPresetForEdit(state.rewardDraftPreset.id);
   $("#train-status").textContent = payload.message || `Loaded tweak draft from ${state.rewardDraftPreset.source_label || "run"}.`;
@@ -3139,6 +3253,14 @@ async function tweakFromRun(runId) {
 const REWARD_MAX_SCALE = 8; // denominator for bar fill percentage
 
 const REWARD_META = {
+  "v2_reward_scales.forward_progress":       { label: "Forward Progress",          category: "Simplified Forward",       sign: "positive", description: "Rewards commanded-direction progress without making raw speed the only goal." },
+  "v2_reward_scales.velocity_tracking":      { label: "Forward Tracking",          category: "Simplified Forward",       sign: "positive", description: "Rewards matching the commanded forward speed." },
+  "v2_reward_scales.axis_suppression":       { label: "Drift Suppression",          category: "Simplified Forward",       sign: "positive", description: "Penalises uncommanded lateral and yaw motion; the stored weight is a positive penalty magnitude." },
+  "v2_reward_scales.height_maintain":        { label: "Height Tracking",            category: "Simplified Forward",       sign: "positive", description: "Rewards maintaining the target body height." },
+  "v2_reward_scales.height_low_penalty":     { label: "Low Height Penalty",         category: "Simplified Forward",       sign: "positive", description: "Penalises dropping below the target body height; the stored weight is a positive penalty magnitude." },
+  "v2_reward_scales.leg_moving":             { label: "Useful Leg Motion",          category: "Simplified Forward",       sign: "positive", description: "Rewards leg rotation gated by command and forward progress." },
+  "v2_reward_scales.stall_penalty":          { label: "Stall Penalty",              category: "Simplified Forward",       sign: "negative", description: "Penalises commanded motion with almost no progress." },
+  "v2_reward_scales.energy_per_distance":    { label: "Energy Per Distance",        category: "Simplified Forward",       sign: "positive", description: "Penalises energy spent per positive commanded-direction distance; the stored weight is a positive penalty magnitude." },
   rew_scale_forward_vel:       { label: "Forward Velocity",          category: "Locomotion Goals",      sign: "positive", description: "Rewards moving in the commanded direction. Higher = robot pushes harder to move but may sacrifice stability." },
   rew_scale_vel_tracking:      { label: "Velocity Tracking (Linear)", category: "Locomotion Goals",      sign: "positive", description: "Rewards precisely matching the commanded XY speed (exponential loss). Higher = tighter speed following." },
   rew_scale_ang_vel_tracking:  { label: "Velocity Tracking (Turn)",  category: "Locomotion Goals",      sign: "positive", description: "Rewards matching the commanded turn rate. Higher = robot follows rotation commands more closely." },
@@ -3166,7 +3288,7 @@ const REWARD_META = {
 };
 
 const REWARD_CATEGORY_ORDER = [
-  "Locomotion Goals", "Rotation Mode", "Leg Motion",
+  "Simplified Forward", "Locomotion Goals", "Rotation Mode", "Leg Motion",
   "Stability Penalties", "Gait Coordination", "ABAD Control",
   "Survival & Smoothness", "Collision",
 ];
@@ -3794,6 +3916,286 @@ async function createNewTerrainPreset() {
   selectTerrainPresetForEdit(preset.id);
   await loadActivity();
   setTerrainStatus(`Created terrain preset ${preset.name}.`);
+}
+
+// ============================================================
+// Physics & sparse CalibrationProfileV1 presets
+// ============================================================
+
+function setPhysicsStatus(message) {
+  const status = $("#physics-status");
+  if (status) status.textContent = message;
+}
+
+function physicsPresetById(presetId) {
+  if (state.physicsDraftPreset?.id === presetId) return state.physicsDraftPreset;
+  return state.physicsPresets.find((preset) => preset.id === presetId);
+}
+
+function physicsDefaultText(meta) {
+  if (meta.default === null || meta.default === undefined) return "repository / USD default";
+  return `${meta.default}${meta.unit ? ` ${meta.unit}` : ""}`;
+}
+
+function updatePhysicsChangeSummary() {
+  const count = Object.keys(state.physicsDraftValues || {}).length;
+  const summary = $("#physics-change-summary");
+  if (summary) summary.textContent = `${count} override${count === 1 ? "" : "s"}`;
+}
+
+function renderPhysicsPresets() {
+  const list = $("#physics-preset-list");
+  if (!list) return;
+  const presets = state.physicsDraftPreset
+    ? [state.physicsDraftPreset, ...state.physicsPresets.filter((preset) => preset.id !== state.physicsDraftPreset.id)]
+    : state.physicsPresets;
+  list.innerHTML = presets.map((preset) => `
+    <div class="preset-card ${preset.id === state.selectedPhysicsPresetId ? "selected" : ""} ${preset.draft ? "draft-preset" : ""}"
+         data-physics-preset-id="${escapeHtml(preset.id)}"
+         title="${escapeHtml(preset.description || "")}">
+      <div class="preset-card-name">${escapeHtml(preset.name)}${preset.draft ? ` <span class="draft-badge">Draft</span>` : ""}</div>
+      <div class="preset-card-desc">${escapeHtml(preset.description || "No description")}</div>
+      <small>${Object.keys(preset.values || {}).length} override${Object.keys(preset.values || {}).length === 1 ? "" : "s"}</small>
+    </div>`).join("");
+  list.querySelectorAll("[data-physics-preset-id]").forEach((card) => {
+    card.addEventListener("click", () => selectPhysicsPresetForEdit(card.dataset.physicsPresetId));
+  });
+  updateTrainingPresetIndicators();
+}
+
+function renderPhysicsEditor() {
+  const preset = physicsPresetById(state.selectedPhysicsPresetId);
+  const container = $("#physics-categories");
+  if (!container || !preset) {
+    if (container) container.innerHTML = "";
+    updatePhysicsChangeSummary();
+    return;
+  }
+  const search = state.physicsSearch.trim().toLowerCase();
+  const grouped = new Map();
+  for (const meta of state.physicsSchema) {
+    const overridden = Object.hasOwn(state.physicsDraftValues, meta.key);
+    if (state.physicsChangedOnly && !overridden) continue;
+    const haystack = `${meta.label} ${meta.key} ${meta.category} ${meta.description} ${meta.unit}`.toLowerCase();
+    if (search && !haystack.includes(search)) continue;
+    if (!grouped.has(meta.category)) grouped.set(meta.category, []);
+    grouped.get(meta.category).push({ meta, overridden });
+  }
+  const editable = !preset.built_in;
+  container.innerHTML = [...grouped.entries()].map(([category, fields]) => `
+    <div class="reward-category physics-category">
+      <div class="reward-category-header physics-category-header" data-physics-category-header>
+        <span class="category-arrow">▼</span>
+        <span>${escapeHtml(category)}</span>
+        <span class="status-badge muted-pill">${fields.filter((item) => item.overridden).length}/${fields.length} changed</span>
+      </div>
+      <div class="reward-category-body">
+        ${fields.map(({ meta, overridden }) => {
+          const value = overridden ? state.physicsDraftValues[meta.key] : "";
+          const min = meta.min === null || meta.min === undefined ? "" : `min="${escapeHtml(meta.min)}"`;
+          const max = meta.max === null || meta.max === undefined ? "" : `max="${escapeHtml(meta.max)}"`;
+          return `<div class="reward-row physics-row ${overridden ? "is-overridden" : ""}">
+            <div class="reward-row-meta physics-row-meta">
+              <div class="reward-row-label">${escapeHtml(meta.label)}</div>
+              <div class="reward-row-desc">${escapeHtml(meta.description || "")}</div>
+              <div class="reward-row-varname">${escapeHtml(meta.key)}</div>
+            </div>
+            <div class="physics-control-cell">
+              <div class="physics-input-line">
+                <input class="physics-row-input" data-physics-key="${escapeHtml(meta.key)}" type="number"
+                  step="${escapeHtml(meta.step ?? 0.01)}" ${min} ${max}
+                  value="${escapeHtml(value)}" placeholder="Inherit" ${editable ? "" : "disabled"} />
+                ${meta.unit ? `<span class="physics-unit">${escapeHtml(meta.unit)}</span>` : ""}
+                <button type="button" class="ghost-button small-button physics-reset" data-physics-reset="${escapeHtml(meta.key)}"
+                  ${editable && overridden ? "" : "disabled"}>Reset</button>
+              </div>
+              <small class="physics-default">Inherited value: ${escapeHtml(physicsDefaultText(meta))}</small>
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`).join("");
+  if (!grouped.size) {
+    container.innerHTML = `<article class="empty-panel">No physical quantities match this filter.</article>`;
+  }
+  container.querySelectorAll("[data-physics-category-header]").forEach((header) => {
+    header.addEventListener("click", () => togglePhysicsCategory(header));
+  });
+  container.querySelectorAll("[data-physics-key]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const key = input.dataset.physicsKey;
+      if (!key) return;
+      if (input.value === "") {
+        delete state.physicsDraftValues[key];
+      } else {
+        const value = Number(input.value);
+        if (Number.isFinite(value)) state.physicsDraftValues[key] = value;
+      }
+      input.closest(".physics-row")?.classList.toggle("is-overridden", Object.hasOwn(state.physicsDraftValues, key));
+      const reset = input.closest(".physics-control-cell")?.querySelector("[data-physics-reset]");
+      if (reset) reset.disabled = !Object.hasOwn(state.physicsDraftValues, key);
+      const category = input.closest(".physics-category");
+      const categoryBadge = category?.querySelector(".physics-category-header .status-badge");
+      if (categoryBadge) {
+        const changed = category.querySelectorAll(".physics-row.is-overridden").length;
+        const total = category.querySelectorAll(".physics-row").length;
+        categoryBadge.textContent = `${changed}/${total} changed`;
+      }
+      updatePhysicsChangeSummary();
+      setPhysicsStatus("Unsaved overrides are selected for the next training run; save to keep this preset.");
+    });
+  });
+  container.querySelectorAll("[data-physics-reset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      delete state.physicsDraftValues[button.dataset.physicsReset];
+      renderPhysicsEditor();
+      setPhysicsStatus("Override reset to the inherited value. Save to keep this preset.");
+    });
+  });
+  updatePhysicsChangeSummary();
+  updateCategoryToggleButton("#physics-categories", "#physics-preset-collapse-all-btn");
+}
+
+function togglePhysicsCategory(header) {
+  header.classList.toggle("collapsed");
+  header.nextElementSibling?.classList.toggle("collapsed");
+  updateCategoryToggleButton("#physics-categories", "#physics-preset-collapse-all-btn");
+}
+
+function togglePhysicsCategoriesCollapsed() {
+  toggleCategoryGroupCollapsed("#physics-categories", "#physics-preset-collapse-all-btn");
+}
+
+function selectPhysicsPresetForEdit(presetId) {
+  const preset = physicsPresetById(presetId);
+  if (!preset) return;
+  state.selectedPhysicsPresetId = presetId;
+  state.physicsDraftValues = { ...(preset.values || {}) };
+  renderPhysicsPresets();
+  $("#physics-editor-title").textContent = preset.name;
+  $("#physics-editor-title").hidden = false;
+  $("#physics-editor-desc").textContent = preset.description || "";
+  $("#physics-editor-desc").hidden = !preset.description;
+  $("#physics-profile-name").value = preset.name || "";
+  $("#physics-profile-name").disabled = Boolean(preset.built_in);
+  $("#physics-profile-description").value = preset.description || "";
+  $("#physics-profile-description").disabled = Boolean(preset.built_in);
+  $("#physics-preset-builtin-badge").hidden = !preset.built_in && !preset.draft;
+  $("#physics-preset-builtin-badge").textContent = preset.draft ? "Unsaved Draft" : "Built-in";
+  $("#physics-preset-collapse-all-btn").disabled = false;
+  $("#physics-preset-duplicate-btn").disabled = false;
+  $("#physics-preset-delete-btn").disabled = Boolean(preset.built_in) && !preset.draft;
+  $("#physics-preset-delete-btn").textContent = preset.draft ? "Discard Draft" : "Delete";
+  $("#physics-preset-save-btn").disabled = Boolean(preset.built_in) && !preset.draft;
+  $("#physics-preset-save-btn").textContent = preset.draft ? "Save as Preset" : "Save Changes";
+  $("#physics-search").disabled = false;
+  $("#physics-changed-only").disabled = false;
+  renderPhysicsEditor();
+  updateTrainingPresetIndicators();
+}
+
+async function loadPhysicsPage() {
+  try {
+    const [catalog, presets] = await Promise.all([api("/api/physics"), api("/api/physics/presets")]);
+    state.physicsSchema = catalog.field_schema || [];
+    state.physicsPresets = presets.presets || [];
+    state.activePhysicsPresetId = presets.active_preset_id || "baseline";
+    const selected = physicsPresetById(state.selectedPhysicsPresetId)
+      ? state.selectedPhysicsPresetId
+      : state.activePhysicsPresetId;
+    renderPhysicsPresets();
+    selectPhysicsPresetForEdit(selected);
+    setPhysicsStatus(`${catalog.field_count || state.physicsSchema.length} validated physical quantities available.`);
+  } catch (error) {
+    state.physicsSchema = [];
+    state.physicsPresets = [];
+    $("#physics-preset-list").innerHTML = `<article class="empty-panel">Physics API is unavailable. Restart the local panel so its backend reloads this feature.</article>`;
+    $("#physics-categories").innerHTML = "";
+    setPhysicsStatus(error.message);
+  }
+}
+
+async function duplicatePhysicsPreset(sourcePresetId) {
+  const source = physicsPresetById(sourcePresetId);
+  if (!source) return;
+  const name = window.prompt(`Name for the new physics preset (copy of ${source.name}):`, `${source.name} (copy)`);
+  if (!name) return;
+  const values = sourcePresetId === state.selectedPhysicsPresetId ? state.physicsDraftValues : source.values;
+  const created = await api("/api/physics/presets", {
+    method: "POST",
+    body: JSON.stringify({ name, description: source.description || "", values: values || {} }),
+  });
+  await loadPhysicsPage();
+  selectPhysicsPresetForEdit(created.id);
+  setPhysicsStatus(`Created physics preset ${created.name}.`);
+}
+
+async function createNewPhysicsPreset() {
+  const name = window.prompt("New physics preset name:");
+  if (!name?.trim()) return;
+  const created = await api("/api/physics/presets", {
+    method: "POST",
+    body: JSON.stringify({ name: name.trim(), description: "", values: {} }),
+  });
+  await loadPhysicsPage();
+  selectPhysicsPresetForEdit(created.id);
+  setPhysicsStatus(`Created physics preset ${created.name}.`);
+}
+
+async function savePhysicsPresetChanges(presetId) {
+  const preset = physicsPresetById(presetId);
+  if (!preset || preset.built_in) return;
+  if (preset.draft) {
+    const created = await api("/api/physics/presets", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("#physics-profile-name").value || preset.name,
+        description: $("#physics-profile-description").value || "",
+        values: state.physicsDraftValues,
+      }),
+    });
+    state.physicsDraftPreset = null;
+    state.selectedPhysicsPresetId = created.id;
+    await loadPhysicsPage();
+    selectPhysicsPresetForEdit(created.id);
+    await loadActivity();
+    setPhysicsStatus("Tweak draft saved as a physics preset.");
+    return;
+  }
+  const updated = await api(`/api/physics/presets/${encodeURIComponent(presetId)}/update`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: $("#physics-profile-name").value,
+      description: $("#physics-profile-description").value,
+      values: state.physicsDraftValues,
+    }),
+  });
+  await loadPhysicsPage();
+  selectPhysicsPresetForEdit(updated.id);
+  await loadActivity();
+  setPhysicsStatus("Physics preset saved and selected for the next training run.");
+}
+
+async function deletePhysicsPreset(presetId) {
+  const preset = physicsPresetById(presetId);
+  if (!preset || preset.built_in) return;
+  if (preset.draft) {
+    state.physicsDraftPreset = null;
+    if (state.activePhysicsPresetId === presetId) state.activePhysicsPresetId = "baseline";
+    state.selectedPhysicsPresetId = state.activePhysicsPresetId || "baseline";
+    selectPhysicsPresetForEdit(state.selectedPhysicsPresetId);
+    setPhysicsStatus("Physics tweak draft discarded.");
+    return;
+  }
+  if (!window.confirm(`Delete physics preset "${preset.name}"? This cannot be undone.`)) return;
+  await api(`/api/physics/presets/${encodeURIComponent(presetId)}/delete`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  state.selectedPhysicsPresetId = null;
+  await loadPhysicsPage();
+  await loadActivity();
+  setPhysicsStatus(`Deleted physics preset ${preset.name}.`);
 }
 
 // Run detail: reward config panel
@@ -4614,7 +5016,7 @@ async function loadActivity() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadActivity(), loadDeployDefaults()]);
+  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadPhysicsPage(), loadActivity(), loadDeployDefaults()]);
   await loadRuns();
   if (state.selectedRun) setDebugTarget({ type: "run", id: state.selectedRun.id });
 }
@@ -4887,6 +5289,25 @@ $("#terrain-preset-save-btn").addEventListener("click", () => {
   if (state.selectedTerrainPresetId) saveTerrainPresetChanges(state.selectedTerrainPresetId).catch(handleActionError);
 });
 $("#terrain-preset-collapse-all-btn").addEventListener("click", toggleTerrainCategoriesCollapsed);
+// Physics page event listeners
+$("#physics-preset-duplicate-btn").addEventListener("click", () => {
+  if (state.selectedPhysicsPresetId) duplicatePhysicsPreset(state.selectedPhysicsPresetId).catch(handleActionError);
+});
+$("#physics-preset-delete-btn").addEventListener("click", () => {
+  if (state.selectedPhysicsPresetId) deletePhysicsPreset(state.selectedPhysicsPresetId).catch(handleActionError);
+});
+$("#physics-preset-save-btn").addEventListener("click", () => {
+  if (state.selectedPhysicsPresetId) savePhysicsPresetChanges(state.selectedPhysicsPresetId).catch(handleActionError);
+});
+$("#physics-preset-collapse-all-btn").addEventListener("click", togglePhysicsCategoriesCollapsed);
+$("#physics-search").addEventListener("input", (event) => {
+  state.physicsSearch = event.target.value || "";
+  renderPhysicsEditor();
+});
+$("#physics-changed-only").addEventListener("change", (event) => {
+  state.physicsChangedOnly = event.target.checked;
+  renderPhysicsEditor();
+});
 // Search / filter / sort toolbar
 const runSearch = $("#run-search");
 const statusFilterEl = $("#status-filter");
@@ -4897,6 +5318,7 @@ if (sortRunsEl) sortRunsEl.addEventListener("change", () => { state.sortKey = so
 
 $("#new-preset-btn").addEventListener("click", () => createNewPreset().catch(handleActionError));
 $("#new-terrain-preset-btn").addEventListener("click", () => createNewTerrainPreset().catch(handleActionError));
+$("#new-physics-preset-btn").addEventListener("click", () => createNewPhysicsPreset().catch(handleActionError));
 const newFolderBtn = $("#new-folder-btn");
 if (newFolderBtn) newFolderBtn.addEventListener("click", () => promptCreateFolder().catch(handleActionError));
 const folderSelect = $("#run-folder-select");
@@ -4913,6 +5335,10 @@ const trainChangePreset = $("#train-change-preset");
 if (trainChangePreset) trainChangePreset.addEventListener("click", () => setView("rewards"));
 const trainChangeTerrainPreset = $("#train-change-terrain-preset");
 if (trainChangeTerrainPreset) trainChangeTerrainPreset.addEventListener("click", () => setView("terrain"));
+const trainChangePhysicsPreset = $("#train-change-physics-preset");
+if (trainChangePhysicsPreset) trainChangePhysicsPreset.addEventListener("click", () => setView("physics"));
+const trainingRoute = $("#training-route");
+if (trainingRoute) trainingRoute.addEventListener("change", updateTrainingRouteForm);
 const activityRefresh = $("#activity-refresh");
 if (activityRefresh) activityRefresh.addEventListener("click", () => loadActivity().catch(handleActionError));
 document.addEventListener("click", (event) => {
@@ -4999,6 +5425,7 @@ renderRunDetails();
 updateBulkToolbar();
 startCurvesPolling();
 setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
+updateTrainingRouteForm();
 refreshAll()
   .catch((error) => setStatusTone(error.message, "error"))
   .then(() => applyHashRoute().catch(handleActionError));

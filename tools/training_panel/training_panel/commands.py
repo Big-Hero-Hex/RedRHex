@@ -8,11 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from .config import PanelPaths
+from .physics import normalize_physics_values
 from .reward_overrides import normalize_reward_overrides
 
 
 DEFAULT_TASK = "Template-Redrhex-Direct-v0"
 FORWARD_FAST_TASK = "Template-Redrhex-ForwardFast-Direct-v0"
+SENSOR_V2_TASK = "Template-Redrhex-ForwardSensorV2-Direct-v0"
+DEFAULT_TRAINING_TASK = FORWARD_FAST_TASK
+DEFAULT_REWARD_PRESET_ID = "speed-focus"
 DEFAULT_VIDEO_PRESET = "high"
 DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
@@ -120,7 +124,8 @@ def _normalize_override_value(value: object) -> object:
 
 @dataclass
 class TrainingParams:
-    task: str = DEFAULT_TASK
+    training_route: str = "standard"
+    task: str = DEFAULT_TRAINING_TASK
     num_envs: int = 4
     max_iterations: int = 1
     device: str = "cuda:0"
@@ -129,10 +134,12 @@ class TrainingParams:
     seed: int | None = None
     resume: bool = False
     checkpoint: str | None = None
-    reward_preset_id: str = "baseline"
+    reward_preset_id: str = DEFAULT_REWARD_PRESET_ID
     reward_overrides: dict = field(default_factory=dict)
     terrain_preset_id: str = "baseline"
     terrain_overrides: dict = field(default_factory=dict)
+    physics_preset_id: str = "baseline"
+    physics_overrides: dict = field(default_factory=dict)
     tweak_source_run_id: str | None = None
     tweak_source_label: str | None = None
     requester_id: str | None = None
@@ -140,13 +147,20 @@ class TrainingParams:
     display_name: str | None = None
     folder: str | None = None
     client_request_id: str | None = None
+    teacher_iterations: int = 1500
+    distillation_iterations: int = 800
+    ppo_iterations: int = 1500
 
     @classmethod
     def from_dict(cls, data: dict) -> "TrainingParams":
         raw_overrides = data.get("reward_overrides") or {}
         raw_terrain_overrides = data.get("terrain_overrides") or {}
+        raw_physics_overrides = data.get("physics_overrides") or {}
+        training_route = str(data.get("training_route") or "standard")
+        task = SENSOR_V2_TASK if training_route.startswith("sensor_v2") else str(data.get("task") or DEFAULT_TRAINING_TASK)
         params = cls(
-            task=str(data.get("task") or DEFAULT_TASK),
+            training_route=training_route,
+            task=task,
             num_envs=int(data.get("num_envs") or 4),
             max_iterations=int(data.get("max_iterations") or 1),
             device=str(data.get("device") or "cuda:0"),
@@ -157,10 +171,12 @@ class TrainingParams:
             seed=int(data["seed"]) if data.get("seed") not in (None, "") else random.randint(0, 2 ** 31 - 1),
             resume=bool(data.get("resume", False)),
             checkpoint=str(data["checkpoint"]) if data.get("checkpoint") else None,
-            reward_preset_id=str(data.get("reward_preset_id") or "baseline"),
+            reward_preset_id=str(data.get("reward_preset_id") or DEFAULT_REWARD_PRESET_ID),
             reward_overrides=normalize_reward_overrides(raw_overrides),
             terrain_preset_id=str(data.get("terrain_preset_id") or "baseline"),
             terrain_overrides={str(k): _normalize_override_value(v) for k, v in raw_terrain_overrides.items()},
+            physics_preset_id=str(data.get("physics_preset_id") or "baseline"),
+            physics_overrides=normalize_physics_values(raw_physics_overrides),
             tweak_source_run_id=str(data["tweak_source_run_id"]) if data.get("tweak_source_run_id") else None,
             tweak_source_label=str(data["tweak_source_label"]) if data.get("tweak_source_label") else None,
             requester_id=str(data["requester_id"]) if data.get("requester_id") else None,
@@ -168,22 +184,36 @@ class TrainingParams:
             display_name=str(data["display_name"]).strip() if data.get("display_name") else None,
             folder=str(data["folder"]).strip() if data.get("folder") else None,
             client_request_id=str(data["client_request_id"]).strip() if data.get("client_request_id") else None,
+            teacher_iterations=int(data.get("teacher_iterations") or 1500),
+            distillation_iterations=int(data.get("distillation_iterations") or 800),
+            ppo_iterations=int(data.get("ppo_iterations") or 1500),
         )
         params.validate()
         return params
 
     def validate(self) -> None:
+        routes = {"standard", "sensor_v2_full", "sensor_v2_teacher", "sensor_v2_distillation", "sensor_v2_ppo"}
+        if self.training_route not in routes:
+            raise ValueError(f"training_route must be one of {sorted(routes)}")
         if not self.task:
             raise ValueError("task is required")
         if self.num_envs < 1 or self.num_envs > 8192:
             raise ValueError("num_envs must be between 1 and 8192")
         if self.max_iterations < 1 or self.max_iterations > 100000:
             raise ValueError("max_iterations must be between 1 and 100000")
+        for name in ("teacher_iterations", "distillation_iterations", "ppo_iterations"):
+            value = getattr(self, name)
+            if value < 1 or value > 100000:
+                raise ValueError(f"{name} must be between 1 and 100000")
         if not (self.device == "cpu" or self.device.startswith("cuda")):
             raise ValueError("device must be cpu or cuda[:index]")
         validate_spring_backend(self.spring_backend)
         if self.resume and not self.checkpoint:
             raise ValueError("checkpoint is required when resume is enabled")
+        if self.training_route in {"sensor_v2_distillation", "sensor_v2_ppo"} and not self.checkpoint:
+            raise ValueError("the selected Sensor V2 stage requires a source checkpoint")
+        if self.training_route == "sensor_v2_full" and self.checkpoint:
+            raise ValueError("a new full Sensor V2 pipeline cannot also use a resume checkpoint")
         if self.display_name and len(self.display_name) > 120:
             raise ValueError("display_name must be 120 characters or fewer")
         if self.folder and len(self.folder) > 120:
@@ -195,7 +225,34 @@ class TrainingParams:
         return asdict(self)
 
 
-def training_argv(params: TrainingParams) -> list[str]:
+def training_argv(params: TrainingParams, *, physics_profile_file: str | None = None) -> list[str]:
+    if params.training_route == "sensor_v2_full":
+        argv = [
+            "scripts/rsl_rl/train_sensor_v2_pipeline.py",
+            "--num_envs",
+            str(params.num_envs),
+            "--teacher_iterations",
+            str(params.teacher_iterations),
+            "--distillation_iterations",
+            str(params.distillation_iterations),
+            "--ppo_iterations",
+            str(params.ppo_iterations),
+            "--device",
+            params.device,
+        ]
+        if params.seed is not None:
+            argv.extend(["--seed", str(params.seed)])
+        if params.headless:
+            argv.append("--headless")
+        if physics_profile_file:
+            argv.extend(["--physics-profile", physics_profile_file])
+        return argv
+
+    sensor_agents = {
+        "sensor_v2_teacher": "rsl_rl_teacher_v2_cfg_entry_point",
+        "sensor_v2_distillation": "rsl_rl_distillation_v2_cfg_entry_point",
+        "sensor_v2_ppo": "rsl_rl_ppo_v2_cfg_entry_point",
+    }
     argv = [
         "scripts/rsl_rl/train.py",
         "--task",
@@ -209,16 +266,34 @@ def training_argv(params: TrainingParams) -> list[str]:
         "--spring-backend",
         params.spring_backend,
     ]
-    # train.py only applies active_*_override.json when this flag is present.
-    argv.append("--panel_overrides")
+    if params.training_route == "standard":
+        # train.py only applies active_*_override.json when this flag is present.
+        argv.append("--panel_overrides")
+    else:
+        argv.extend(["--agent", sensor_agents[params.training_route]])
     if params.headless:
         argv.append("--headless")
     if params.seed is not None:
         argv.extend(["--seed", str(params.seed)])
-    if params.resume:
+    if physics_profile_file:
+        argv.extend(["--physics-profile", physics_profile_file])
+    if params.training_route == "sensor_v2_distillation":
+        argv.extend(["--teacher_checkpoint", params.checkpoint or ""])
+    elif params.training_route == "sensor_v2_ppo":
+        argv.extend(["--student_checkpoint", params.checkpoint or ""])
+    elif params.resume:
         argv.append("--resume")
         argv.extend(["--checkpoint", params.checkpoint or ""])
     return argv
+
+
+def agent_for_training_route(route: str | None) -> str | None:
+    return {
+        "sensor_v2_full": "rsl_rl_ppo_v2_cfg_entry_point",
+        "sensor_v2_teacher": "rsl_rl_teacher_v2_cfg_entry_point",
+        "sensor_v2_distillation": "rsl_rl_distillation_v2_cfg_entry_point",
+        "sensor_v2_ppo": "rsl_rl_ppo_v2_cfg_entry_point",
+    }.get(str(route or ""))
 
 
 def play_argv(
@@ -237,10 +312,12 @@ def play_argv(
     rendering_mode: str | None = None,
     initial_command: str | None = None,
     terrain_override_file: str | None = None,
+    physics_profile_file: str | None = None,
     camera_follow_robot: bool = False,
     camera_eye: tuple[float, float, float] | None = None,
     camera_lookat: tuple[float, float, float] | None = None,
     export_policy_only: bool = False,
+    agent: str | None = None,
 ) -> list[str]:
     validate_spring_backend(spring_backend)
     argv = [
@@ -254,6 +331,8 @@ def play_argv(
         "--spring-backend",
         spring_backend,
     ]
+    if agent:
+        argv.extend(["--agent", agent])
     if headless:
         argv.append("--headless")
     if video:
@@ -272,6 +351,8 @@ def play_argv(
         argv.extend(["--initial_command", initial_command])
     if terrain_override_file:
         argv.extend(["--terrain_override_file", terrain_override_file])
+    if physics_profile_file:
+        argv.extend(["--physics-profile", physics_profile_file])
     if camera_follow_robot:
         eye = camera_eye or DEFAULT_FOLLOW_CAMERA_EYE
         lookat = camera_lookat or DEFAULT_FOLLOW_CAMERA_LOOKAT
@@ -291,6 +372,8 @@ def export_onnx_argv(
     device: str = "cuda:0",
     *,
     spring_backend: str = "explicit",
+    agent: str | None = None,
+    physics_profile_file: str | None = None,
 ) -> list[str]:
     return play_argv(
         checkpoint=checkpoint,
@@ -300,6 +383,8 @@ def export_onnx_argv(
         spring_backend=spring_backend,
         headless=True,
         export_policy_only=True,
+        agent=agent,
+        physics_profile_file=physics_profile_file,
     )
 
 

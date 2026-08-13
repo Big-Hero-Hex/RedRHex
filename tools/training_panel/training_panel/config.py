@@ -78,6 +78,10 @@ class PanelPaths:
         return self.panel_log_root / "convergence_config.json"
 
     @property
+    def physics_preset_file(self) -> Path:
+        return self.panel_log_root / "physics_presets.json"
+
+    @property
     def rsl_rl_log_root(self) -> Path:
         return self.repo_root / "logs" / "rsl_rl" / "redrhex_wheg"
 
@@ -88,6 +92,9 @@ class PanelPaths:
     @property
     def terrain_override_file(self) -> Path:
         return self.repo_root / "tools" / "training_panel" / "active_terrain_override.json"
+
+    def physics_profile_file(self, process_id: str) -> Path:
+        return self.process_override_dir / f"{process_id}_physics.json"
 
     def ensure_dirs(self) -> None:
         self.panel_log_root.mkdir(parents=True, exist_ok=True)

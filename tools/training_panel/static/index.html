@@ -19,6 +19,7 @@
         <button class="nav-button active" data-view="train">Train</button>
         <button class="nav-button" data-view="rewards">Rewards</button>
         <button class="nav-button" data-view="terrain">Terrain</button>
+        <button class="nav-button" data-view="physics">Physics</button>
         <button class="nav-button" data-view="history">History</button>
         <button class="nav-button" data-view="deploy">Deploy</button>
         <button class="nav-button" data-view="convergence">Convergence</button>
@@ -53,8 +54,18 @@
       <section id="train" class="view active">
         <form id="train-form" class="panel-grid">
           <label>
+            Training Route
+            <select name="training_route" id="training-route">
+              <option value="standard">Forward PPO (standard)</option>
+              <option value="sensor_v2_full">Sensor V2 — Full Teacher → Student</option>
+              <option value="sensor_v2_teacher">Sensor V2 — F1 Teacher only</option>
+              <option value="sensor_v2_distillation">Sensor V2 — F2 Distillation only</option>
+              <option value="sensor_v2_ppo">Sensor V2 — F3 Student PPO only</option>
+            </select>
+          </label>
+          <label>
             Task
-            <input name="task" value="Template-Redrhex-Direct-v0" />
+            <input name="task" value="Template-Redrhex-ForwardFast-Direct-v0" />
           </label>
           <label>
             Run Name
@@ -64,9 +75,21 @@
             Environments
             <input name="num_envs" type="number" min="1" max="8192" value="4" />
           </label>
-          <label>
+          <label id="single-stage-iterations-field">
             Iterations
             <input name="max_iterations" type="number" min="1" value="1" />
+          </label>
+          <label class="sensor-v2-pipeline-field" hidden>
+            F1 Teacher Iterations
+            <input name="teacher_iterations" type="number" min="1" value="1500" />
+          </label>
+          <label class="sensor-v2-pipeline-field" hidden>
+            F2 Distillation Iterations
+            <input name="distillation_iterations" type="number" min="1" value="800" />
+          </label>
+          <label class="sensor-v2-pipeline-field" hidden>
+            F3 Student PPO Iterations
+            <input name="ppo_iterations" type="number" min="1" value="1500" />
           </label>
           <label>
             Device
@@ -83,8 +106,8 @@
             Seed
             <input name="seed" type="number" placeholder="optional" />
           </label>
-          <label>
-            Resume Checkpoint
+          <label id="training-checkpoint-field">
+            Source / Resume Checkpoint
             <input name="checkpoint" readonly placeholder="Select Resume on a history run" />
           </label>
           <label class="check-row">
@@ -108,6 +131,12 @@
             <strong id="train-active-terrain-preset-name">baseline</strong>
             <button type="button" id="train-change-terrain-preset" class="ghost-button small-button">Change</button>
           </div>
+          <div class="preset-indicator">
+            <span>Physics Preset:</span>
+            <strong id="train-active-physics-preset-name">baseline</strong>
+            <button type="button" id="train-change-physics-preset" class="ghost-button small-button">Change</button>
+          </div>
+          <p id="training-route-help" class="muted-copy"></p>
         </form>
         <div id="gpu-lock-status" class="status-line gpu-lock-status" hidden></div>
         <div id="train-status" class="status-line"></div>
@@ -227,6 +256,63 @@
             </div>
           </div>
         </details>
+      </section>
+
+      <section id="physics" class="view">
+        <div class="preset-section">
+          <div class="preset-section-head">
+            <h2>Physics Presets</h2>
+            <p class="muted-copy">
+              Build a sparse, validated physical profile for one training lineage. Blank fields inherit the
+              repository or USD defaults. Baseline is read-only; duplicate it before changing values.
+            </p>
+          </div>
+          <div id="physics-preset-list" class="preset-list"></div>
+          <div class="form-actions compact-actions">
+            <button id="new-physics-preset-btn" type="button" class="ghost-button small-button">+ New Preset</button>
+          </div>
+          <div id="physics-status" class="status-line"></div>
+        </div>
+
+        <div class="reward-editor-section physics-editor-section">
+          <div class="reward-editor-header">
+            <div class="profile-meta-editor">
+              <h2 id="physics-editor-title" hidden>Select a preset above</h2>
+              <p id="physics-editor-desc" class="muted-copy" hidden></p>
+              <label>
+                Name
+                <input id="physics-profile-name" placeholder="Select a preset above" disabled />
+              </label>
+              <label>
+                Description
+                <textarea id="physics-profile-description" rows="2" placeholder="Describe the measurement or experiment this profile represents." disabled></textarea>
+              </label>
+            </div>
+            <div class="reward-editor-actions form-actions">
+              <span id="physics-preset-builtin-badge" class="status-badge muted-pill" hidden>Built-in</span>
+              <button id="physics-preset-collapse-all-btn" type="button" class="ghost-button" disabled>Collapse All</button>
+              <button id="physics-preset-duplicate-btn" type="button" class="ghost-button" disabled>Duplicate</button>
+              <button id="physics-preset-delete-btn" type="button" class="danger-button" disabled>Delete</button>
+              <button id="physics-preset-save-btn" type="button" class="primary-button" disabled>Save Changes</button>
+            </div>
+          </div>
+          <div class="physics-toolbar">
+            <label>
+              Search quantities
+              <input id="physics-search" type="search" placeholder="mass, friction, right front…" autocomplete="off" disabled />
+            </label>
+            <label class="check-row physics-changed-filter">
+              <input id="physics-changed-only" type="checkbox" disabled />
+              Show changed only
+            </label>
+            <span id="physics-change-summary" class="status-badge muted-pill">0 overrides</span>
+          </div>
+          <div class="safety-note physics-note">
+            These values affect simulation and policy behavior, not hardware safety authorization. The exact
+            CalibrationProfileV1 is snapshotted with each run and reused for play, video, and export.
+          </div>
+          <div id="physics-categories" class="reward-categories physics-categories"></div>
+        </div>
       </section>
 
       <section id="history" class="view">

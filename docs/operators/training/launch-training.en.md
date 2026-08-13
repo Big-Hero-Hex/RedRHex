@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="choose-task"></a>
@@ -16,6 +16,8 @@ last_reviewed: 2026-08-07
 - `Template-Redrhex-ForwardFast-Direct-v0` is a bounded forward-only profile for faster iteration.
 
 Use ordinary PPO unless you intentionally select a teacher or distillation agent configuration.
+
+For the bounded straight-gait experiment, use the exact task ID `Template-Redrhex-ForwardFast-Direct-v0`; it is now the Training Panel default. The source profile and the panel's active `Straight Forward Focus` preset use the same forward-tracking weights. They target the active simplified reward dictionary; the older flat `rew_scale_*` fields do not tune the simplified reward path.
 
 <a id="smoke-run"></a>
 ## Run a smoke training
@@ -47,6 +49,17 @@ Increase environment count and iterations only after the smoke run passes. Value
 ```
 
 Manual runs ignore panel-generated reward and terrain override files by default. Add `--panel_overrides` only when the run is intentionally tied to those files.
+
+For a ForwardFast run, start with a one-iteration smoke test, then use the profile's 1,500-iteration training horizon after the smoke test passes:
+
+```bash
+"$ISAACLAB_ROOT/isaaclab.sh" -p scripts/rsl_rl/train.py \
+  --task Template-Redrhex-ForwardFast-Direct-v0 \
+  --num_envs 4096 \
+  --max_iterations 1500 \
+  --headless \
+  --run_name forward_spring_baseline
+```
 
 <a id="resume"></a>
 ## Resume a run

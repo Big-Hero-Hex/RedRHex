@@ -15,10 +15,18 @@ from urllib.parse import parse_qs, unquote, urlparse
 from tools.training_panel import __version__
 
 from .activity import ActivityStore
-from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams, resolve_spring_backend
+from .commands import (
+    DEFAULT_TRAINING_TASK,
+    DEFAULT_VIDEO_PRESET,
+    VIDEO_PRESETS,
+    TrainingParams,
+    VideoParams,
+    resolve_spring_backend,
+)
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
 from .history import HistoryStore
+from .physics import PhysicsPresetStore, physics_catalog
 from .presets import PresetStore
 from .processes import CudaPreflightError, ProcessRegistry, ProcessStartError
 from .remote_config import RemoteStateStore
@@ -65,6 +73,7 @@ class PanelState:
         self.processes = ProcessRegistry(paths, self.history, cuda_preflight=True)
         self.presets = PresetStore(_PRESET_FILE)
         self.terrain_presets = TerrainPresetStore(_TERRAIN_PRESET_FILE)
+        self.physics_presets = PhysicsPresetStore(paths.physics_preset_file)
         self.activity = ActivityStore(paths)
         self.remote_state = RemoteStateStore(paths.remote_state_file)
         self.remote_worker = RemoteWorkerManager(paths, self.remote_state)
@@ -120,7 +129,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 {
                     "repo_root": str(self.state.paths.repo_root),
                     "rsl_rl_log_root": str(self.state.paths.rsl_rl_log_root),
-                    "default_task": DEFAULT_TASK,
+                    "default_task": DEFAULT_TRAINING_TASK,
                     "version": __version__,
                     "cuda_health": self.state.processes.cuda_health(),
                     "local_url_hint": "http://127.0.0.1:8080",
@@ -276,6 +285,19 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "presets": self.state.terrain_presets.list_presets(),
                 "active_preset_id": self.state.terrain_presets.get_active_preset_id(),
             })
+        if parsed.path == "/api/physics":
+            return self._json(physics_catalog())
+        if parsed.path == "/api/physics/presets":
+            return self._json({
+                "presets": self.state.physics_presets.list_presets(),
+                "active_preset_id": self.state.physics_presets.get_active_preset_id(),
+            })
+        if parsed.path.startswith("/api/physics/presets/") and not parsed.path.endswith("/update") and not parsed.path.endswith("/delete"):
+            preset_id = route_id2(parsed.path)
+            preset = self.state.physics_presets.get_preset(preset_id)
+            if not preset:
+                return self._json({"error": "Physics preset not found"}, status=404)
+            return self._json(preset)
         if parsed.path.startswith("/api/terrain/presets/") and not parsed.path.endswith("/update") and not parsed.path.endswith("/delete"):
             preset_id = route_id2(parsed.path)
             preset = self.state.terrain_presets.get_preset(preset_id)
@@ -328,6 +350,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                         "status": run.get("status"),
                         "reward_preset_id": params.reward_preset_id,
                         "terrain_preset_id": params.terrain_preset_id,
+                        "physics_preset_id": params.physics_preset_id,
                         "params": params.to_dict(),
                     },
                 )
@@ -474,6 +497,67 @@ class PanelHandler(BaseHTTPRequestHandler):
                 )
                 preset = self.state.terrain_presets.get_preset(preset_id) or {}
                 _sync_active_terrain_override_file(self.state.paths, dict(preset.get("values") or {}))
+                return self._json({"active_preset_id": preset_id})
+            if parsed.path == "/api/physics/presets":
+                try:
+                    preset = self.state.physics_presets.create_preset(
+                        str(payload.get("name") or ""),
+                        str(payload.get("description") or ""),
+                        dict(payload.get("values") or {}),
+                    )
+                except ValueError as exc:
+                    return self._json({"error": str(exc)}, status=400)
+                self._record_activity(
+                    "physics_preset_create",
+                    summary=f"Created physics profile {preset.get('name')}",
+                    subject_id=str(preset.get("id") or ""),
+                    payload={"physics_preset_id": preset.get("id")},
+                )
+                return self._json(preset, status=201)
+            if parsed.path.startswith("/api/physics/presets/") and parsed.path.endswith("/update"):
+                preset_id = route_id2(parsed.path)
+                updates = {
+                    key: payload[key]
+                    for key in ("name", "description", "values")
+                    if key in payload
+                }
+                try:
+                    preset = self.state.physics_presets.update_preset(preset_id, **updates)
+                except (KeyError, ValueError) as exc:
+                    return self._json({"error": str(exc)}, status=400)
+                self._record_activity(
+                    "physics_preset_edit",
+                    summary=f"Edited physics profile {preset.get('name')}",
+                    subject_id=preset_id,
+                    payload={"physics_preset_id": preset_id},
+                )
+                return self._json(preset)
+            if parsed.path.startswith("/api/physics/presets/") and parsed.path.endswith("/delete"):
+                preset_id = route_id2(parsed.path)
+                try:
+                    deleted = self.state.physics_presets.delete_preset(preset_id)
+                except ValueError as exc:
+                    return self._json({"error": str(exc)}, status=400)
+                if deleted:
+                    self._record_activity(
+                        "physics_preset_delete",
+                        summary=f"Deleted physics profile {preset_id}",
+                        subject_id=preset_id,
+                        payload={"physics_preset_id": preset_id},
+                    )
+                return self._json({"deleted": deleted})
+            if parsed.path == "/api/physics/presets/activate":
+                preset_id = str(payload.get("preset_id") or "")
+                try:
+                    self.state.physics_presets.set_active_preset(preset_id)
+                except KeyError as exc:
+                    return self._json({"error": str(exc)}, status=404)
+                self._record_activity(
+                    "physics_preset_activate",
+                    summary=f"Activated physics profile {preset_id}",
+                    subject_id=preset_id,
+                    payload={"physics_preset_id": preset_id},
+                )
                 return self._json({"active_preset_id": preset_id})
             if parsed.path == "/api/training/stop":
                 run_id = str(payload.get("run_id") or "")
@@ -1013,7 +1097,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not summary_path.exists() or not summary_path.is_file():
             return self._json({"error": "No TensorBoard summary image found for run"}, status=404)
         resolved_summary = summary_path.resolve()
-        if not _is_within(resolved_summary, log_dir) or not _is_within(resolved_summary, self.state.paths.rsl_rl_log_root):
+        resolved_root = (self.state.paths.repo_root / "logs" / "rsl_rl").resolve()
+        if not _is_within(log_dir.resolve(), resolved_root) or not _is_within(resolved_summary, log_dir):
             return self._json({"error": "TensorBoard summary path is outside the selected run log directory"}, status=403)
         self._send_file_response(resolved_summary, "image/png")
 

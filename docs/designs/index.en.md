@@ -19,6 +19,7 @@ last_reviewed: 2026-08-14
 <a id="proposed-designs"></a>
 ## Proposed designs
 
+- [Panel physics and calibration workspace](active/2026-08-14-panel-physics-calibration.en.md) — recovered simulation-only work isolated for review; not a hardware-calibration claim.
 - [Core-first, simulation-first soft reboot](active/2026-07-13-core-sim-first-soft-reboot.en.md) — imported from its preserved branch as a proposal, not current implementation.
 
 <a id="design-lifecycle"></a>

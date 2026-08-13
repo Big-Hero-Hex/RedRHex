@@ -704,6 +704,9 @@ class HistoryStore:
                         "reward_overrides",
                         "terrain_preset_id",
                         "terrain_overrides",
+                        "physics_preset_id",
+                        "physics_overrides",
+                        "physics_profile_file",
                         "created_by",
                         "requester_label",
                     ):

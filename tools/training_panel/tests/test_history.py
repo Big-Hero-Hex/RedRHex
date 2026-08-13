@@ -602,7 +602,6 @@ class HistoryTests(unittest.TestCase):
 
             self.assertEqual(served, [])
             self.assertEqual(errors, [({"error": "Run log directory is outside the RSL-RL log root"}, 403)])
-
     def test_delete_run_requires_confirmation_and_removes_repo_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

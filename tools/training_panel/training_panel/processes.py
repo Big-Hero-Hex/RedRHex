@@ -24,6 +24,7 @@ from .commands import (
     FORWARD_FAST_TASK,
     TrainingParams,
     VideoParams,
+    agent_for_training_route,
     display_isaaclab_command,
     export_onnx_argv,
     play_argv,
@@ -37,6 +38,7 @@ from .provenance import git_provenance
 from .config import PanelPaths, timestamp_id
 from .deploy import latest_deploy_report
 from .history import HistoryStore, latest_checkpoint, latest_onnx, latest_video, tail_file
+from .physics import write_physics_profile
 from .terrain import read_terrain_values_from_yaml
 
 EXTERNAL_PLAY_ID_PREFIX = "external_play_"
@@ -177,7 +179,8 @@ class ProcessRegistry:
         self.paths.ensure_dirs()
         run_id = f"panel_{timestamp_id()}"
         queued_at = datetime.now().isoformat(timespec="seconds")
-        script_argv = training_argv(params)
+        physics_profile_file = self._write_training_physics_profile(run_id, params)
+        script_argv = training_argv(params, physics_profile_file=physics_profile_file)
         log_file = self.paths.process_log_dir / f"{run_id}.log"
         record = {
             "id": run_id,
@@ -195,6 +198,9 @@ class ProcessRegistry:
             "reward_overrides": params.reward_overrides,
             "terrain_preset_id": params.terrain_preset_id,
             "terrain_overrides": params.terrain_overrides,
+            "physics_preset_id": params.physics_preset_id,
+            "physics_overrides": params.physics_overrides,
+            "physics_profile_file": physics_profile_file,
             "created_by": params.requester_id,
             "requester_label": params.requester_label,
             "display_name": params.display_name,
@@ -216,7 +222,8 @@ class ProcessRegistry:
         run_id = run_id or f"panel_{timestamp_id()}"
         started_at_epoch = time.time()
         started_at = datetime.now().isoformat(timespec="seconds")
-        script_argv = training_argv(params)
+        physics_profile_file = self._write_training_physics_profile(run_id, params)
+        script_argv = training_argv(params, physics_profile_file=physics_profile_file)
         shell = shell_for_isaaclab(self.paths, script_argv)
         log_file = self.paths.process_log_dir / f"{run_id}.log"
         # Write panel overrides immediately before spawning so train.py reads the right queued run settings.
@@ -239,6 +246,9 @@ class ProcessRegistry:
             "reward_overrides": params.reward_overrides,
             "terrain_preset_id": params.terrain_preset_id,
             "terrain_overrides": params.terrain_overrides,
+            "physics_preset_id": params.physics_preset_id,
+            "physics_overrides": params.physics_overrides,
+            "physics_profile_file": physics_profile_file,
             "created_by": params.requester_id,
             "requester_label": params.requester_label,
             "display_name": params.display_name,
@@ -356,6 +366,37 @@ class ProcessRegistry:
             override_file.write_text(_json.dumps(overrides, indent=2), encoding="utf-8")
         elif override_file.exists():
             override_file.unlink()
+
+    def _write_training_physics_profile(self, run_id: str, params: TrainingParams) -> str | None:
+        path = self.paths.physics_profile_file(run_id)
+        written = write_physics_profile(
+            path,
+            profile_id=f"panel-{params.physics_preset_id}-{run_id}",
+            description=f"Training Panel physics preset {params.physics_preset_id} for {run_id}",
+            values=params.physics_overrides,
+        )
+        return str(written) if written else None
+
+    def _write_process_physics_profile(self, process_id: str, run_id: str) -> str | None:
+        run = self.history.get_run(run_id) or {}
+        raw_log_dir = run.get("log_dir")
+        log_dir = Path(str(raw_log_dir)) if raw_log_dir else None
+        saved_profile = log_dir / "params" / "physics_profile.json" if log_dir else None
+        if saved_profile and saved_profile.exists() and saved_profile.is_file():
+            return str(saved_profile)
+        params = run.get("params") if isinstance(run.get("params"), dict) else {}
+        values = params.get("physics_overrides") or run.get("physics_overrides") or {}
+        if not isinstance(values, dict) or not values:
+            return None
+        preset_id = str(params.get("physics_preset_id") or run.get("physics_preset_id") or "run")
+        path = self.paths.physics_profile_file(process_id)
+        written = write_physics_profile(
+            path,
+            profile_id=f"panel-{preset_id}-{process_id}",
+            description=f"Replay physics profile from {run_id}",
+            values=values,
+        )
+        return str(written) if written else None
 
     def _terrain_overrides_for_run(self, run_id: str, checkpoint: str | Path | None = None) -> tuple[dict, str]:
         run = self.history.get_run(run_id) or {}
@@ -476,16 +517,21 @@ class ProcessRegistry:
         run = self.history.get_run(run_id)
         spring_backend = resolve_spring_backend(run, checkpoint)
         task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
+        agent = agent_for_training_route(((run or {}).get("params") or {}).get("training_route"))
         terrain_override_file = self._write_process_terrain_override(play_id, run_id, checkpoint)
+        physics_profile_file = self._write_process_physics_profile(play_id, run_id)
         argv = play_argv(
             checkpoint=checkpoint,
             task=task,
             device=device,
             spring_backend=spring_backend,
+            initial_command="forward",
             terrain_override_file=terrain_override_file,
+            physics_profile_file=physics_profile_file,
             camera_follow_robot=True,
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
             camera_lookat=DEFAULT_FOLLOW_CAMERA_LOOKAT,
+            agent=agent,
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{play_id}.log"
@@ -526,7 +572,9 @@ class ProcessRegistry:
         run = self.history.get_run(run_id)
         spring_backend = resolve_spring_backend(run, checkpoint)
         task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
+        agent = agent_for_training_route(((run or {}).get("params") or {}).get("training_route"))
         terrain_override_file = self._write_process_terrain_override(video_id, run_id, checkpoint)
+        physics_profile_file = self._write_process_physics_profile(video_id, run_id)
         argv = play_argv(
             checkpoint=checkpoint,
             task=task,
@@ -540,11 +588,13 @@ class ProcessRegistry:
             video_height=params.height,
             video_fps=params.fps,
             rendering_mode=params.rendering_mode,
-            initial_command="forward" if task == FORWARD_FAST_TASK else None,
+            initial_command="forward",
             terrain_override_file=terrain_override_file,
+            physics_profile_file=physics_profile_file,
             camera_follow_robot=True,
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
             camera_lookat=DEFAULT_FOLLOW_CAMERA_LOOKAT,
+            agent=agent,
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{video_id}.log"
@@ -600,7 +650,16 @@ class ProcessRegistry:
         run = self.history.get_run(run_id)
         spring_backend = resolve_spring_backend(run, checkpoint)
         task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
-        argv = export_onnx_argv(checkpoint=checkpoint, task=task, device=device, spring_backend=spring_backend)
+        agent = agent_for_training_route(((run or {}).get("params") or {}).get("training_route"))
+        physics_profile_file = self._write_process_physics_profile(onnx_id, run_id)
+        argv = export_onnx_argv(
+            checkpoint=checkpoint,
+            task=task,
+            device=device,
+            spring_backend=spring_backend,
+            agent=agent,
+            physics_profile_file=physics_profile_file,
+        )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{onnx_id}.log"
         spawned = self._spawn_shell(onnx_id, shell, log_file)
@@ -1608,6 +1667,27 @@ class ProcessRegistry:
             return None
         return self._log_dir_from_process_log_path(process_log)
 
+    def _sensor_v2_pipeline_result(self, run_id: str) -> dict | None:
+        run = self.history.get_run(run_id) or {}
+        params = run.get("params") or {}
+        if params.get("training_route") != "sensor_v2_full":
+            return None
+        process_log = Path(str(run.get("process_log") or ""))
+        text = tail_file(process_log, max_chars=500000)
+        matches = re.findall(r"^SENSOR_V2_PIPELINE_RESULT:\s*(\{.*\})\s*$", text, re.MULTILINE)
+        if not matches:
+            return None
+        try:
+            result = json.loads(matches[-1])
+        except json.JSONDecodeError:
+            return None
+        final_dir = Path(str(result.get("ppo_log_dir") or "")).resolve()
+        rsl_root = self.paths.rsl_rl_log_root.resolve()
+        if not final_dir.is_dir() or not final_dir.is_relative_to(rsl_root):
+            return None
+        result["ppo_log_dir"] = str(final_dir)
+        return result
+
     def _log_dir_from_process_log_path(self, process_log: Path) -> str | None:
         text = self._head_file(process_log, max_chars=120000) + "\n" + tail_file(process_log, max_chars=300000)
         log_dir, _ = self._log_dir_from_process_log_text(text)
@@ -1687,7 +1767,13 @@ class ProcessRegistry:
     def _is_repo_training_process(self, command: str, pid_text: str) -> bool:
         if self._is_tmux_server_command(command):
             return False
-        if "scripts/rsl_rl/train.py" not in command:
+        if not any(
+            entry_point in command
+            for entry_point in (
+                "scripts/rsl_rl/train.py",
+                "scripts/rsl_rl/train_sensor_v2_pipeline.py",
+            )
+        ):
             return False
         if "isaaclab.sh -p" not in command and "python" not in command:
             return False
@@ -1783,9 +1869,35 @@ class ProcessRegistry:
 
     @staticmethod
     def _training_commands_match(recorded_command: str, process_command: str) -> bool:
-        if not recorded_command or "scripts/rsl_rl/train.py" not in process_command:
+        if not recorded_command:
             return False
-        keys = ("--task", "--num_envs", "--max_iterations", "--device", "--seed", "--checkpoint", "--spring-backend")
+        pipeline_entry_point = "scripts/rsl_rl/train_sensor_v2_pipeline.py"
+        standard_entry_point = "scripts/rsl_rl/train.py"
+        recorded_is_pipeline = pipeline_entry_point in recorded_command
+        observed_is_pipeline = pipeline_entry_point in process_command
+        if recorded_is_pipeline != observed_is_pipeline:
+            return False
+        if recorded_is_pipeline:
+            keys = (
+                "--num_envs",
+                "--teacher_iterations",
+                "--distillation_iterations",
+                "--ppo_iterations",
+                "--device",
+                "--seed",
+            )
+        else:
+            if standard_entry_point not in recorded_command or standard_entry_point not in process_command:
+                return False
+            keys = (
+                "--task",
+                "--num_envs",
+                "--max_iterations",
+                "--device",
+                "--seed",
+                "--checkpoint",
+                "--spring-backend",
+            )
         matched = 0
         for key in keys:
             recorded = ProcessRegistry._arg_value(recorded_command, key)
@@ -2161,12 +2273,22 @@ class ProcessRegistry:
         returncode = proc.wait()
         self._mark_isaac_process_finished()
         status = "completed" if returncode == 0 else "failed"
+        pipeline_result = self._sensor_v2_pipeline_result(run_id)
+        if pipeline_result is not None:
+            log_dir = pipeline_result["ppo_log_dir"]
         if not log_dir:
             log_dir = self._log_dir_from_process_log(run_id)
             if not log_dir and returncode == 0:
                 log_dir = self.history.find_latest_log_after(started_at_epoch)
         completed_at = datetime.now().isoformat(timespec="seconds")
-        self.history.update_run(run_id, status=status, returncode=returncode, log_dir=log_dir, completed_at=completed_at)
+        self.history.update_run(
+            run_id,
+            status=status,
+            returncode=returncode,
+            log_dir=log_dir,
+            completed_at=completed_at,
+            distillation_pipeline=pipeline_result,
+        )
         self._refresh_tensorboard_summary(run_id, log_dir)
 
         # Record video when: training succeeded normally, OR convergence was detected and

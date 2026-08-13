@@ -211,6 +211,12 @@ def open_deploy(page, url: str) -> None:
     expect(page.locator("#deploy-artifact-status")).to_contain_text("ready")
 
 
+def open_physics(page, url: str) -> None:
+    page.goto(url)
+    page.locator('.nav-button[data-view="physics"]').click()
+    page.wait_for_selector('[data-physics-key="simulation_physics.mass.scale"]')
+
+
 def test_history_defaults_to_all_runs_and_filters(panel, page):
     open_history(page, panel["url"])
 
@@ -236,6 +242,47 @@ def test_history_defaults_to_all_runs_and_filters(panel, page):
 
     page.locator('.folder-item[data-folder="__all__"]').click()
     expect(page.locator("#runs")).to_contain_text("run_alpha")
+
+
+def test_physics_preset_is_searchable_sparse_and_persistent(panel, page):
+    open_physics(page, panel["url"])
+    expect(page.locator("#physics-status")).to_contain_text("113 validated")
+    expect(page.locator('[data-physics-key="simulation_physics.mass.scale"]')).to_be_disabled()
+
+    page.once("dialog", lambda dialog: dialog.accept("Measured Lab Robot"))
+    page.locator("#physics-preset-duplicate-btn").click()
+    expect(page.locator("#physics-profile-name")).to_have_value("Measured Lab Robot")
+
+    page.fill("#physics-search", "mass scale")
+    mass_scale = page.locator('[data-physics-key="simulation_physics.mass.scale"]')
+    expect(mass_scale).to_be_visible()
+    mass_scale.fill("1.05")
+    expect(page.locator("#physics-change-summary")).to_have_text("1 override")
+    page.locator("#physics-preset-save-btn").click()
+    expect(page.locator("#physics-status")).to_have_text("Physics preset saved and selected for the next training run.")
+
+    preset_file = panel["root"] / "logs" / "training_panel" / "physics_presets.json"
+    payload = json.loads(preset_file.read_text(encoding="utf-8"))
+    saved = next(item for item in payload["presets"] if item["name"] == "Measured Lab Robot")
+    assert saved["values"] == {"simulation_physics.mass.scale": 1.05}
+
+    page.locator('.nav-button[data-view="train"]').click()
+    expect(page.locator("#train-active-physics-preset-name")).to_have_text("Measured Lab Robot")
+
+
+def test_physics_mobile_layout_has_no_horizontal_overflow(panel, page):
+    page.set_viewport_size({"width": 390, "height": 900})
+    open_physics(page, panel["url"])
+    expect(page.locator("#physics-categories")).to_contain_text("Mass scale")
+    overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+    offenders = page.evaluate(
+        """[...document.querySelectorAll('*')]
+          .filter((element) => element.getBoundingClientRect().right > window.innerWidth + 1)
+          .map((element) => ({tag: element.tagName, id: element.id, cls: element.className,
+            right: Math.round(element.getBoundingClientRect().right), width: element.scrollWidth}))
+          .slice(0, 12)"""
+    )
+    assert overflow <= 1, offenders
 
 
 def test_single_delete_requires_exact_run_id(panel, page):

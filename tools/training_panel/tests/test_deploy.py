@@ -125,6 +125,7 @@ class DeployReadinessTests(unittest.TestCase):
 
         self.assertFalse(status["installed"])
         self.assertEqual(status["version"], "")
+        self.assertIn("mujoco", status["error"])
 
     def test_deploy_validation_writes_report_even_when_fake_onnx_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

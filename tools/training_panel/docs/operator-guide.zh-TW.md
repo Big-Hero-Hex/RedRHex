@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: panel
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="start"></a>
@@ -18,19 +18,44 @@ python -m tools.training_panel --host 127.0.0.1 --port 8080
 
 開啟 `http://127.0.0.1:8080`。從其他電腦使用時，優先建立 SSH tunnel。本機面板是未驗證身分的管理介面；只有可信任 LAN 才可綁定 `0.0.0.0`。
 
+使用 VS Code Remote SSH 時，先在遠端 terminal 啟動面板，再從 Ports view 轉送遠端 `8080` 與 `6006`，並開啟其本機轉送 URL。面板應維持綁定 `127.0.0.1`；透過 SSH tunnel 存取即可，不必把管理介面暴露到 LAN。
+
 <a id="train"></a>
 ## 訓練與 queue
 
-在 Train 選擇 task、environment 數量、iteration、device、reward preset、terrain preset、spring backend 與 resume mode。Isaac/GPU action（training、playback、video 與 ONNX export）會序列化。已有 GPU action 時，新 training request 變成 queued；可從 History 取消。完成的 Isaac 工作之間有 settle window。
+在 Train 選擇 task、environment 數量、iteration、device、reward preset、terrain preset、physics preset、spring backend 與 resume mode。Isaac/GPU action（training、playback、video 與 ONNX export）會序列化。已有 GPU action 時，新 training request 變成 queued；可從 History 取消。完成的 Isaac 工作之間有 settle window。
 
-面板啟動的訓練使用 run-scoped override snapshot，並傳入 `--panel_overrides`。Built-in reward/terrain preset 為 read-only；修改前先 duplicate。
+Panel 啟動的 standard training 使用 run-scoped override snapshot，並傳入 `--panel_overrides` 及 optional `--physics-profile`。Built-in reward、terrain 與 physics preset 為 read-only；修改前先 duplicate。Sensor V2 route 使用下方說明的固定 versioned reward/terrain contract，但可使用所選 physics profile。
+
+只訓練直走步態時，Panel 現在預設使用 `Template-Redrhex-ForwardFast-Direct-v0`，並預設啟用 `Straight Forward Focus`；啟動前請確認兩者。先使用 4 個 environment 與 1 iteration 做 stack smoke test；通過後，再使用預定的 environment 數量，並在範圍受限的 ForwardFast profile 中最多執行 1,500 iterations。
+
+<a id="sensor-v2-distillation"></a>
+### 訓練 Sensor V2 Teacher 與 Student
+
+在 **Training Route** 選擇 **Sensor V2 — Full Teacher → Student**。Production 預設值為 64 個 environments、F1 Teacher 1,500 updates、F2 distillation 800 updates，以及 F3 student PPO 1,500 updates。設定 run name；在遠端機器保持 Headless 啟用，然後只需按一次 **Start Training**。
+
+Pipeline 會依序執行 F1、F2 與 F3。它使用 `--teacher_checkpoint` 把完成的 `teacher_v2` checkpoint 傳給 F2，再使用 `--student_checkpoint` 把完成的 `student_distilled_v2` checkpoint 傳給 F3。任一 stage 失敗就停止 pipeline。Sensor V2 使用固定的 forward reward contract，不套用 Panel reward 或 terrain override files。若有選擇，三個 stage 都會收到相同的 run-scoped physics profile。
+
+若只執行單一 stage，選擇 **Sensor V2 — F1 Teacher only**、**F2 Distillation only** 或 **F3 Student PPO only**。F2 需要 Teacher checkpoint，F3 需要 distilled checkpoint：先在 History 選擇來源 run，按 **Resume to Train** 填入 checkpoint field，再選擇目標 route。Strict loader 會拒絕錯誤的 checkpoint kind。
+
+完整 pipeline 完成後，History 會連到最後的 F3 PPO directory。從 **Process Console** 可查看目前 stage 與確切 checkpoint handoff；從 **TensorBoard** 可查看最後的 F3 metrics。F1 與 F2 stage directories 仍分別保留在 `logs/rsl_rl/redrhex_forward_v2_teacher` 與 `logs/rsl_rl/redrhex_forward_v2_distillation`。一次完成的 run 只代表一個 seed 的訓練，不代表已取得 three-seed、recorded-sensor 或 hardware promotion evidence。
+
+<a id="physics-presets"></a>
+### 調整 physical quantity
+
+開啟 **Physics**，選擇 **Baseline** 即可繼承所有 repository 與 USD physical default。要建立 candidate，先 duplicate Baseline 或建立 preset。使用 Search 依 body、joint、limit、unit 或 description 搜尋；使用 **Show changed only** 稽核 sparse candidate。空白 field 代表 inherit。**Reset** 只清除一個 override，不會把 default 寫入 preset。
+
+Editor 公開 113 個可獨立調整的 simulation quantity：rigid-body damping；mass scale、added root mass 與 root center-of-mass offset；contact friction 與 restitution；aggregate command delay；每個 actuator group 的 stiffness、damping、effort limit、velocity limit、armature 與 friction；全部 18 個 joint 的 static、dynamic 與 viscous friction；六個 passive spring；以及六組 ABAD target scale 與 offset。Ground static/dynamic friction 是 coupled contract。Invalid value 會在啟動前被拒絕。
+
+保存 preset 後可在之後重用。即使尚未保存，選定 draft 仍會用於下一個 run，Train page 會顯示其名稱。Training 會把確切 `CalibrationProfileV1` snapshot 到 run。Play、Record Video 與 Export ONNX 會重用該 snapshot，不會改用目前選定的 preset。這些設定只改變 simulation behavior；hardware calibration、E-stop 準備與 motor-enable authorization 仍是獨立 gate。
 
 <a id="history"></a>
 ## 使用 History
 
-History 結合 panel request 與探索到的 RSL-RL run。選擇 run 後可檢查 configuration、checkpoint、spring backend/calibration status、reward/terrain difference、note、folder、event state、video、export 與 readiness evidence。Play、recording、export 與 deployment checks 重用已記錄的 backend，並拒絕不相容的 spring metadata。可用 action 包括 TensorBoard、Play、Record Video、Export ONNX、Resume to Train、Compare、Compact Run 與 Process Console。
+History 結合 panel request 與探索到的 RSL-RL run。選擇 run 後可檢查 configuration、checkpoint、spring backend/calibration status、reward/terrain difference、saved physics metadata、note、folder、event state、video、export 與 readiness evidence。Play、recording、export 與 deployment checks 重用已記錄的 backend，並拒絕不相容的 spring metadata。可用 action 包括 TensorBoard、Play、Record Video、Export ONNX、Resume to Train、Compare、Compact Run 與 Process Console。
 
 執行中的 card 會顯示從 process log 解析的 iteration progress、throughput 與 ETA。Run detail 會從本機 TensorBoard scalar 繪製 mean reward 與 episode-length curve。Run record 也會保存啟動時使用的 Git commit、branch 與 dirty state。Seed 留白時，面板會自行選擇並記錄 seed，讓面板啟動的 run 可重現。
+Play 與 Record Video 會重用所選 run 保存的 task，並以前進命令開始，等同按下 `W`。Export ONNX 會重用保存的 task，但不加入移動命令。兩項檢查都以 Process Console 顯示的命令為準。
 
 Compaction 會保留最高編號的 top-level `model_*.pt`，並保留 event、parameter、video、export、note 與 deployment report。刪除需要輸入確切 run ID；相關 process 執行中時會拒絕。
 
@@ -52,7 +77,7 @@ Launch Command 是面板要求的命令；Output 是捕捉到的 process stream�
 <a id="artifacts"></a>
 ## 匯出與錄影
 
-Export ONNX 會從選定 training checkpoint 產生 `exported/policy.pt` 與 `exported/policy.onnx`。預設高品質 video preset 為 1920×1080、1,200 steps 與 30 FPS。若 run 有保存 terrain override，兩項 action 都會使用。
+Export ONNX 會從選定 training checkpoint 產生 `exported/policy.pt` 與 `exported/policy.onnx`。預設高品質 video preset 為 1920×1080、1,200 steps 與 30 FPS。Standard run 會使用已保存的 terrain override；Sensor V2 會使用固定 reward/terrain contract 與已保存 runner。兩種 route 都會重用 run 已保存的 physics profile。Video 也會傳入 `--initial_command forward`。
 
 <a id="next"></a>
 ## 下一步

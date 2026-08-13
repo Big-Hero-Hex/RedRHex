@@ -111,7 +111,7 @@ const state = {
     notificationSettings: null,
     schema: { artifacts: true, runDeletions: true, rewardPresets: true, terrainPresets: true, teamFolders: true, warnings: [] },
   },
-  selectedPresetId: localStorage.getItem("redrhex_child_preset") || "baseline",
+  selectedPresetId: localStorage.getItem("redrhex_child_preset") || "speed-focus",
   draftPreset: null,
   tweakDraftPreset: null,
   selectedTerrainPresetId: localStorage.getItem("redrhex_child_terrain_preset") || "baseline",
@@ -119,7 +119,7 @@ const state = {
   tweakTerrainPresetId: "",
   tweakTerrainOverrides: null,
   trainForm: {
-    task: "Template-Redrhex-Direct-v0",
+    task: "Template-Redrhex-ForwardFast-Direct-v0",
     num_envs: 4,
     max_iterations: 8,
     device: "cuda:0",
@@ -2477,7 +2477,7 @@ async function queueTraining() {
   localStorage.setItem("redrhex_machine_id", state.machineId);
   const launchFolder = folderSelectValue("run-folder-before-launch", "run-folder-before-launch-new");
   state.trainForm = {
-    task: document.querySelector("#task")?.value || "Template-Redrhex-Direct-v0",
+    task: document.querySelector("#task")?.value || "Template-Redrhex-ForwardFast-Direct-v0",
     display_name: String(document.querySelector("#run-display-name")?.value || "").trim(),
     folder: launchFolder,
     num_envs: Number(document.querySelector("#num-envs")?.value || 4),
@@ -3302,7 +3302,7 @@ document.addEventListener("change", (event) => {
   if (["task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed"].includes(event.target.id)) {
     state.trainFolderCreating = document.querySelector("#run-folder-before-launch")?.value === "__new__";
     state.trainForm = {
-      task: document.querySelector("#task")?.value || "Template-Redrhex-Direct-v0",
+      task: document.querySelector("#task")?.value || "Template-Redrhex-ForwardFast-Direct-v0",
       display_name: String(document.querySelector("#run-display-name")?.value || "").trim(),
       folder: folderSelectValue("run-folder-before-launch", "run-folder-before-launch-new"),
       num_envs: Number(document.querySelector("#num-envs")?.value || 4),

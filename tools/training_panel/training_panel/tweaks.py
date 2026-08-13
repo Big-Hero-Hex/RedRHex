@@ -136,6 +136,8 @@ def build_tweak_payload(
     terrain_preset_id = str(params.get("terrain_preset_id") or run.get("terrain_preset_id") or "baseline")
     terrain_values = terrain_values_for_tweak(run, terrain_presets)
     spring_backend = resolve_spring_backend(run)
+    physics_preset_id = str(params.get("physics_preset_id") or run.get("physics_preset_id") or "baseline")
+    physics_values = _first_dict(params.get("physics_overrides"), run.get("physics_overrides"))
     draft_id = f"tweak-{_slug(source_id or source_label)}"
 
     training_params = {
@@ -152,6 +154,8 @@ def build_tweak_payload(
         "reward_overrides": reward_values,
         "terrain_preset_id": terrain_preset_id,
         "terrain_overrides": terrain_values,
+        "physics_preset_id": physics_preset_id,
+        "physics_overrides": physics_values,
         "tweak_source_run_id": source_id,
         "tweak_source_label": source_label,
     }

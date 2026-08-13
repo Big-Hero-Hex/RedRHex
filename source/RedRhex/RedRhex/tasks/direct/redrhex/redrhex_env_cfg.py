@@ -1769,12 +1769,12 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
     reward_gate_min_base_height = 0.105
     reward_gate_max_body_tilt = 0.70
 
-    # Stage-1-like rewards with slight forward emphasis for faster convergence.
+    # Forward tracking is primary: discourage overspeed, drift, and stationary leg spinning.
     v2_reward_scales = {
-        "forward_progress": 5.5,
-        "velocity_tracking": 4.5,
+        "forward_progress": 3.0,
+        "velocity_tracking": 6.0,
         "mode_specialization": 0.0,
-        "axis_suppression": 1.3,
+        "axis_suppression": 2.0,
         "lateral_drive_soft_penalty": 0.0,
         "lateral_speed_deficit_penalty": 0.0,
         "lateral_speed_target_ratio": 0.70,
@@ -1787,12 +1787,12 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
         "forward_prior_duty": 0.9,
         "forward_prior_vel_ratio": 0.9,
         "forward_prior_overlap": 0.7,
-        "height_maintain": 0.9,
+        "height_maintain": 1.0,
         "target_base_height": 0.12,
         "height_sigma": 0.08,
-        "height_low_penalty": 1.2,
-        "leg_moving": 0.35,
-        "stall_penalty": -2.5,
+        "height_low_penalty": 1.5,
+        "leg_moving": 0.25,
+        "stall_penalty": -3.0,
         "fall": -8.0,
         "fall_height_threshold": 0.085,
         "fall_tilt_threshold": 1.70,

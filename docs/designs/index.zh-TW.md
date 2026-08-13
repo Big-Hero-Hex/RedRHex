@@ -19,6 +19,7 @@ last_reviewed: 2026-08-14
 <a id="proposed-designs"></a>
 ## 提案中設計
 
+- [Panel physics 與校正工作區](active/2026-08-14-panel-physics-calibration.zh-TW.md) — 復原出的 simulation-only 工作已隔離等待審查；這不是 hardware calibration 宣稱。
 - [核心優先、模擬優先的軟重啟](active/2026-07-13-core-sim-first-soft-reboot.zh-TW.md) — 從保留分支以提案身分匯入，不代表目前實作。
 
 <a id="design-lifecycle"></a>
