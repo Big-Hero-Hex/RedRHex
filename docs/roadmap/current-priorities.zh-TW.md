@@ -6,16 +6,21 @@ audience: shared
 type: roadmap
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="validation"></a>
 ## 證據與移動驗證
 
-- 對完整與 ForwardFast task 執行固定 protocol 的長訓練與 command-sweep 比較。
-- 依技能使用 tracking、success、fall、cost-of-transport proxy 與 power-per-motion 準則驗證 energy 變更。
-- 在提出更強 sim-to-real 宣稱前，建立 IMU frame、base velocity、contact behavior、mass/CoM、actuation 與 electrical energy 的 hardware ground truth。
+- 關閉 reward-preset resolution、command bias、exploration-scale diagnostic、evaluation method identity、energy provenance 與 training/deployment observation parity 的 correctness gate。
+- 建立 IMU frame、base velocity、contact behavior、mass/CoM/inertia、joint stop、friction/backlash、passive spring、actuation 與 electrical energy 的 hardware ground truth，並綁定 held-out calibration evidence。
+- Baseline comparison 前，凍結 task、command envelope、metric、resolved configuration、code/dependency revision、checkpoint、hardware revision 與 immutable held-out suite。
+- One-seed screening 只用於排除不良 candidate。探索至少使用三個 independent seed，confirmatory result 最好使用五個；保留 per-episode row 並回報 interval，不把 environment-time sample 當成獨立資料。
+- 使用 matched commanded 與 achieved speed、tracking、success、fall、recovery、temperature、peak current 及 measured electrical cost of transport 驗證 energy 變更。機構允許時，以 randomized paired hardware trial 比較 passive-spring condition。
+- 只有在同時提供 protocol、configuration、calibration evidence、checkpoint、per-episode data、failure 與 representative video 時才發布結果。宣稱 novelty 前完成專門的 literature 與 prior-art review。
 - 只有在共同 task、command envelope、metric、seed 與 hardware condition 定義完成後，才能比較 RL 與 MPC。
+
+Evidence gate 與解讀記錄於 [2026-08-13 研究就緒度稽核](../research/2026-08-13-research-readiness-audit.zh-TW.md)。
 
 <a id="core"></a>
 ## Core 可維護性
