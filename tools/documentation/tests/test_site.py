@@ -45,6 +45,10 @@ class SiteManifestTests(unittest.TestCase):
                         "destination": "components/ros2-deployment",
                         "source": "ros2_ws/src/redrhex_rl_controller/docs",
                     },
+                    {
+                        "destination": "components/windows-remote-launcher",
+                        "source": "tools/windows/docs",
+                    },
                 ],
             },
         )
@@ -63,6 +67,10 @@ class SiteManifestTests(unittest.TestCase):
                 SiteSource(
                     PROJECT_ROOT / "ros2_ws/src/redrhex_rl_controller/docs",
                     Path("components/ros2-deployment"),
+                ),
+                SiteSource(
+                    PROJECT_ROOT / "tools/windows/docs",
+                    Path("components/windows-remote-launcher"),
                 ),
             ),
         )

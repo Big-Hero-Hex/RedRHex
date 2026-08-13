@@ -6,7 +6,7 @@ audience: operator
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="start-here"></a>
@@ -27,6 +27,7 @@ Begin with [Getting started](getting-started.en.md), then select the workflow yo
 ## Deployment and support
 
 - [Check deployment readiness](deployment/deployment-readiness.en.md)
+- [Use the Windows remote launcher (draft)](../../tools/windows/docs/operator-guide.en.md)
 - [Calibrate physics for sim-to-real](calibration/physics-calibration.en.md)
 - [Bring up ROS 2 safely](../../ros2_ws/src/redrhex_rl_controller/docs/bring-up.en.md)
 - [Deploy to hardware in stages](../../ros2_ws/src/redrhex_rl_controller/docs/deployment.en.md)
