@@ -6,7 +6,7 @@ audience: developer
 type: design
 status: approved
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="goal"></a>
@@ -48,4 +48,4 @@ Dependency-free PowerShell test 涵蓋 deterministic argument、install path 與
 <a id="status"></a>
 ## 狀態邊界
 
-此 design 已核准，但 implementation 不在 documentation source branch。Implementation 與 Windows smoke evidence 尚未提交、release record 尚未發布前，不可描述 launcher 已交付。
+此 design 維持已核准。保存的 implementation 與 dependency-free test source 現已提交於 feature branch，但仍待 PowerShell 5.1 與 end-to-end Windows smoke evidence。Evidence 提交且 release record 發布前，不可描述 launcher 已交付。
