@@ -494,7 +494,12 @@ class SitePublicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as site_dir:
             source = Path(source_dir)
             site = Path(site_dir)
-            self.assertEqual(stage_site(PROJECT_ROOT, source), 134)
+            staged_documents = stage_site(PROJECT_ROOT, source)
+            self.assertGreater(staged_documents, 0)
+            self.assertEqual(
+                staged_documents,
+                sum(1 for path in source.rglob("*.md") if path.is_file()),
+            )
             environment = dict(os.environ)
             environment.update(
                 {
