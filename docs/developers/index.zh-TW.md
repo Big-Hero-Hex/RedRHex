@@ -6,7 +6,7 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="architecture"></a>
@@ -19,6 +19,7 @@ last_reviewed: 2026-08-07
 - [ROS 2 部署架構](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.zh-TW.md)
 - [Reward Agent 架構](../../tools/reward_agent/docs/architecture.zh-TW.md)
 - [Training Panel 架構](../../tools/training_panel/docs/architecture.zh-TW.md)
+- [Windows 遠端啟動器架構（草稿）](../../tools/windows/docs/architecture.zh-TW.md)
 
 <a id="change-and-validate"></a>
 ## 修改與驗證
