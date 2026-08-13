@@ -12,6 +12,7 @@ last_reviewed: 2026-08-13
 <a id="published-evidence"></a>
 ## Published evidence
 
+- [Correction addendum 1 to the 2026-08-13 research-readiness audit](2026-08-13-research-readiness-audit-addendum-1.en.md)
 - [2026-08-13 research-readiness audit](2026-08-13-research-readiness-audit.en.md)
 - [2026-08-07 documentation-system v1 audit](2026-08-07-documentation-system-audit.en.md)
 - [2026-07-09 project audit](2026-07-09-project-audit.en.md)

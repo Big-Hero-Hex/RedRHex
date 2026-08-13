@@ -12,6 +12,7 @@ last_reviewed: 2026-08-13
 <a id="published-evidence"></a>
 ## 已發布證據
 
+- [2026-08-13 研究就緒度稽核修正附錄 1](2026-08-13-research-readiness-audit-addendum-1.zh-TW.md)
 - [2026-08-13 研究就緒度稽核](2026-08-13-research-readiness-audit.zh-TW.md)
 - [2026-08-07 文件系統 v1 稽核](2026-08-07-documentation-system-audit.zh-TW.md)
 - [2026-07-09 專案稽核](2026-07-09-project-audit.zh-TW.md)
