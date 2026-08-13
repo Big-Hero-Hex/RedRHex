@@ -7,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -106,6 +107,9 @@ class PanelHandler(BaseHTTPRequestHandler):
     state: PanelState
 
     def do_GET(self) -> None:
+        return self._handle_request(self._do_GET)
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self._send_static("index.html")
@@ -305,6 +309,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         self._not_found()
 
     def do_POST(self) -> None:
+        return self._handle_request(self._do_POST)
+
+    def _do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
             payload = self._payload()
@@ -773,6 +780,18 @@ class PanelHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._json({"error": str(exc)}, status=400)
         self._not_found()
+
+    def _handle_request(self, handler) -> None:
+        try:
+            return handler()
+        except (BrokenPipeError, ConnectionResetError):
+            return None
+        except Exception as exc:
+            traceback.print_exc()
+            try:
+                return self._json({"error": f"Internal server error: {exc}"}, status=500)
+            except (BrokenPipeError, ConnectionResetError):
+                return None
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[training-panel] {self.address_string()} - {fmt % args}")
