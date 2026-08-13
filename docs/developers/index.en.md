@@ -21,6 +21,7 @@ last_reviewed: 2026-08-14
 - [Reward Agent architecture](../../tools/reward_agent/docs/architecture.en.md)
 - [Training Panel architecture](../../tools/training_panel/docs/architecture.en.md)
 - [Windows remote launcher architecture (draft)](../../tools/windows/docs/architecture.en.md)
+- [macOS remote launcher architecture (draft)](../../tools/macos/docs/architecture.en.md)
 
 <a id="change-and-validate"></a>
 ## Change and validate

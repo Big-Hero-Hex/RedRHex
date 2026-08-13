@@ -21,6 +21,7 @@ last_reviewed: 2026-08-14
 - [Reward Agent 架構](../../tools/reward_agent/docs/architecture.zh-TW.md)
 - [Training Panel 架構](../../tools/training_panel/docs/architecture.zh-TW.md)
 - [Windows 遠端啟動器架構（草稿）](../../tools/windows/docs/architecture.zh-TW.md)
+- [macOS 遠端啟動器架構（草稿）](../../tools/macos/docs/architecture.zh-TW.md)
 
 <a id="change-and-validate"></a>
 ## 修改與驗證

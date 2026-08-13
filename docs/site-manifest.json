@@ -20,6 +20,10 @@
     {
       "destination": "components/windows-remote-launcher",
       "source": "tools/windows/docs"
+    },
+    {
+      "destination": "components/macos-remote-launcher",
+      "source": "tools/macos/docs"
     }
   ]
 }
