@@ -6,6 +6,8 @@ import mimetypes
 import shlex
 import shutil
 import subprocess
+import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -13,7 +15,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from tools.training_panel import __version__
 
 from .activity import ActivityStore
-from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams
+from .commands import DEFAULT_TASK, DEFAULT_VIDEO_PRESET, VIDEO_PRESETS, TrainingParams, VideoParams, resolve_spring_backend
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
 from .history import HistoryStore
@@ -69,10 +71,45 @@ class PanelState:
         self.remote_worker.autostart_if_enabled()
 
 
+# Reading TensorBoard event files is expensive, and the panel polls. Cache per
+# (log_dir, tag) and invalidate on the event files' size+mtime signature.
+_SCALAR_CACHE: dict[tuple[str, str], tuple[tuple, list]] = {}
+_SCALAR_CACHE_LOCK = threading.Lock()
+
+
+def _event_signature(log_dir: Path) -> tuple:
+    entries = []
+    for path in sorted(log_dir.glob("events.out.tfevents.*")):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((path.name, stat.st_size, int(stat.st_mtime)))
+    return tuple(entries)
+
+
+def _scalar_cache_get(log_dir: Path, tag: str, checker) -> list:
+    key = (str(log_dir), tag)
+    signature = _event_signature(log_dir)
+    with _SCALAR_CACHE_LOCK:
+        cached = _SCALAR_CACHE.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+    scalars = checker.read_scalars(log_dir, tag)
+    with _SCALAR_CACHE_LOCK:
+        if len(_SCALAR_CACHE) > 200:
+            _SCALAR_CACHE.clear()
+        _SCALAR_CACHE[key] = (signature, scalars)
+    return scalars
+
+
 class PanelHandler(BaseHTTPRequestHandler):
     state: PanelState
 
     def do_GET(self) -> None:
+        return self._handle_request(self._do_GET)
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self._send_static("index.html")
@@ -197,6 +234,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             if config is None:
                 return self._json({"error": "No reward config found for run"}, status=404)
             return self._json(config)
+        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/scalars"):
+            run_id = route_id(parsed.path)
+            return self._send_run_scalars(run_id, parse_qs(parsed.query))
         if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/terrain-config"):
             run_id = route_id(parsed.path)
             config = self.state.history.get_terrain_config_for_run(run_id)
@@ -269,6 +309,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         self._not_found()
 
     def do_POST(self) -> None:
+        return self._handle_request(self._do_POST)
+
+    def _do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
             payload = self._payload()
@@ -738,6 +781,18 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._json({"error": str(exc)}, status=400)
         self._not_found()
 
+    def _handle_request(self, handler) -> None:
+        try:
+            return handler()
+        except (BrokenPipeError, ConnectionResetError):
+            return None
+        except Exception as exc:
+            traceback.print_exc()
+            try:
+                return self._json({"error": f"Internal server error: {exc}"}, status=500)
+            except (BrokenPipeError, ConnectionResetError):
+                return None
+
     def log_message(self, fmt: str, *args) -> None:
         print(f"[training-panel] {self.address_string()} - {fmt % args}")
 
@@ -876,15 +931,45 @@ class PanelHandler(BaseHTTPRequestHandler):
             "error": error,
         }
 
+    def _send_run_scalars(self, run_id: str, query: dict) -> None:
+        from .convergence import MAX_SCALAR_POINTS, ConvergenceChecker, downsample, requested_tags
+
+        run = self.state.history.get_run(run_id)
+        if not run:
+            return self._json({"error": "Run not found"}, status=404)
+        log_dir = run.get("log_dir")
+        if not log_dir or not Path(log_dir).is_dir():
+            return self._json({"tags": {}, "log_dir": log_dir or "", "reason": "no log directory"})
+
+        try:
+            points_limit = int(query.get("points", ["200"])[0])
+        except ValueError:
+            points_limit = 200
+        points_limit = max(2, min(points_limit, MAX_SCALAR_POINTS))
+
+        checker = ConvergenceChecker()
+        series: dict[str, list[list[float]]] = {}
+        for tag in requested_tags(query.get("tags", [""])[0]):
+            scalars = _scalar_cache_get(Path(log_dir), tag, checker)
+            if scalars:
+                series[tag] = [[step, value] for step, value in downsample(scalars, points_limit)]
+        return self._json({"tags": series, "log_dir": str(log_dir)})
+
     def _send_run_video(self, run_id: str) -> None:
         run = self.state.history.get_run(run_id)
         video = Path(str(run.get("latest_video"))) if run and run.get("latest_video") else None
         if not video or not video.exists() or not video.is_file():
             return self._json({"error": "No recorded video found for run"}, status=404)
+        log_dir = Path(str(run.get("log_dir"))) if run and run.get("log_dir") else None
+        if not log_dir or not log_dir.exists() or not log_dir.is_dir():
+            return self._json({"error": "No log directory found for run"}, status=404)
         resolved_video = video.resolve()
-        resolved_root = self.state.paths.rsl_rl_log_root.resolve()
-        if resolved_video != resolved_root and resolved_root not in resolved_video.parents:
-            return self._json({"error": "Video path is outside the RSL-RL log root"}, status=403)
+        resolved_log_dir = log_dir.resolve()
+        resolved_root = (self.state.paths.repo_root / "logs" / "rsl_rl").resolve()
+        if not _is_within(resolved_log_dir, resolved_root):
+            return self._json({"error": "Run log directory is outside the RSL-RL log root"}, status=403)
+        if not _is_within(resolved_video, resolved_log_dir):
+            return self._json({"error": "Video path is outside the selected run log directory"}, status=403)
         self._send_file_response(resolved_video, "video/mp4")
 
     def _send_run_mujoco_video(self, run_id: str) -> None:
@@ -991,6 +1076,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.state.processes.reconcile_stale_history()
         runs = self.state.history.list_runs()
         for run in runs:
+            run["effective_spring_backend"] = resolve_spring_backend(run)
             latest = latest_deploy_report(run)
             if latest:
                 run["deploy_latest_report"] = {

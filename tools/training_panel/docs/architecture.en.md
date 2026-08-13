@@ -6,7 +6,7 @@ audience: developer
 type: explanation
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="components"></a>
@@ -24,6 +24,11 @@ The local mother is a Python `ThreadingHTTPServer` with static assets and APIs b
 
 Remote roles and job types are defined centrally in `remote_config.py`. A heartbeat reports panel version, machine ID, paths, active job, queue depth, GPU lock, acceptance state, tunnel, and time. The worker claims authorized jobs, executes through the same process registry, and syncs runs, artifacts, metadata, folders, tombstones, and notifications.
 
+<a id="spring-contract"></a>
+## Spring-backend contract
+
+Run creation accepts only `explicit` or `native` and records the selection in parameters and history. Training, Play, automatic video, export, deployment validation, and remote synchronization reuse the stored backend and fail closed on missing or invalid spring metadata. ForwardFast automatic recording alone adds `--initial_command forward`; interactive Play and full Direct recordings do not.
+
 <a id="security"></a>
 ## Security boundary
 
@@ -32,7 +37,9 @@ Mother has no built-in authentication and can launch or delete local work; local
 <a id="version"></a>
 ## Version contract
 
-Version `3.4.10-sync-health` appears in Python, local UI assets, child asset URLs, child release metadata, heartbeat, and worker schema. Change them together and add a release entry. Tests cover command construction, history, queue/process behavior, remote roles/sync, notifications, contract parity, deployment, and UI assets.
+The local Mother package and UI are release `3.6.0-panel-ux`. The independently deployed remote Child assets, Child release metadata, heartbeat schema, and worker synchronization contract remain at `3.4.10-sync-health`. A local UI release does not silently change the remote protocol. Update every surface belonging to the contract being released, retain compatibility evidence, and add a bilingual release entry.
+
+V3.5 adds progress parsing, TensorBoard summaries, divergence monitoring, Git provenance, and recorded random seeds. V3.6 adds URL-backed navigation, action-local error reporting, first-load skeletons, keyboard-focus tooltips, run-card action menus, and backend-freshness state. Tests cover command construction, history, progress/convergence/provenance, queue/process behavior, remote roles/sync, notifications, contract parity, deployment, and UI assets.
 
 <a id="pages"></a>
 ## Pages artifact

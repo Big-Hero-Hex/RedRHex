@@ -6,7 +6,7 @@ audience: developer
 type: index
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="operator"></a>
@@ -22,6 +22,8 @@ last_reviewed: 2026-08-07
 
 - [架構與 contract](architecture.zh-TW.md)
 - [移植與擴充指南](porting.zh-TW.md)
+- [3.6.0 版本紀錄](releases/v3-6-0.zh-TW.md)
+- [3.5.0 版本紀錄](releases/v3-5-0.zh-TW.md)
 - [3.4.10 版本紀錄](releases/v3-4-10.zh-TW.md)
 
 <a id="central"></a>

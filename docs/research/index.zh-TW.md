@@ -6,15 +6,17 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="published-evidence"></a>
 ## 已發布證據
 
+- [純感測器學生蒸餾 V2 程式路徑稽核](2026-08-13-student-distillation-v2-audit.zh-TW.md)
 - [2026-08-13 研究就緒度稽核修正附錄 1](2026-08-13-research-readiness-audit-addendum-1.zh-TW.md)
 - [2026-08-13 研究就緒度稽核](2026-08-13-research-readiness-audit.zh-TW.md)
 - [2026-08-07 文件系統 v1 稽核](2026-08-07-documentation-system-audit.zh-TW.md)
+- [2026-08-01 扭轉彈簧 V11 暫定 checkpoint](2026-08-01-torsion-spring-v11-checkpoint.zh-TW.md)
 - [2026-07-09 專案稽核](2026-07-09-project-audit.zh-TW.md)
 - [2026-07-10 訓練堆疊證據](2026-07-10-training-stack-evidence.zh-TW.md)
 - [移動研究文獻與設計理由](locomotion-literature.zh-TW.md)

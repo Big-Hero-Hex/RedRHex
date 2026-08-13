@@ -1,4 +1,4 @@
 """Local RedRHex training panel package."""
 
-__version__ = "3.4.10-sync-health"
+__version__ = "3.6.0-panel-ux"
 __publisher__ = "BioRoLa ABAD RHex Team"

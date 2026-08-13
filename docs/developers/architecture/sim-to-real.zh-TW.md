@@ -6,7 +6,7 @@ audience: developer
 type: explanation
 status: active
 owner: sim2real
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="roles"></a>
@@ -28,6 +28,11 @@ last_reviewed: 2026-08-07
 ## 失敗模型
 
 若 provenance 不完整、JSON 有重複 key 或非有限值、hardware mapping 未解決、publisher 混淆、timing 衝突、artifact 未驗證、physics audit 失敗、held-out metric 不完整，或 evidence 非穩態，workflow 會 fail closed。輸出路徑也不會被靜默覆寫。
+
+<a id="torsion-springs"></a>
+## Torsion-spring 邊界
+
+Passive-spring profile 使用 canonical aliases `damper_0` 到 `damper_5`。代表性 calibration 與另一份 holdout evidence 來自 `damper_0`；通過的 neutral-constrained stiffness 傳播到所有 aliases，而 damping 在另行識別前維持零。`explicit` 與 `native` 是相同 contract 的實作，不是可互換的 evidence：selected backend、profile ID/hash 與 calibration status 會綁定 training、playback、evaluation、Panel history 與 deployment checks。
 
 <a id="limits"></a>
 ## 解讀限制

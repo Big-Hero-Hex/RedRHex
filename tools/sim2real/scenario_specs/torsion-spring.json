@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "scenario_id": "torsion-spring",
+  "name": "Representative torsion-spring calibration",
+  "description": "Fit representative damper_0 from three sweeps at 20, 40, 60, and 80 percent of the approved envelope; torque_direction is +/-1 and sweep_branch is +1 loading or -1 unloading.",
+  "subsystem": "spring",
+  "experiment_kind": "spring",
+  "joint": "damper_0",
+  "command_segments": [{"duration_s": 2.0, "value": 0.0, "label": "manual_signed_loading_unloading"}],
+  "repeats": 3,
+  "required_channels": ["load_force", "lever_arm", "angle", "torque_direction", "sweep_branch", "repeat_index"],
+  "time_bases": {
+    "load_force": "load_force_time_s",
+    "lever_arm": "lever_arm_time_s",
+    "angle": "angle_time_s",
+    "torque_direction": "angle_time_s",
+    "sweep_branch": "angle_time_s",
+    "repeat_index": "angle_time_s"
+  },
+  "split": "calibration",
+  "scene_mode": "manual",
+  "safety_class": "manual_load"
+}

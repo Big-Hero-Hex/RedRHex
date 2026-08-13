@@ -1,10 +1,20 @@
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.training_panel.training_panel.config import PanelPaths
-from tools.training_panel.training_panel.history import HistoryStore, latest_checkpoint, latest_onnx, latest_video, tail_file
+from tools.training_panel.training_panel import history as history_module
+from tools.training_panel.training_panel.history import (
+    HistoryCorruptError,
+    HistoryStore,
+    latest_checkpoint,
+    latest_onnx,
+    latest_video,
+    tail_file,
+)
 from tools.training_panel.training_panel.server import PanelHandler, PanelState, route_id
 
 
@@ -451,6 +461,47 @@ class HistoryTests(unittest.TestCase):
             self.assertIn("Good Runs", payload["folders"])
             self.assertEqual(payload["runs"][0]["folder"], "Good Runs")
 
+    def test_runs_payload_exposes_backend_discovered_from_torsion_yaml(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "native_run"
+            params_dir = run / "params"
+            params_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            payload = handler._runs_payload()
+
+            assert payload["runs"][0]["effective_spring_backend"] == "native"
+
+    def test_runs_payload_rejects_malformed_torsion_backend_metadata(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "invalid_run"
+            params_dir = run / "params"
+            params_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: invalid\n", encoding="utf-8")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            with self.assertRaisesRegex(ValueError, "spring_backend"):
+                handler._runs_payload()
+
     def test_open_location_rejects_paths_outside_log_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -460,6 +511,97 @@ class HistoryTests(unittest.TestCase):
             handler.state = PanelState(self.make_paths(root))
             with self.assertRaises(ValueError):
                 handler._open_location(str(outside))
+
+    def test_send_run_video_allows_forward_fast_video_inside_run_log_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_forward_fast" / "forward_fast_run"
+            video = log_dir / "videos" / "play" / "model_199.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+
+            class FakeHistory:
+                def get_run(self, run_id):
+                    self.requested_run_id = run_id
+                    return {"id": run_id, "log_dir": str(log_dir), "latest_video": str(video)}
+
+            served = []
+            errors = []
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": FakeHistory(), "paths": self.make_paths(root)},
+            )()
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("panel_forward_fast")
+
+            self.assertEqual(served, [(video.resolve(), "video/mp4")])
+            self.assertEqual(errors, [])
+
+    def test_send_run_video_rejects_video_outside_selected_run_log_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected_log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "selected_run"
+            other_log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "other_run"
+            video = other_log_dir / "videos" / "play" / "other.mp4"
+            selected_log_dir.mkdir(parents=True)
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+
+            class FakeHistory:
+                def get_run(self, run_id):
+                    return {
+                        "id": run_id,
+                        "log_dir": str(selected_log_dir),
+                        "latest_video": str(video),
+                    }
+
+            served = []
+            errors = []
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": FakeHistory(), "paths": self.make_paths(root)},
+            )()
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("selected_run")
+
+            self.assertEqual(served, [])
+            self.assertEqual(errors, [({"error": "Video path is outside the selected run log directory"}, 403)])
+
+    def test_send_run_video_rejects_run_log_dir_outside_rsl_rl_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "outside_run"
+            video = log_dir / "videos" / "play" / "outside.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+
+            class FakeHistory:
+                def get_run(self, run_id):
+                    return {"id": run_id, "log_dir": str(log_dir), "latest_video": str(video)}
+
+            served = []
+            errors = []
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": FakeHistory(), "paths": self.make_paths(root)},
+            )()
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("outside_run")
+
+            self.assertEqual(served, [])
+            self.assertEqual(errors, [({"error": "Run log directory is outside the RSL-RL log root"}, 403)])
 
     def test_delete_run_requires_confirmation_and_removes_repo_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -762,6 +904,137 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue((exported / "policy.pt").exists())
             self.assertTrue((exported / "policy.onnx").exists())
             self.assertEqual(store.get_note("compact_run"), "keep this")
+
+
+class HistoryDurabilityTests(unittest.TestCase):
+    """Regression cover for the cross-process write collision that could empty runs.json."""
+
+    def make_paths(self, root: Path) -> PanelPaths:
+        return PanelPaths(
+            repo_root=root,
+            isaaclab_root=root / "IsaacLab",
+            isaacsim_root=root / "isaacsim",
+            conda_sh=root / "conda.sh",
+            conda_env="env",
+        )
+
+    def test_corrupt_history_is_never_replaced_with_an_empty_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            store = HistoryStore(paths)
+            store.add_run({"id": "run_a", "source": "training_panel", "status": "completed"})
+            good = paths.history_file.read_text(encoding="utf-8")
+            self.assertIn("run_a", good)
+
+            # Simulate a torn publish: valid JSON spliced with a second write.
+            paths.history_file.write_text(good + good[: len(good) // 2], encoding="utf-8")
+
+            with self.assertRaises(HistoryCorruptError):
+                store.update_run("run_a", status="failed")
+            with self.assertRaises(HistoryCorruptError):
+                store.list_runs()
+
+            # The corrupt bytes must still be on disk, not an empty history.
+            after = paths.history_file.read_text(encoding="utf-8")
+            self.assertNotEqual(after.strip(), "")
+            self.assertIn("run_a", after)
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(after)
+
+            rescues = list(paths.history_file.parent.glob("runs.json.corrupt-*"))
+            self.assertTrue(rescues, "a rescue copy of the corrupt history should be preserved")
+            self.assertIn("run_a", rescues[0].read_text(encoding="utf-8"))
+
+    def test_missing_history_file_still_reads_as_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            store = HistoryStore(paths)
+            self.assertFalse(paths.history_file.exists())
+            self.assertEqual(store.list_runs(), [])
+
+    def test_tmp_file_name_is_unique_per_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            store = HistoryStore(paths)
+            seen = []
+            real_replace = os.replace
+
+            def spy(src, dst):
+                seen.append(str(src))
+                return real_replace(src, dst)
+
+            with mock.patch.object(history_module.os, "replace", spy):
+                store.add_run({"id": "run_a"})
+                store.add_run({"id": "run_b"})
+
+            self.assertEqual(len(seen), 2)
+            self.assertNotEqual(seen[0], seen[1], "two writes must not share one tmp filename")
+            for name in seen:
+                self.assertIn(f".{os.getpid()}.", name)
+            self.assertEqual(list(paths.history_file.parent.glob("*.tmp")), [])
+
+    def test_failed_publish_leaves_no_orphan_tmp_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            store = HistoryStore(paths)
+            with mock.patch.object(history_module.os, "replace", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    store.add_run({"id": "run_a"})
+            self.assertEqual(list(paths.history_file.parent.glob("*.tmp")), [])
+
+
+class HistoryVolatileFieldTests(unittest.TestCase):
+    """Progress heartbeats must not win the mother/child last-write-wins arbiter."""
+
+    OLD = "2020-01-01T00:00:00"
+
+    def make_paths(self, root: Path) -> PanelPaths:
+        return PanelPaths(
+            repo_root=root,
+            isaaclab_root=root / "IsaacLab",
+            isaacsim_root=root / "isaacsim",
+            conda_sh=root / "conda.sh",
+            conda_env="env",
+        )
+
+    def make_store(self, tmp: str) -> HistoryStore:
+        store = HistoryStore(self.make_paths(Path(tmp)))
+        store.add_run(
+            {
+                "id": "panel_20260801_120000",
+                "source": "training_panel",
+                "status": "running",
+                "created_at": self.OLD,
+                "updated_at": self.OLD,
+            }
+        )
+        return store
+
+    def test_progress_only_update_does_not_bump_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            store.update_run(
+                "panel_20260801_120000",
+                progress={"iteration": 12, "percent": 3.0, "updated_at": "2026-08-01T14:00:05"},
+            )
+            record = store.get_run("panel_20260801_120000")
+            self.assertEqual(record["updated_at"], self.OLD)
+            self.assertEqual(record["progress"]["iteration"], 12)
+
+    def test_real_state_change_still_bumps_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            store.update_run("panel_20260801_120000", status="completed", returncode=0)
+            record = store.get_run("panel_20260801_120000")
+            self.assertNotEqual(record["updated_at"], self.OLD)
+            self.assertEqual(record["status"], "completed")
+
+    def test_mixed_update_with_progress_still_bumps_updated_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self.make_store(tmp)
+            store.update_run("panel_20260801_120000", progress={"iteration": 3}, status="stopping")
+            record = store.get_run("panel_20260801_120000")
+            self.assertNotEqual(record["updated_at"], self.OLD)
 
 
 if __name__ == "__main__":

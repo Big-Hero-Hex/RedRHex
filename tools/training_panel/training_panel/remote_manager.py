@@ -6,6 +6,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Mapping
@@ -238,14 +239,22 @@ class RemoteWorkerManager:
             raise ValueError("worker_mode must be 'tmux' or 'child'")
         return normalized
 
-    def _worker_shell(self) -> str:
+    def _worker_shell(self, *, replace_process: bool = True) -> str:
         env_file = shlex.quote(str(self.env_file))
         repo_root = shlex.quote(str(self.paths.repo_root))
+        conda_sh = shlex.quote(str(self.paths.conda_sh))
+        conda_env = shlex.quote(self.paths.conda_env)
+        python = shlex.quote(sys.executable)
+        launch = f"{python} -u -m tools.training_panel.remote_worker"
+        if replace_process:
+            launch = f"exec {launch}"
         return " && ".join(
             [
+                f"source {conda_sh}",
+                f"conda activate {conda_env}",
                 f"cd {repo_root}",
                 f"if [ -f {env_file} ]; then source {env_file}; fi",
-                "exec python -u -m tools.training_panel.remote_worker",
+                launch,
             ]
         )
 
@@ -254,7 +263,7 @@ class RemoteWorkerManager:
         if not tmux:
             raise RuntimeError("tmux is not installed; use child process mode instead")
         log_file = shlex.quote(str(self.log_file))
-        shell = self._worker_shell().replace("exec python", "python")
+        shell = self._worker_shell(replace_process=False)
         inner = f"{shell} 2>&1 | tee -a {log_file}"
         result = self.run_command(
             [tmux, "new-session", "-d", "-s", REMOTE_WORKER_SESSION, "--", "bash", "-lc", inner],

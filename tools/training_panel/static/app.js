@@ -3,6 +3,8 @@ const RUNS_POLL_ACTIVE_MS = 10000;
 const RUNS_POLL_IDLE_MS = 30000;
 
 const state = {
+  applyingRoute: false,
+  currentView: "train",
   selectedRun: null,
   runs: [],
   activeProcessMap: {},
@@ -14,6 +16,9 @@ const state = {
   lastDebug: null,
   debugTimer: null,
   runsRefreshTimer: null,
+  lastPollAt: 0,
+  lastPollError: "",
+  openMenuRunId: null,
   renameDirty: false,
   renameDraftRunId: null,
   // Search / filter / sort (Module 5)
@@ -64,7 +69,68 @@ const state = {
   // Comparison (Module 6)
   comparisonRun: null,
   comparisonMode: false,
+  // Training curves (V3.5)
+  curvesRunId: null,
+  curvesLoadedAt: 0,
+  curvesInFlight: null,
+  curvesTimer: null,
+  // Loading registry (V3.6)
+  loading: new Set(),
 };
+
+// A skeleton stands in for data that has never arrived. Once real data is on
+// screen, a background refresh must leave it alone rather than flashing.
+function beginLoading(key) {
+  state.loading.add(key);
+}
+
+function endLoading(key) {
+  state.loading.delete(key);
+}
+
+function isLoading(key) {
+  return state.loading.has(key);
+}
+
+function skeletonHtml(rows = 3) {
+  return Array.from({ length: rows })
+    .map(() => `<div class="skeleton-row" aria-hidden="true"></div>`)
+    .join("");
+}
+
+const ROUTE_VIEWS = ["train", "rewards", "terrain", "history", "deploy", "convergence", "activity", "access"];
+
+function writeHashRoute() {
+  if (state.applyingRoute) return;
+  const view = state.currentView || "train";
+  const runId = view === "history" && state.selectedRun ? state.selectedRun.id : "";
+  const next = runId ? `#/history/${encodeURIComponent(runId)}` : `#/${view}`;
+  if (location.hash !== next) history.replaceState(null, "", next);
+}
+
+function parseHashRoute() {
+  const raw = (location.hash || "").replace(/^#\/?/, "");
+  if (!raw) return { view: "train", runId: "" };
+  const [view, encodedRun] = raw.split("/");
+  if (!ROUTE_VIEWS.includes(view)) return { view: "train", runId: "" };
+  try {
+    return { view, runId: encodedRun ? decodeURIComponent(encodedRun) : "" };
+  } catch (error) {
+    if (error instanceof URIError) return { view: "train", runId: "" };
+    throw error;
+  }
+}
+
+async function applyHashRoute() {
+  const route = parseHashRoute();
+  state.applyingRoute = true;
+  try {
+    setView(route.view);
+    if (route.runId && findRun(route.runId)) await selectRun(route.runId);
+  } finally {
+    state.applyingRoute = false;
+  }
+}
 
 const $ = (selector) => document.querySelector(selector);
 const THEME_KEY = "redrhex-training-panel-theme";
@@ -190,19 +256,86 @@ async function api(path, options = {}) {
   return data;
 }
 
+const TOAST_DISMISS_MS = 6000;
+const TOAST_MAX = 3;
+
 function setStatus(message, linkUrl = "") {
-  const status = $("#notes-status");
-  status.textContent = "";
-  status.append(document.createTextNode(message));
+  setStatusTone(message, "info", linkUrl);
+}
+
+function setStatusTone(message, tone = "info", linkUrl = "") {
+  const region = $("#panel-status");
+  if (!region) return;
+  const text = String(message ?? "").trim();
+  if (!text) return;
+
+  const existing = Array.from(region.querySelectorAll(".toast")).find(
+    (node) => node.dataset.message === text && node.dataset.tone === tone,
+  );
+  if (existing) {
+    const count = Number(existing.dataset.count || "1") + 1;
+    existing.dataset.count = String(count);
+    const counter = existing.querySelector(".toast-count");
+    if (counter) {
+      counter.textContent = `×${count}`;
+      counter.hidden = false;
+    }
+    restartToastTimer(existing, tone);
+    return;
+  }
+
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${tone}`;
+  toast.dataset.message = text;
+  toast.dataset.tone = tone;
+  toast.dataset.count = "1";
+
+  const body = document.createElement("div");
+  body.className = "toast-body";
+  body.append(document.createTextNode(text));
   if (linkUrl) {
     const link = document.createElement("a");
     link.href = linkUrl;
     link.target = "_blank";
     link.rel = "noopener";
     link.textContent = linkUrl;
-    status.append(document.createTextNode(" "));
-    status.append(link);
+    body.append(document.createTextNode(" "));
+    body.append(link);
   }
+
+  const counter = document.createElement("span");
+  counter.className = "toast-count";
+  counter.hidden = true;
+
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "toast-close";
+  close.setAttribute("aria-label", "Dismiss message");
+  close.textContent = "×";
+  close.addEventListener("click", () => dismissToast(toast));
+
+  toast.append(body, counter, close);
+  region.append(toast);
+
+  while (region.querySelectorAll(".toast").length > TOAST_MAX) {
+    // Drop the oldest *non-error* toast first so routine chatter can never push
+    // out an unread failure. When every slot is an error, drop the oldest one.
+    const toasts = Array.from(region.querySelectorAll(".toast"));
+    dismissToast(toasts.find((node) => node.dataset.tone !== "error") || toasts[0]);
+  }
+  restartToastTimer(toast, tone);
+}
+
+function restartToastTimer(toast, tone) {
+  if (toast.dismissTimer) clearTimeout(toast.dismissTimer);
+  if (tone === "error") return;  // errors stay until dismissed — a failure must be read
+  toast.dismissTimer = setTimeout(() => dismissToast(toast), TOAST_DISMISS_MS);
+}
+
+function dismissToast(toast) {
+  if (!toast) return;
+  if (toast.dismissTimer) clearTimeout(toast.dismissTimer);
+  toast.remove();
 }
 
 function setTerrainStatus(message) {
@@ -332,6 +465,7 @@ function confirmAction({
 }
 
 function setView(name) {
+  state.currentView = name;
   document.querySelectorAll(".nav-button").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === name);
   });
@@ -354,6 +488,7 @@ function setView(name) {
     syncDeploySelection();
     loadDeployForSelectedRun().catch(handleActionError);
   }
+  writeHashRoute();
 }
 
 function rewardPresetsForRender() {
@@ -791,17 +926,29 @@ function statusLabel(kind, status, context) {
 }
 
 function runParamSummary(run) {
-  if (!run.params) return "";
   const parts = [];
-  if (run.params.task) parts.push(`task: ${run.params.task}`);
-  if (run.params.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params.max_iterations !== undefined) parts.push(`iters: ${run.params.max_iterations}`);
+  if (run.params?.task) parts.push(`task: ${run.params.task}`);
+  if (run.params?.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
+  if (run.params?.max_iterations !== undefined) parts.push(`iters: ${run.params.max_iterations}`);
+  parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
+}
+
+// End of a run's elapsed window. A running run has no completion time, so it
+// falls back to the progress heartbeat's own timestamp — the record-level
+// `updated_at` is deliberately not bumped by progress writes (it arbitrates
+// mother/child metadata sync), so it would freeze the displayed duration.
+function runEndTime(run) {
+  return run.completed_at || run.finished_at || run.progress?.updated_at || run.updated_at;
+}
+
+function runSpringBackend(run) {
+  return run.effective_spring_backend || run.params?.spring_backend || "explicit";
 }
 
 function runTimeSummary(run) {
   const relative = formatRelativeTime(run.created_at);
-  const duration = formatDuration(run.started_at || run.created_at, run.completed_at || run.finished_at || run.updated_at);
+  const duration = formatDuration(run.started_at || run.created_at, runEndTime(run));
   if (relative && duration) return `${relative} · duration ${duration}`;
   return relative || duration || "";
 }
@@ -982,14 +1129,207 @@ function filteredRuns() {
   return runs;
 }
 
+const PROGRESS_STALE_MS = 5 * 60 * 1000;
+
+function liveProgress(run) {
+  const progress = run?.progress;
+  if (!progress || typeof progress.iteration !== "number") return null;
+  if (!["running", "stopping"].includes(String(run.status || "").toLowerCase())) return null;
+  const updated = Date.parse(progress.updated_at || "");
+  if (!Number.isFinite(updated) || Date.now() - updated > PROGRESS_STALE_MS) return null;
+  return progress;
+}
+
+const CURVE_TAG_LABELS = {
+  "Train/mean_reward": "Mean Reward",
+  "Train/mean_episode_length": "Episode Length",
+};
+
+function sparklineSvg(points) {
+  if (!points || points.length < 2) return "";
+  const width = 280;
+  const height = 64;
+  const pad = 4;
+  const xs = points.map(([step]) => step);
+  const ys = points.map(([, value]) => value);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const spanX = maxX - minX || 1;
+  const spanY = maxY - minY || 1;
+  const coords = points.map(([step, value]) => {
+    const x = pad + ((step - minX) / spanX) * (width - 2 * pad);
+    const y = height - pad - ((value - minY) / spanY) * (height - 2 * pad);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return `
+    <svg class="sparkline" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img">
+      <polyline points="${escapeHtml(coords.join(" "))}" fill="none" stroke="currentColor" stroke-width="1.5" />
+    </svg>
+  `;
+}
+
+function renderRunCurves(data) {
+  const block = $("#run-curves-block");
+  const container = $("#run-curves");
+  if (!block || !container) return;
+  const tags = Object.entries(data?.tags || {});
+  if (!tags.length) {
+    block.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = tags
+    .map(([tag, points]) => {
+      const label = CURVE_TAG_LABELS[tag] || tag;
+      const latest = points.length ? points[points.length - 1][1] : null;
+      const latestText = typeof latest === "number" ? latest.toFixed(2) : "";
+      return `
+        <article class="curve-card">
+          <div class="curve-head">
+            <span class="curve-label">${escapeHtml(label)}</span>
+            <span class="curve-value">${escapeHtml(latestText)}</span>
+          </div>
+          ${sparklineSvg(points)}
+        </article>
+      `;
+    })
+    .join("");
+  block.hidden = false;
+}
+
+// Scalar requests re-parse the whole TensorBoard event directory server-side and
+// never hit the cache while a run is live, so they are driven by their own timer
+// — never by a render pass — and only one may be in flight per run at a time.
+const CURVES_REFRESH_MS = 30000;
+
+async function loadRunCurves(runId) {
+  if (!runId) {
+    state.curvesRunId = null;
+    state.curvesLoadedAt = 0;
+    renderRunCurves(null);
+    return;
+  }
+  if (state.curvesInFlight === runId) return;  // request already outstanding for this run
+  state.curvesInFlight = runId;
+  state.curvesRunId = runId;
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(runId)}/scalars?points=200`);
+    if (state.selectedRun?.id !== runId) return;  // selection changed while loading
+    state.curvesLoadedAt = Date.now();
+    renderRunCurves(data);
+  } catch (error) {
+    state.curvesLoadedAt = Date.now();  // back off; the timer retries live runs
+    if (state.selectedRun?.id === runId) renderRunCurves(null);  // informational — no error banner
+  } finally {
+    if (state.curvesInFlight === runId) state.curvesInFlight = null;
+  }
+}
+
+// Decides whether the selected run's curves need (re)loading. Safe to call often.
+function syncRunCurves() {
+  const run = state.selectedRun;
+  if (!run) {
+    if (state.curvesRunId !== null) loadRunCurves(null);
+    return;
+  }
+  if (state.curvesRunId !== run.id) {
+    loadRunCurves(run.id);
+    return;
+  }
+  const stale = !state.curvesLoadedAt || Date.now() - state.curvesLoadedAt > CURVES_REFRESH_MS;
+  if (liveProgress(run) && stale) loadRunCurves(run.id);
+}
+
+function startCurvesPolling() {
+  if (state.curvesTimer) return;
+  state.curvesTimer = setInterval(syncRunCurves, CURVES_REFRESH_MS);
+}
+
+function formatEta(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return "";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  const pad = (value) => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(secs)}` : `${minutes}:${pad(secs)}`;
+}
+
+function formatSteps(stepsPerSecond) {
+  if (typeof stepsPerSecond !== "number" || !Number.isFinite(stepsPerSecond)) return "";
+  return stepsPerSecond >= 1000
+    ? `${Math.round(stepsPerSecond / 1000)}k steps/s`
+    : `${Math.round(stepsPerSecond)} steps/s`;
+}
+
+function progressBarHtml(run) {
+  const progress = liveProgress(run);
+  if (!progress) return "";
+  const percent = typeof progress.percent === "number" ? progress.percent : 0;
+  const parts = [];
+  if (progress.total_iterations) parts.push(`${progress.iteration}/${progress.total_iterations}`);
+  const eta = formatEta(progress.eta_seconds);
+  if (eta) parts.push(`ETA ${eta}`);
+  const steps = formatSteps(progress.steps_per_second);
+  if (steps) parts.push(steps);
+  return `
+    <div class="run-progress" role="progressbar" aria-valuenow="${escapeHtml(String(Math.round(percent)))}" aria-valuemin="0" aria-valuemax="100">
+      <div class="run-progress-track"><div class="run-progress-fill" style="width:${escapeHtml(String(percent))}%"></div></div>
+      <small class="run-progress-label">${escapeHtml(parts.join(" · "))}</small>
+    </div>
+  `;
+}
+
+function closeRunMenu({ restoreFocus = false } = {}) {
+  const runId = state.openMenuRunId;
+  state.openMenuRunId = null;
+  document.querySelectorAll(".run-menu[data-open='true']").forEach((menu) => {
+    menu.dataset.open = "false";
+  });
+  document.querySelectorAll(".run-menu-trigger[aria-expanded='true']").forEach((trigger) => {
+    trigger.setAttribute("aria-expanded", "false");
+  });
+  if (restoreFocus && runId) {
+    const trigger = document.querySelector(`.run-menu-trigger[data-run-id="${CSS.escape(runId)}"]`);
+    if (trigger) trigger.focus();
+  }
+}
+
+function toggleRunMenu(runId) {
+  const alreadyOpen = state.openMenuRunId === runId;
+  closeRunMenu();
+  if (alreadyOpen) return;
+  state.openMenuRunId = runId;
+  syncRunMenuState();
+  const menu = document.querySelector(`.run-menu[data-run-id="${CSS.escape(runId)}"]`);
+  const firstItem = menu?.querySelector("button[role='menuitem']:not([disabled])");
+  if (firstItem) firstItem.focus();
+}
+
+// The runs list re-renders on every poll; without this the open menu would vanish mid-click.
+function syncRunMenuState() {
+  if (!state.openMenuRunId) return;
+  const menu = document.querySelector(`.run-menu[data-run-id="${CSS.escape(state.openMenuRunId)}"]`);
+  const trigger = document.querySelector(`.run-menu-trigger[data-run-id="${CSS.escape(state.openMenuRunId)}"]`);
+  if (!menu || !trigger) {
+    state.openMenuRunId = null;  // the run left the list
+    return;
+  }
+  menu.dataset.open = "true";
+  trigger.setAttribute("aria-expanded", "true");
+}
+
 function renderRuns() {
   const runs = filteredRuns();
   const badge = $("#run-count-badge");
   if (badge) badge.textContent = `${runs.length} run${runs.length !== 1 ? "s" : ""}`;
   if (!runs.length) {
-    $("#runs").innerHTML = state.runs.length
-      ? `<article class="empty-panel">No runs match your search or filter.</article>`
-      : `<article class="empty-panel">No training history found yet.</article>`;
+    $("#runs").innerHTML = isLoading("runs") && !state.runs.length
+      ? skeletonHtml(4)
+      : state.runs.length
+        ? `<article class="empty-panel">No runs match your search or filter.</article>`
+        : `<article class="empty-panel">No training history found yet.</article>`;
     updateBulkToolbar();
     return;
   }
@@ -1043,6 +1383,7 @@ function renderRuns() {
             : run.terrain_diff_count > 0
               ? `<small><span class="terrain-diff-badge">${escapeHtml(String(run.terrain_diff_count))} terrain override${run.terrain_diff_count !== 1 ? "s" : ""}</span></small>`
               : ""}
+          ${progressBarHtml(run)}
           ${queued ? `<small>waiting for GPU queue</small>` : ""}
           ${moving ? `<small>moving to folder...</small>` : ""}
           ${compacting ? `<small>compacting checkpoints...</small>` : ""}
@@ -1050,8 +1391,6 @@ function renderRuns() {
           <div class="run-actions">
             <button type="button" data-action="tensorboard" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canTensorboard)} data-tooltip="Open metrics">TensorBoard</button>
             <button type="button" data-action="${playAction}" data-run-id="${escapeHtml(run.id)}" ${playProcessAttr} ${runButtonDisabled(busy || playDisabled)} data-tooltip="${playProcessId ? "Stop Isaac playback" : "Play checkpoint"}">${escapeHtml(playLabel)}</button>
-            <button type="button" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)} data-tooltip="Resume training from checkpoint">Resume to Train</button>
-            <button type="button" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)} data-tooltip="Copy this run into an editable reward tweak draft">Tweak</button>
             <button type="button" data-action="console" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting)} data-tooltip="Show Process Console">Console</button>
             ${queued
               ? `<button type="button" data-action="cancel-queue" data-run-id="${escapeHtml(run.id)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Cancel this queued training run">Cancel Queue</button>`
@@ -1062,9 +1401,18 @@ function renderRuns() {
             ${trainingProcessId
               ? `<button type="button" data-action="stop-process" data-run-id="${escapeHtml(run.id)}" data-process-id="${escapeHtml(trainingProcessId)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Stop the active training process">Stop Training</button>`
               : ""}
-            ${state.selectedRun && state.selectedRun.id !== run.id
-              ? `<button type="button" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)} data-tooltip="Compare with selected">Compare</button>`
-              : ""}
+            <div class="run-menu-wrap">
+              <button type="button" class="run-menu-trigger" data-run-id="${escapeHtml(run.id)}"
+                aria-haspopup="menu" aria-expanded="false"
+                data-tooltip="More actions for this run">⋮</button>
+              <div class="run-menu" role="menu" data-run-id="${escapeHtml(run.id)}" data-open="false">
+                <button type="button" role="menuitem" data-action="resume" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canCheckpoint)} data-tooltip="Resume training from checkpoint">Resume to Train</button>
+                <button type="button" role="menuitem" data-action="tweak" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || queued || !canTweak)} data-tooltip="Copy this run into an editable reward tweak draft">Tweak</button>
+                ${state.selectedRun && state.selectedRun.id !== run.id
+                  ? `<button type="button" role="menuitem" data-action="compare" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy)} data-tooltip="Compare with selected">Compare</button>`
+                  : ""}
+              </div>
+            </div>
           </div>
         </article>
       `;
@@ -1078,9 +1426,16 @@ function renderRuns() {
         toggleRunSelection(checkbox.dataset.runId, checkbox.checked);
         return;
       }
+      const menuTrigger = event.target.closest(".run-menu-trigger");
+      if (menuTrigger) {
+        event.stopPropagation();
+        toggleRunMenu(menuTrigger.dataset.runId);
+        return;
+      }
       const button = event.target.closest("button[data-action]");
       if (button) {
         event.stopPropagation();
+        closeRunMenu();
         handleRunAction(button.dataset.action, button.dataset.runId, button.dataset.processId);
         return;
       }
@@ -1088,6 +1443,7 @@ function renderRuns() {
     });
   });
   updateBulkToolbar();
+  syncRunMenuState();
 }
 
 function videoUrl(run) {
@@ -1218,11 +1574,24 @@ function renderRunDetails() {
   if (infoBlock && infoGrid && run) {
     const rows = [];
     if (run.created_at) rows.push(["Created", formatRelativeTime(run.created_at)]);
-    const dur = formatDuration(run.started_at || run.created_at, run.completed_at || run.finished_at || run.updated_at);
+    const dur = formatDuration(run.started_at || run.created_at, runEndTime(run));
     if (dur) rows.push(["Duration", dur]);
     if (run.params?.task) rows.push(["Task", run.params.task]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
     if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
+    rows.push(["Spring Backend", runSpringBackend(run)]);
+    if (run.params?.seed != null) rows.push(["Seed", run.params.seed]);
+    if (run.git?.short) rows.push(["Commit", `${run.git.short}${run.git.dirty ? " (dirty)" : ""}`]);
+    const progress = liveProgress(run);
+    if (progress) {
+      if (progress.total_iterations)
+        rows.push(["Progress", `${progress.iteration}/${progress.total_iterations} (${Math.round(progress.percent || 0)}%)`]);
+      const etaText = formatEta(progress.eta_seconds);
+      if (etaText) rows.push(["ETA", etaText]);
+      const stepsText = formatSteps(progress.steps_per_second);
+      if (stepsText) rows.push(["Throughput", stepsText]);
+      if (typeof progress.mean_reward === "number") rows.push(["Mean reward", progress.mean_reward.toFixed(2)]);
+    }
     const ckptIter = checkpointIteration(run.latest_checkpoint);
     if (ckptIter !== null) rows.push(["Checkpoint", `iter ${ckptIter}`]);
     const onnxText = onnxProcessId ? "exporting" : (run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing"));
@@ -1233,6 +1602,8 @@ function renderRunDetails() {
       rows.push(["Terrain preset", run.terrain_preset_id]);
     if (run.convergence_detected)
       rows.push(["Converged", `iter ${run.convergence_iteration} (Δ ${run.convergence_improvement_pct?.toFixed(1)}%)`]);
+    if (run.divergence_detected)
+      rows.push(["Diverged", `${run.divergence_kind || "unknown"} at iter ${run.divergence_iteration}`]);
     infoGrid.innerHTML = rows
       .map(([k, v]) => `<span class="info-key">${escapeHtml(k)}</span><span class="info-val">${escapeHtml(String(v))}</span>`)
       .join("");
@@ -1292,6 +1663,10 @@ function renderRunDetails() {
   $("#copy-command").disabled = !hasCommand;
   $("#open-process-log-folder").disabled = !state.lastDebug || !(state.lastDebug.process_log || state.lastDebug.log_file);
 
+  // Curves are fetched by syncRunCurves() on selection change and on their own
+  // timer. renderRunDetails() stays synchronous and side-effect-free — it is
+  // called from ~14 places, including three times per debug poll.
+  if (!run) renderRunCurves(null);
   renderVideoPanel(run);
 }
 
@@ -1343,7 +1718,13 @@ async function loadDeployForSelectedRun() {
     renderDeployPanel();
     return;
   }
-  state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
+  beginLoading("deploy");
+  if (!state.deployData) renderDeployPanel();  // skeleton while the fetch is in flight
+  try {
+    state.deployData = await api(`/api/runs/${encodeURIComponent(runId)}/deploy`);
+  } finally {
+    endLoading("deploy");
+  }
   renderDeployPanel();
 }
 
@@ -1463,7 +1844,11 @@ function renderDeployReport(data) {
   const json = $("#deploy-report-json");
   const badge = $("#deploy-readiness-badge");
   if (!report) {
-    if (stageList) stageList.innerHTML = `<article class="empty-panel">No deploy readiness report for this run yet.</article>`;
+    if (stageList) {
+      stageList.innerHTML = isLoading("deploy") && !state.deployData
+        ? skeletonHtml(3)
+        : `<article class="empty-panel">No deploy readiness report for this run yet.</article>`;
+    }
     if (meta) meta.textContent = "";
     if (json) json.textContent = "";
     if (badge) {
@@ -1755,6 +2140,34 @@ function hasActiveRun() {
   );
 }
 
+const FRESHNESS_TICK_MS = 5000;
+
+function renderFreshness() {
+  const wrap = $("#freshness");
+  const label = $("#freshness-label");
+  if (!wrap || !label) return;
+
+  if (state.lastPollError) {
+    wrap.dataset.state = "failed";
+    label.textContent = `disconnected — ${state.lastPollError}`;
+    wrap.title = state.lastPollError;
+    return;
+  }
+  if (!state.lastPollAt) {
+    wrap.dataset.state = "stale";
+    label.textContent = "connecting…";
+    return;
+  }
+  const ageMs = Date.now() - state.lastPollAt;
+  const interval = hasActiveRun() ? RUNS_POLL_ACTIVE_MS : RUNS_POLL_IDLE_MS;
+  wrap.dataset.state = ageMs <= interval * 1.5 ? "live" : "stale";
+  const seconds = Math.max(0, Math.round(ageMs / 1000));
+  label.textContent = seconds < 60
+    ? `updated ${seconds}s ago`
+    : `updated ${Math.round(seconds / 60)}m ago`;
+  wrap.title = new Date(state.lastPollAt).toLocaleTimeString();
+}
+
 function scheduleRunsRefresh() {
   if (state.runsRefreshTimer) clearTimeout(state.runsRefreshTimer);
   const delay = hasActiveRun() ? RUNS_POLL_ACTIVE_MS : RUNS_POLL_IDLE_MS;
@@ -1768,40 +2181,59 @@ function scheduleRunsRefresh() {
 }
 
 async function loadRuns() {
-  const selectedId = state.selectedRun && state.selectedRun.id;
-  const scrollState = captureHistoryScroll();
-  const [runsData, processesData] = await Promise.all([api("/api/runs"), api("/api/processes")]);
-  state.runs = runsData.runs;
-  if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
-  reconcileHistoryNotifications(state.runs);
-  state.activeProcessMap = {};
-  state.activeProcesses = [];
-  state.activeProcessesByRun = {};
-  state.activeProcessByKind = {};
-  for (const process of processesData.processes) {
-    if (process.returncode !== null) continue;
-    state.activeProcesses.push(process);
-    rememberActiveProcess(process.run_id, process);
-    rememberActiveProcess(process.source_run_id, process);
-  }
-  const validRunIds = new Set(state.runs.map((run) => run.id));
-  state.selectedRunIds = new Set([...state.selectedRunIds].filter((runId) => validRunIds.has(runId)));
-  if (selectedId) {
-    const selected = findRun(selectedId);
-    if (selected) {
-      state.selectedRun = selected;
-    } else {
-      clearRunDetailState({ render: false });
+  beginLoading("runs");
+  // Paint the skeleton now, while the fetch below is still in flight. Rendering
+  // only after the await would mean the loading flag is never observed.
+  if (!state.runs.length) renderRuns();
+  try {
+    const selectedId = state.selectedRun && state.selectedRun.id;
+    const scrollState = captureHistoryScroll();
+    const [runsData, processesData] = await Promise.all([api("/api/runs"), api("/api/processes")]);
+    state.lastPollAt = Date.now();
+    state.lastPollError = "";
+    renderFreshness();
+    state.runs = runsData.runs;
+    if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
+    reconcileHistoryNotifications(state.runs);
+    state.activeProcessMap = {};
+    state.activeProcesses = [];
+    state.activeProcessesByRun = {};
+    state.activeProcessByKind = {};
+    for (const process of processesData.processes) {
+      if (process.returncode !== null) continue;
+      state.activeProcesses.push(process);
+      rememberActiveProcess(process.run_id, process);
+      rememberActiveProcess(process.source_run_id, process);
     }
+    const validRunIds = new Set(state.runs.map((run) => run.id));
+    state.selectedRunIds = new Set([...state.selectedRunIds].filter((runId) => validRunIds.has(runId)));
+    if (selectedId) {
+      const selected = findRun(selectedId);
+      if (selected) {
+        state.selectedRun = selected;
+      } else {
+        clearRunDetailState({ render: false });
+      }
+    }
+    // Not redundant with the `finally` below: the post-fetch render must see the
+    // flag already cleared, or a genuinely empty result paints a skeleton forever.
+    endLoading("runs");
+    renderRuns();
+    renderRunDetails();
+    syncRunCurves();
+    renderGpuLockStatus();
+    renderFolderSidebar();
+    renderFolderOptions();
+    renderDeployPanel();
+    restoreHistoryScroll(scrollState);
+    scheduleRunsRefresh();
+  } catch (error) {
+    state.lastPollError = error.message;
+    renderFreshness();
+    throw error;
+  } finally {
+    endLoading("runs");
   }
-  renderRuns();
-  renderRunDetails();
-  renderGpuLockStatus();
-  renderFolderSidebar();
-  renderFolderOptions();
-  renderDeployPanel();
-  restoreHistoryScroll(scrollState);
-  scheduleRunsRefresh();
 }
 
 async function selectRun(runId) {
@@ -1815,8 +2247,10 @@ async function selectRun(runId) {
     state.renameDraftRunId = null;
   }
   state.selectedRun = run;
+  writeHashRoute();
   markHistoryRead(runId);
   renderRunDetails();
+  syncRunCurves();
   renderRuns();
   // Hide reward panel until loaded
   const rewardPanel = $("#reward-config-panel");
@@ -1830,7 +2264,9 @@ async function selectRun(runId) {
   ]);
   if (!state.selectedRun || state.selectedRun.id !== runId) return;
   $("#notes-editor").value = notesData.notes;
-  setStatus(run.latest_checkpoint ? `Latest checkpoint: ${run.latest_checkpoint}` : "No checkpoint available yet.");
+  // No toast here: checkpoint state is metadata, not an event, and the details
+  // pane already reports it ("Checkpoint: iter N" / "no checkpoint"). A toast on
+  // every run click would evict unread errors three clicks later.
   setDebugTarget({ type: "run", id: runId });
 }
 
@@ -2095,6 +2531,8 @@ function clearRunDetailState({ render = true } = {}) {
   state.lastDebug = null;
   state.renameDirty = false;
   state.renameDraftRunId = null;
+  state.curvesRunId = null;
+  state.curvesLoadedAt = 0;
   stopDebugPolling();
   const notesEditor = $("#notes-editor");
   if (notesEditor) notesEditor.value = "";
@@ -2318,6 +2756,7 @@ function resumeRun(runId) {
   }
   const form = $("#train-form");
   form.elements.checkpoint.value = run.latest_checkpoint;
+  form.elements.spring_backend.value = runSpringBackend(run);
   setView("train");
   $("#train-status").textContent = `Resume selected from ${run.display_name || run.id}. Choose iterations/envs, then start training.`;
 }
@@ -2328,7 +2767,7 @@ function handleActionError(error, pendingWindow = null) {
     renderDebugPayload(error.data);
     if (error.data.run_id && error.data.kind) setDebugTarget({ type: "process", id: error.data.run_id });
   }
-  setStatus(error.message);
+  setStatusTone(error.message, "error");
 }
 
 async function runningProcessForSelectedRun() {
@@ -2594,7 +3033,7 @@ async function handleRunAction(action, runId, processId = "") {
       await cancelQueuedRun(runId);
       return;
     }
-    if (!state.selectedRun || state.selectedRun.id !== runId) {
+    if (action !== "compare" && (!state.selectedRun || state.selectedRun.id !== runId)) {
       await selectRun(runId);
     }
     if (action === "tensorboard") await startTensorBoardForRun(runId, pendingWindow);
@@ -2644,6 +3083,7 @@ function applyTrainingParamsToForm(params) {
   form.elements.num_envs.value = params.num_envs ?? 4;
   form.elements.max_iterations.value = params.max_iterations ?? 1;
   form.elements.device.value = params.device || "cuda:0";
+  form.elements.spring_backend.value = params.spring_backend || "explicit";
   form.elements.seed.value = params.seed ?? "";
   form.elements.checkpoint.value = "";
   form.elements.headless.checked = params.headless !== false;
@@ -2680,7 +3120,7 @@ async function tweakFromLastRun() {
     await applyTweakPayload(await api("/api/tweaks/last-run"));
   } catch (error) {
     $("#train-status").textContent = error.message;
-    setStatus(error.message);
+    setStatusTone(error.message, "error");
   }
 }
 
@@ -2688,7 +3128,7 @@ async function tweakFromRun(runId) {
   try {
     await applyTweakPayload(await api(`/api/runs/${encodeURIComponent(runId)}/tweak`));
   } catch (error) {
-    setStatus(error.message);
+    setStatusTone(error.message, "error");
   }
 }
 
@@ -2835,7 +3275,9 @@ function toggleRewardCategoriesCollapsed() {
 function renderPresets() {
   const { selectedPresetId } = state;
   const presets = rewardPresetsForRender();
-  $("#preset-list").innerHTML = presets.map((p) => `
+  $("#preset-list").innerHTML = !presets.length && isLoading("rewards")
+    ? skeletonHtml(3)
+    : presets.map((p) => `
     <div class="preset-card ${p.id === selectedPresetId ? "selected" : ""} ${p.draft ? "draft-preset" : ""}"
          data-preset-id="${escapeHtml(p.id)}"
          title="${escapeHtml(p.description)}">
@@ -2889,10 +3331,18 @@ function selectPresetForEdit(presetId) {
 }
 
 async function loadRewardsPage() {
-  const [presetsData, tweakData] = await Promise.all([
-    api("/api/presets"),
-    api("/api/tweakables"),
-  ]);
+  beginLoading("rewards");
+  if (!state.presets.length) renderPresets();  // skeleton while the fetch is in flight
+  let presetsData;
+  let tweakData;
+  try {
+    [presetsData, tweakData] = await Promise.all([
+      api("/api/presets"),
+      api("/api/tweakables"),
+    ]);
+  } finally {
+    endLoading("rewards");
+  }
   state.presets = presetsData.presets || [];
   state.activePresetId = presetsData.active_preset_id || "baseline";
   state.rewardDefaults = tweakData.reward_defaults || {};
@@ -3166,7 +3616,9 @@ function toggleTerrainCategoriesCollapsed() {
 
 function renderTerrainPresets() {
   const { terrainPresets, selectedTerrainPresetId } = state;
-  $("#terrain-preset-list").innerHTML = terrainPresets.map((p) => `
+  $("#terrain-preset-list").innerHTML = !terrainPresets.length && isLoading("terrain")
+    ? skeletonHtml(3)
+    : terrainPresets.map((p) => `
     <div class="preset-card ${p.id === selectedTerrainPresetId ? "selected" : ""}"
          data-terrain-preset-id="${escapeHtml(p.id)}"
          title="${escapeHtml(p.description)}">
@@ -3211,6 +3663,8 @@ function selectTerrainPresetForEdit(presetId) {
 }
 
 async function loadTerrainPage() {
+  beginLoading("terrain");
+  if (!state.terrainPresets.length) renderTerrainPresets();  // skeleton while the fetch is in flight
   let presetsData;
   let terrainData;
   try {
@@ -3235,6 +3689,8 @@ async function loadTerrainPage() {
     $("#terrain-preset-save-btn").disabled = true;
     setTerrainStatus(error.message);
     return;
+  } finally {
+    endLoading("terrain");
   }
   setTerrainStatus("");
   state.terrainPresets = presetsData.presets || [];
@@ -3492,6 +3948,7 @@ function renderComparisonPanel(runA, runB) {
     comparisonRowHtml("Task", runA.params?.task, runB.params?.task),
     comparisonRowHtml("Environments", runA.params?.num_envs, runB.params?.num_envs),
     comparisonRowHtml("Max Iterations", runA.params?.max_iterations, runB.params?.max_iterations),
+    comparisonRowHtml("Spring Backend", runSpringBackend(runA), runSpringBackend(runB)),
     comparisonRowHtml("Checkpoint iter", iterA !== null ? iterA : "—", iterB !== null ? iterB : "—"),
     comparisonRowHtml("Reward preset", runA.reward_preset_id || "baseline", runB.reward_preset_id || "baseline"),
     comparisonRowHtml("Reward overrides", runA.reward_diff_count || 0, runB.reward_diff_count || 0),
@@ -3514,7 +3971,6 @@ function renderComparisonPanel(runA, runB) {
       <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runB.display_name || runB.id)}</strong></div>
       ${rows.join("")}
     </div>
-    <div id="notes-status" class="status-line"></div>
   `;
   const exitBtn = $("#exit-comparison-btn");
   if (exitBtn) exitBtn.addEventListener("click", exitComparison);
@@ -3906,7 +4362,11 @@ function renderActivityEvent(event) {
 }
 
 function renderActivityGroups(events) {
-  if (!events.length) return `<article class="empty-panel">No activity recorded yet.</article>`;
+  if (!events.length) {
+    return isLoading("activity")
+      ? skeletonHtml(3)
+      : `<article class="empty-panel">No activity recorded yet.</article>`;
+  }
   const groups = groupActivityByActor(events);
   return groups.map((group) => {
     const collapsed = state.activityCollapsedGroups.has(group.key);
@@ -4132,6 +4592,8 @@ function renderActivity() {
 }
 
 async function loadActivity() {
+  beginLoading("activity");
+  if (!state.activityEvents.length) renderActivity();  // skeleton while the fetch is in flight
   try {
     const params = new URLSearchParams({
       limit: "160",
@@ -4145,6 +4607,8 @@ async function loadActivity() {
   } catch {
     state.activityEvents = [];
     state.activityAnalytics = {};
+  } finally {
+    endLoading("activity");
   }
   renderActivity();
 }
@@ -4198,6 +4662,13 @@ function renderConvergenceCard(config, presets) {
   const autoRecEl = $("#convergence-auto-record");
   if (autoRecEl) autoRecEl.checked = Boolean(config.auto_record_video);
 
+  const divEnabledEl = $("#divergence-enabled");
+  if (divEnabledEl) divEnabledEl.checked = config.divergence_enabled !== false;
+  const divStopEl = $("#divergence-auto-stop");
+  if (divStopEl) divStopEl.checked = config.divergence_action === "stop";
+  const divPatienceEl = $("#divergence-patience");
+  if (divPatienceEl) divPatienceEl.value = config.divergence_patience_iterations ?? 100;
+
   const badge = $("#convergence-badge");
   if (badge) {
     if (!config.enabled) {
@@ -4220,6 +4691,9 @@ async function saveConvergenceSettings() {
     if (!Number.isNaN(w)) updates.window_iterations = w;
     if (!Number.isNaN(t)) updates.min_improvement_pct = t;
   }
+  updates.divergence_enabled = Boolean($("#divergence-enabled")?.checked);
+  updates.divergence_action = $("#divergence-auto-stop")?.checked ? "stop" : "notify";
+  updates.divergence_patience_iterations = parseInt($("#divergence-patience")?.value || "100", 10);
   const data = await api("/api/convergence/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4308,7 +4782,7 @@ $("#train-form").addEventListener("submit", startTraining);
 $("#smoke-button").addEventListener("click", () => applyPreset("smoke"));
 $("#debug-button").addEventListener("click", () => applyPreset("debug"));
 $("#clear-resume").addEventListener("click", clearResume);
-$("#refresh-button").addEventListener("click", () => refreshAll().catch((error) => setStatus(error.message)));
+$("#refresh-button").addEventListener("click", () => refreshAll().catch((error) => setStatusTone(error.message, "error")));
 $("#save-name").addEventListener("click", () => saveName().catch(handleActionError));
 $("#run-name").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -4505,8 +4979,26 @@ document.querySelectorAll("#convergence-presets .segment-button").forEach((btn) 
   });
 });
 
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.openMenuRunId) closeRunMenu({ restoreFocus: true });
+});
+
+document.addEventListener("click", (event) => {
+  if (!state.openMenuRunId) return;
+  if (event.target.closest(".run-menu-wrap")) return;
+  closeRunMenu();
+});
+
+window.addEventListener("hashchange", () => {
+  applyHashRoute().catch(handleActionError);
+});
+
 loadNotificationState();
 renderNotificationBadges();
 renderRunDetails();
 updateBulkToolbar();
-refreshAll().catch((error) => setStatus(error.message));
+startCurvesPolling();
+setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
+refreshAll()
+  .catch((error) => setStatusTone(error.message, "error"))
+  .then(() => applyHashRoute().catch(handleActionError));

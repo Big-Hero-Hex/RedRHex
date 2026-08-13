@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.4.10-sync-health" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.6.0-panel-ux" />
   </head>
   <body>
     <aside class="sidebar">
@@ -26,7 +26,7 @@
         <button class="nav-button" data-view="access">Control Center</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.4.10 Sync Health Repair</span>
+        <span class="release-version">Version 3.6.0 Panel UX</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -39,7 +39,12 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.4.10 Sync Health Repair</span>
+          <span class="release-chip">Training Panel V3.6.0 Panel UX</span>
+          <span id="freshness" class="freshness" data-state="stale"
+            data-tooltip="How recently the panel last heard from the training PC">
+            <span class="freshness-dot" aria-hidden="true"></span>
+            <span id="freshness-label" class="freshness-label">connecting…</span>
+          </span>
           <button id="theme-toggle" class="ghost-button" type="button">Dark Mode</button>
           <button id="refresh-button" class="ghost-button" type="button">Refresh</button>
         </div>
@@ -66,6 +71,13 @@
           <label>
             Device
             <input name="device" value="cuda:0" />
+          </label>
+          <label>
+            Spring Backend
+            <select name="spring_backend" required>
+              <option value="explicit" selected>Explicit</option>
+              <option value="native">Native</option>
+            </select>
           </label>
           <label>
             Seed
@@ -302,6 +314,11 @@
               <div id="run-info-grid" class="run-info-grid"></div>
             </div>
 
+            <section id="run-curves-block" class="run-curves-block" hidden>
+              <div class="section-header"><h3>Training Curves</h3></div>
+              <div id="run-curves" class="run-curves"></div>
+            </section>
+
             <!-- ── Rename ── -->
             <div class="section-header"><h3>Display Name</h3></div>
             <div class="form-actions compact-actions" style="gap:8px">
@@ -385,7 +402,6 @@
               </div>
               <pre id="debug-log"></pre>
             </div>
-            <div id="notes-status" class="status-line"></div>
           </div>
           </div><!-- /details-panel-wrap -->
         </div>
@@ -537,6 +553,20 @@
                   <input type="checkbox" id="convergence-auto-record" checked />
                   <span>Auto-record video after convergence</span>
                 </label>
+                <label class="toggle-row"
+                  data-tooltip="Watch for NaN losses and sustained reward collapse while training runs.">
+                  <input type="checkbox" id="divergence-enabled" checked />
+                  <span>Enable divergence detection</span>
+                </label>
+                <label class="toggle-row"
+                  data-tooltip="Off by default: divergence only notifies. Turn this on to also stop the run automatically.">
+                  <input type="checkbox" id="divergence-auto-stop" />
+                  <span>Auto-stop the run on divergence</span>
+                </label>
+                <div class="form-row">
+                  <label for="divergence-patience">Divergence patience (iterations)</label>
+                  <input type="number" id="divergence-patience" min="10" max="5000" step="10" value="100" />
+                </div>
                 <div class="form-actions compact-actions">
                   <button type="button" id="convergence-save" class="primary-button small-button"
                     data-tooltip="Save convergence detection settings to disk. Takes effect on the next training run.">Save Settings</button>
@@ -559,6 +589,7 @@
               <div><strong>Cooldown</strong><span>Minimum time before another convergence notification can be considered for the same run.</span></div>
               <div><strong>Scalar Tag</strong><span>The TensorBoard scalar used for the reward curve, currently loaded from the mother convergence config.</span></div>
               <div><strong>Auto-record</strong><span>Queues a result video after training finishes when convergence was detected.</span></div>
+              <div><strong>Divergence</strong><span>A NaN loss, or a reward that stays far below its own peak for the patience window. Notifies by default; auto-stop is opt-in.</span></div>
             </div>
           </aside>
         </div>
@@ -725,8 +756,10 @@
       </div>
     </dialog>
 
-    <script src="/static/status_catalog.js?v=3.4.10-sync-health"></script>
-    <script src="/static/api_adapters.js"></script>
-    <script src="/static/app.js?v=3.4.10-sync-health"></script>
+    <div id="panel-status" class="panel-status" role="status" aria-live="polite" aria-atomic="false"></div>
+
+    <script src="/static/status_catalog.js?v=3.6.0-panel-ux"></script>
+    <script src="/static/api_adapters.js?v=3.6.0-panel-ux"></script>
+    <script src="/static/app.js?v=3.6.0-panel-ux"></script>
   </body>
 </html>

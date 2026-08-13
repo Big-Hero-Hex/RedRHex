@@ -6,7 +6,7 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="architecture"></a>
@@ -14,12 +14,14 @@ last_reviewed: 2026-08-13
 
 - [系統總覽](architecture/system-overview.zh-TW.md)
 - [訓練與策略架構](architecture/training-and-policy.zh-TW.md)
+- [純感測器蒸餾 V2 架構](architecture/sensor-distillation-v2.zh-TW.md)
 - [Reward 與能量模型](architecture/reward-and-energy.zh-TW.md)
 - [Sim-to-real 校正架構](architecture/sim-to-real.zh-TW.md)
 - [ROS 2 部署架構](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.zh-TW.md)
 - [Reward Agent 架構](../../tools/reward_agent/docs/architecture.zh-TW.md)
 - [Training Panel 架構](../../tools/training_panel/docs/architecture.zh-TW.md)
 - [Windows 遠端啟動器架構（草稿）](../../tools/windows/docs/architecture.zh-TW.md)
+- [macOS 遠端啟動器架構（草稿）](../../tools/macos/docs/architecture.zh-TW.md)
 
 <a id="change-and-validate"></a>
 ## 修改與驗證

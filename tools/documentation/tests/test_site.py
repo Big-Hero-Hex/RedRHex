@@ -49,6 +49,10 @@ class SiteManifestTests(unittest.TestCase):
                         "destination": "components/windows-remote-launcher",
                         "source": "tools/windows/docs",
                     },
+                    {
+                        "destination": "components/macos-remote-launcher",
+                        "source": "tools/macos/docs",
+                    },
                 ],
             },
         )
@@ -71,6 +75,10 @@ class SiteManifestTests(unittest.TestCase):
                 SiteSource(
                     PROJECT_ROOT / "tools/windows/docs",
                     Path("components/windows-remote-launcher"),
+                ),
+                SiteSource(
+                    PROJECT_ROOT / "tools/macos/docs",
+                    Path("components/macos-remote-launcher"),
                 ),
             ),
         )

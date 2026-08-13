@@ -67,6 +67,7 @@ _JOINT_TO_LEG = {
     "main_5": "l3",
 }
 _MAIN_JOINT_ORDER = tuple(_JOINT_TO_LEG)
+_ABAD_SERVO_POLICY_ORDER = ("sr1", "sr2", "sr3", "sl1", "sl2", "sl3")
 _ENCODER_SIGN = {"l1": -1.0, "l2": -1.0, "l3": -1.0, "r1": 1.0, "r2": 1.0, "r3": 1.0}
 _POSITIVE_DIRECTION = {"l1": True, "l2": True, "l3": True, "r1": False, "r2": False, "r3": False}
 _COUNTS_PER_REV = 54984.83
@@ -76,6 +77,33 @@ _PROBE_EVENT_TOPIC = "/redrhex/sim2real_probe/events"
 _PROBE_RATE_HZ = 60.0
 _PROBE_RECEIVE_JITTER_BOUND_S = 1.0 / _PROBE_RATE_HZ
 _PROBE_PHYSICAL_PWM_CAP = 30.0
+
+
+def _canonical_abad_encoder_counts(message: Any) -> list[float]:
+    """Extract raw ABAD encoders in policy order: RF, RM, RR, LF, LM, LR."""
+
+    return [
+        float(
+            _field(
+                _field(message, servo, "/motor/state"),
+                "position_encoder",
+                f"/motor/state.{servo}",
+            )
+        )
+        for servo in _ABAD_SERVO_POLICY_ORDER
+    ]
+
+
+def _twist_command(message: Any) -> list[float]:
+    """Extract the policy command convention ``vx, vy, wz`` from Twist."""
+
+    linear = _field(message, "linear", "/cmd_vel")
+    angular = _field(message, "angular", "/cmd_vel")
+    return [
+        float(_field(linear, "x", "/cmd_vel.linear")),
+        float(_field(linear, "y", "/cmd_vel.linear")),
+        float(_field(angular, "z", "/cmd_vel.angular")),
+    ]
 
 
 def _unit_quaternion(value: Any, name: str) -> list[float]:
@@ -653,6 +681,7 @@ def _load_rosbag(
         "/motor/command",
         "/motor/state",
         "/imu/data",
+        "/cmd_vel",
         "/power/state",
         _PROBE_EVENT_TOPIC,
     }
@@ -736,6 +765,7 @@ def _load_rosbag(
 
     times: dict[str, list[float]] = {
         "command_time_s": [],
+        "cmd_vel_time_s": [],
         "motor_command_time_s": [],
         "position_time_s": [],
         "imu_time_s": [],
@@ -743,11 +773,13 @@ def _load_rosbag(
     }
     values: dict[str, list[Any]] = {
         "command": [],
+        "cmd_vel": [],
         "position": [],
         "motor_command_pwm_raw": [],
         "motor_command_canonical": [],
         "motor_state_encoder_raw": [],
         "main_joint_position_canonical": [],
+        "abad_encoder_raw_policy_order": [],
         "imu_acceleration": [],
         "imu_angular_velocity": [],
         "imu_orientation_xyzw": [],
@@ -820,6 +852,15 @@ def _load_rosbag(
                     / joint_counts
                 )
             values["main_joint_position_canonical"].append(canonical_positions)
+            abad_fields_present = [hasattr(message, servo) for servo in _ABAD_SERVO_POLICY_ORDER]
+            if all(abad_fields_present):
+                values["abad_encoder_raw_policy_order"].append(
+                    _canonical_abad_encoder_counts(message)
+                )
+            elif any(abad_fields_present):
+                raise ContractError(
+                    "/motor/state message has incomplete ABAD encoder channels"
+                )
             selected_index = _LEG_ORDER.index(selected_leg)
             position_rad = (
                 (encoder[selected_index] - encoder_zero)
@@ -844,6 +885,9 @@ def _load_rosbag(
                     for axis in ("x", "y", "z", "w")
                 ]
             )
+        elif topic == "/cmd_vel":
+            times["cmd_vel_time_s"].append(timestamp_s)
+            values["cmd_vel"].append(_twist_command(message))
         else:
             voltage = [float(_field(message, f"v_{index}", topic)) for index in range(8)]
             current = [float(_field(message, f"i_{index}", topic)) for index in range(8)]
@@ -935,6 +979,8 @@ def _load_rosbag(
         ("motor_command_canonical", "motor_command_time_s"),
         ("motor_state_encoder_raw", "position_time_s"),
         ("main_joint_position_canonical", "position_time_s"),
+        ("abad_encoder_raw_policy_order", "position_time_s"),
+        ("cmd_vel", "cmd_vel_time_s"),
         ("imu_acceleration", "imu_time_s"),
         ("imu_angular_velocity", "imu_time_s"),
         ("imu_orientation_xyzw", "imu_time_s"),
@@ -1024,6 +1070,17 @@ def import_real_trace(
         details["frames"].setdefault(
             "main_joint_position_canonical", "canonical_main_joint_order"
         )
+    if "abad_encoder_raw_policy_order" in arrays:
+        details["units"].setdefault("abad_encoder_raw_policy_order", "encoder_count")
+        details["frames"].setdefault(
+            "abad_encoder_raw_policy_order", "canonical_policy_joint_order"
+        )
+        details.setdefault("abad_joint_order", [
+            "abad_0", "abad_1", "abad_2", "abad_3", "abad_4", "abad_5"
+        ])
+    if "cmd_vel" in arrays:
+        details["units"].setdefault("cmd_vel", "m/s,m/s,rad/s")
+        details["frames"].setdefault("cmd_vel", "policy_body_command")
     details.setdefault("joint_order", [] if spec.joint in {"all", "root"} else [spec.joint])
     details["clock"] = {
         "source": clock,

@@ -5,6 +5,7 @@
 
 import argparse
 import csv
+import hashlib
 import math
 import os
 import sys
@@ -21,6 +22,18 @@ import cli_args  # isort: skip
 parser = argparse.ArgumentParser(description="Evaluate RSL-RL policy with command sweep.")
 parser.add_argument("--num_envs", type=int, default=256, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--spring-backend",
+    choices=("explicit", "native"),
+    default="explicit",
+    help="Passive torsion-spring implementation used by the environment.",
+)
+parser.add_argument(
+    "--physics-profile",
+    type=str,
+    default=None,
+    help="Explicit CalibrationProfileV1 JSON applied during command-sweep evaluation.",
+)
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
@@ -80,8 +93,6 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import torch
 
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
-
 from isaaclab.envs import (
     DirectMARLEnv,
     DirectMARLEnvCfg,
@@ -98,6 +109,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import RedRhex.tasks  # noqa: F401
+from scripts.rsl_rl.runner_factory import create_runner, get_exportable_actor, runner_protocol
 
 
 def _load_runner_checkpoint_with_policy_fallback(runner, resume_path: str, device: str) -> None:
@@ -250,6 +262,14 @@ def summarize_contact_hist(contact_hist: torch.Tensor) -> str:
         pct = 100.0 * float(contact_hist[k].item()) / float(total)
         parts.append(f"{k}:{pct:.1f}%")
     return " ".join(parts)
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def classify_command_skill(cmd: Sequence[float], eps: float = 1e-5) -> str:
@@ -491,11 +511,15 @@ def collect_energy_metrics(
     damper_dissipation = zeros.clone()
 
     if hasattr(unwrapped_env, "_damper_indices") and hasattr(unwrapped_env, "_damper_initial_pos"):
-        damp_pos = unwrapped_env.joint_pos[:, unwrapped_env._damper_indices]
+        wrapped_damp_pos = unwrapped_env.joint_pos[:, unwrapped_env._damper_indices]
+        damp_pos = getattr(unwrapped_env, "_spring_unwrapped_pos", wrapped_damp_pos)
         damp_vel = unwrapped_env.joint_vel[:, unwrapped_env._damper_indices]
-        damp_defl = damp_pos - unwrapped_env._damper_initial_pos
+        spring_rest = getattr(
+            unwrapped_env, "_spring_rest_pos", unwrapped_env._damper_initial_pos
+        )
+        damp_defl = damp_pos - spring_rest
         spring_k = torch.as_tensor(getattr(unwrapped_env, "_spring_k", 200.0), device=damp_defl.device, dtype=damp_defl.dtype)
-        spring_d = torch.as_tensor(getattr(unwrapped_env, "_spring_d", 20.0), device=damp_vel.device, dtype=damp_vel.dtype)
+        spring_d = torch.as_tensor(getattr(unwrapped_env, "_spring_d", 0.0), device=damp_vel.device, dtype=damp_vel.dtype)
         spring_energy = torch.sum(0.5 * spring_k * torch.square(damp_defl), dim=1)
         spring_power = spring_k * damp_defl * damp_vel
         if hasattr(unwrapped_env, "_current_leg_in_stance") and unwrapped_env._current_leg_in_stance.shape == damp_defl.shape:
@@ -549,6 +573,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    env_cfg.spring_backend = args_cli.spring_backend
 
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
@@ -572,28 +597,74 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
 
     env_cfg.log_dir = os.path.dirname(resume_path)
+    physics_profile = None
+    spring_profile_id = None
+    spring_profile_sha256 = None
+    if args_cli.physics_profile is not None:
+        repo_root = Path(__file__).resolve().parents[2]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from tools.sim2real.physics_profile import apply_profile_to_config, load_optional_profile
+        from tools.sim2real.traces import sha256_json
+
+        physics_profile = load_optional_profile(args_cli.physics_profile)
+        apply_profile_to_config(env_cfg, physics_profile)
+        spring_profile_id = physics_profile.profile_id
+        spring_profile_sha256 = sha256_json(physics_profile.to_dict())
+        print(
+            f"[INFO] Explicit physics profile applied to config: {spring_profile_id} "
+            f"({spring_profile_sha256})"
+        )
+
+    from tools.sim2real.checkpoint_spring import validate_checkpoint_spring_evaluation
+
+    checkpoint_spring_calibration_status = validate_checkpoint_spring_evaluation(
+        env_cfg.log_dir,
+        selected_backend=args_cli.spring_backend,
+        selected_profile_id=spring_profile_id,
+        selected_profile_sha256=spring_profile_sha256,
+    )
+    spring_calibration_status = (
+        "calibrated" if bool(getattr(env_cfg, "spring_calibrated", False)) else "uncalibrated"
+    )
+    if checkpoint_spring_calibration_status == "calibrated" and spring_calibration_status != "calibrated":
+        raise RuntimeError("calibrated checkpoint profile did not produce a calibrated spring configuration")
+    print(
+        f"[INFO] Torsion spring backend={args_cli.spring_backend}, "
+        f"calibration_status={spring_calibration_status}, "
+        f"checkpoint_calibration_status={checkpoint_spring_calibration_status}, "
+        f"profile_id={spring_profile_id}, profile_sha256={spring_profile_sha256}"
+    )
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=None)
+
+    if physics_profile is not None:
+        from tools.sim2real.isaac_profile import apply_profile_to_runtime_env
+
+        apply_profile_to_runtime_env(env, physics_profile)
+        print(f"[INFO] Explicit physics profile applied at runtime: {spring_profile_id}")
 
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
 
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    protocol = runner_protocol(agent_cfg.class_name)
+    runner = create_runner(
+        agent_cfg.class_name,
+        env,
+        agent_cfg.to_dict(),
+        log_dir=None,
+        device=agent_cfg.device,
+    )
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
+    if protocol.strict_checkpoint:
+        runner.load(resume_path, load_optimizer=False)
+    else:
+        _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
-    try:
-        policy_nn = runner.alg.policy
-    except AttributeError:
-        policy_nn = runner.alg.actor_critic
+    policy_nn = get_exportable_actor(runner, protocol)
 
     unwrapped_env = env.unwrapped
     if hasattr(unwrapped_env, "external_control"):
@@ -682,6 +753,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         cmd_err_vx = 0.0
         cmd_err_vy = 0.0
         cmd_err_wz = 0.0
+        cmd_forward_speed_sum = 0.0
+        cmd_lateral_leak_sum = 0.0
+        cmd_yaw_leak_sum = 0.0
         cmd_samples = 0
         cmd_success_steps = 0
         cmd_success_vy_steps = 0
@@ -733,6 +807,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             cmd_err_vx += dvx.sum().item()
             cmd_err_vy += dvy.sum().item()
             cmd_err_wz += dwz.sum().item()
+            if skill == "forward":
+                forward_sign = 1.0 if float(cmd[0]) > 0.0 else -1.0
+                cmd_forward_speed_sum += (actual_vx * forward_sign).sum().item()
+                cmd_lateral_leak_sum += torch.abs(actual_vy).sum().item()
+                cmd_yaw_leak_sum += torch.abs(actual_wz).sum().item()
             cmd_samples += num_envs
 
             err_vx_sum += dvx.sum().item()
@@ -946,6 +1025,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "mae_vy": cmd_err_vy / denom,
             "mae_wz": cmd_err_wz / denom,
         }
+        result["actual_forward_speed_mean"] = cmd_forward_speed_sum / denom
+        result["actual_lateral_leak_mean"] = cmd_lateral_leak_sum / denom
+        result["actual_yaw_leak_mean"] = cmd_yaw_leak_sum / denom
         result["skill"] = skill
         result["success_duration_s"] = float(cmd_success_steps) * step_dt / float(max(1, num_envs))
         result["success_ratio"] = result["success_duration_s"] / float(max(1e-6, eval_duration_s))
@@ -1062,6 +1144,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     progress_distance_mean = progress_distance_sum / float(max(1, energy_kpi_count))
     energy_per_distance_mean = energy_per_distance_sum / float(max(1, energy_kpi_count))
     command_pass_ratio = float(sum(1 for row in results if row["accept_pass"])) / float(max(1, len(results)))
+    max_command_fall_rate = max(float(row["fall_rate"]) for row in results)
     overall_score_mean = score_sum / float(max(1, len(results)))
     skill_pass_ratio = {
         skill: float(skill_pass[skill]) / float(max(1, skill_total[skill])) for skill in sorted(skill_total.keys())
@@ -1083,6 +1166,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     overall_accept_pass = (
         (command_pass_ratio >= args_cli.accept_overall_pass_ratio)
         and (min_skill_pass_ratio >= args_cli.accept_skill_pass_ratio)
+        and (max_command_fall_rate <= args_cli.accept_max_fall_rate)
     )
 
     print("\n=== Command Tracking (MAE) ===")
@@ -1160,6 +1244,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"profile={args_cli.eval_profile} status={overall_status} "
         f"command_pass_ratio={command_pass_ratio:.3f} (threshold={args_cli.accept_overall_pass_ratio:.2f}) "
         f"min_skill_pass_ratio={min_skill_pass_ratio:.3f} (threshold={args_cli.accept_skill_pass_ratio:.2f}) "
+        f"max_command_fall_rate={max_command_fall_rate:.3f} (threshold={args_cli.accept_max_fall_rate:.2f}) "
         f"score_mean={overall_score_mean:.2f}"
     )
 
@@ -1205,6 +1290,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"energy.spring_recovery_ratio: N/A")
     print(f"acceptance.command_pass_ratio: {command_pass_ratio:.6f}")
     print(f"acceptance.min_skill_pass_ratio: {min_skill_pass_ratio:.6f}")
+    print(f"acceptance.max_command_fall_rate: {max_command_fall_rate:.6f}")
     print(f"acceptance.overall_score_mean: {overall_score_mean:.6f}")
 
     if args_cli.csv:
@@ -1225,6 +1311,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "mae_vx",
                     "mae_vy",
                     "mae_wz",
+                    "actual_forward_speed_mean",
+                    "actual_lateral_leak_mean",
+                    "actual_yaw_leak_mean",
                     "success_duration_s",
                     "success_ratio",
                     "success_vy_duration_s",
@@ -1255,8 +1344,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             writer.writerows(results)
 
         summary_path = os.path.splitext(csv_path)[0] + "_summary.csv"
+        command_csv_sha256 = _sha256_file(csv_path)
         summary_rows = [
+            {"metric": "evaluation.seed", "value": int(agent_cfg.seed)},
             {"metric": "eval.profile", "value": args_cli.eval_profile},
+            {"metric": "spring.backend", "value": args_cli.spring_backend},
+            {"metric": "spring.calibration_status", "value": spring_calibration_status},
+            {
+                "metric": "spring.checkpoint_calibration_status",
+                "value": checkpoint_spring_calibration_status,
+            },
+            {"metric": "spring.profile_id", "value": spring_profile_id},
+            {"metric": "spring.profile_sha256", "value": spring_profile_sha256},
+            {
+                "metric": "artifact.command_csv_sha256",
+                "value": command_csv_sha256,
+            },
             {"metric": "tracking.mean_abs_vx", "value": mean_abs_vx},
             {"metric": "tracking.mean_abs_vy", "value": mean_abs_vy},
             {"metric": "tracking.mean_abs_wz", "value": mean_abs_wz},
@@ -1294,6 +1397,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             {"metric": "contact.histogram", "value": summarize_contact_hist(contact_hist)},
             {"metric": "acceptance.command_pass_ratio", "value": command_pass_ratio},
             {"metric": "acceptance.min_skill_pass_ratio", "value": min_skill_pass_ratio},
+            {"metric": "acceptance.max_command_fall_rate", "value": max_command_fall_rate},
             {"metric": "acceptance.overall_score_mean", "value": overall_score_mean},
             {"metric": "acceptance.overall_status", "value": "PASS" if overall_accept_pass else "FAIL"},
         ]

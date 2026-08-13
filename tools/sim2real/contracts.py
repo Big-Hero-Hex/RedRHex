@@ -35,6 +35,13 @@ _CANONICAL_JOINTS = {
     for group in ("main", "abad", "damper")
     for index in range(6)
 }
+_TORSION_SPRING_QUALITY_GATES = {
+    "r_squared",
+    "heldout_rmse",
+    "stiffness_cv",
+    "hysteresis",
+    "neutral_model_heldout_rmse",
+}
 
 
 class ContractError(ValueError):
@@ -799,7 +806,55 @@ class CalibrationProfileV1:
                 continue
 
             source_record = _mapping(raw_source, f"measurement_sources.{name}")
-            _keys(source_record, required=source_fields)
+            _keys(
+                source_record,
+                required=source_fields,
+                optional={
+                    "applies_to",
+                    "rest_position_rad",
+                    "episode_path",
+                    "quality_validation",
+                },
+            )
+            representative_fields = {
+                field
+                for field in (
+                    "applies_to",
+                    "rest_position_rad",
+                    "episode_path",
+                    "quality_validation",
+                )
+                if field in source_record
+            }
+            if representative_fields and not is_spring:
+                raise ContractError(
+                    f"measurement_sources.{name}.{sorted(representative_fields)[0]} "
+                    "is only valid for "
+                    "a representative passive spring source"
+                )
+            if is_spring and "applies_to" in source_record:
+                missing_representative = {
+                    "rest_position_rad",
+                    "episode_path",
+                } - set(source_record)
+                if missing_representative:
+                    raise ContractError(
+                        f"measurement_sources.{name}.applies_to requires "
+                        + " and ".join(sorted(missing_representative))
+                    )
+            elif is_spring and {
+                "rest_position_rad",
+                "episode_path",
+                "quality_validation",
+            }.intersection(source_record):
+                raise ContractError(
+                    f"measurement_sources.{name} representative fields require applies_to"
+                )
+            if "quality_validation" in source_record and "applies_to" not in source_record:
+                raise ContractError(
+                    f"measurement_sources.{name}.quality_validation requires a "
+                    "representative torsion-spring source"
+                )
             for field_name in ("trace_sha256", "metadata_sha256", "scenario_sha256"):
                 digest = source_record[field_name]
                 if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
@@ -825,7 +880,12 @@ class CalibrationProfileV1:
             elif is_mass:
                 expected_kind, expected_scenario = "mass_com", "mass-com"
             elif is_spring:
-                expected_kind, expected_scenario = "torsional_spring", "spring"
+                expected_kind = "torsional_spring"
+                expected_scenario = (
+                    "torsion-spring"
+                    if "applies_to" in source_record
+                    else "spring"
+                )
             else:
                 expected_kind, expected_scenario = "torque_saturation", "manual-load"
             if scenario_id != expected_scenario:
@@ -855,6 +915,122 @@ class CalibrationProfileV1:
                     raise ContractError(
                         f"measurement_sources.{name}.frame must match its canonical damper joint"
                     )
+                if "applies_to" in source_record:
+                    expected_aliases = [f"damper_{index}" for index in range(6)]
+                    if (
+                        name != "passive_spring:damper_0"
+                        or source_record["applies_to"] != expected_aliases
+                    ):
+                        raise ContractError(
+                            f"measurement_sources.{name}.applies_to must contain exactly "
+                            "damper_0 through damper_5 in canonical order"
+                        )
+                    source_record["rest_position_rad"] = _number(
+                        source_record["rest_position_rad"],
+                        f"measurement_sources.{name}.rest_position_rad",
+                    )
+                    episode_path = _string(
+                        source_record["episode_path"],
+                        f"measurement_sources.{name}.episode_path",
+                    )
+                    if not Path(episode_path).is_absolute():
+                        raise ContractError(
+                            f"measurement_sources.{name}.episode_path must be absolute"
+                        )
+                    if "quality_validation" in source_record:
+                        quality = _mapping(
+                            source_record["quality_validation"],
+                            f"measurement_sources.{name}.quality_validation",
+                        )
+                        quality_fields = {
+                            "accepted",
+                            "gates",
+                            "calibration_trace_sha256",
+                            "calibration_metadata_sha256",
+                            "holdout_trace_sha256",
+                            "holdout_metadata_sha256",
+                            "holdout_scenario_id",
+                            "holdout_scenario_sha256",
+                            "source",
+                            "dataset_id",
+                            "episode_id",
+                            "episode_path",
+                        }
+                        _keys(quality, required=quality_fields)
+                        for digest_field in (
+                            "calibration_trace_sha256",
+                            "calibration_metadata_sha256",
+                            "holdout_trace_sha256",
+                            "holdout_metadata_sha256",
+                            "holdout_scenario_sha256",
+                        ):
+                            digest = quality[digest_field]
+                            if not isinstance(digest, str) or not _SHA256_RE.fullmatch(
+                                digest
+                            ):
+                                raise ContractError(
+                                    f"measurement_sources.{name}.quality_validation."
+                                    f"{digest_field} must be a lowercase SHA-256 digest"
+                                )
+                        if quality["calibration_trace_sha256"] != source_record[
+                            "trace_sha256"
+                        ]:
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation."
+                                "calibration_trace_sha256 must bind the source trace"
+                            )
+                        if quality["calibration_metadata_sha256"] != source_record[
+                            "metadata_sha256"
+                        ]:
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation."
+                                "calibration_metadata_sha256 must bind the source metadata"
+                            )
+                        if quality["holdout_scenario_id"] != "torsion-spring-holdout":
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation."
+                                "holdout_scenario_id must be torsion-spring-holdout"
+                            )
+                        if quality["source"] != "real":
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation.source "
+                                "must be real"
+                            )
+                        _identifier(
+                            quality["dataset_id"],
+                            f"measurement_sources.{name}.quality_validation.dataset_id",
+                        )
+                        _identifier(
+                            quality["episode_id"],
+                            f"measurement_sources.{name}.quality_validation.episode_id",
+                        )
+                        holdout_episode_path = _string(
+                            quality["episode_path"],
+                            f"measurement_sources.{name}.quality_validation.episode_path",
+                        )
+                        if not Path(holdout_episode_path).is_absolute():
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation."
+                                "episode_path must be absolute"
+                            )
+                        gates = _mapping(
+                            quality["gates"],
+                            f"measurement_sources.{name}.quality_validation.gates",
+                        )
+                        _keys(gates, required=_TORSION_SPRING_QUALITY_GATES)
+                        if any(not isinstance(value, bool) for value in gates.values()):
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation.gates "
+                                "must contain booleans"
+                            )
+                        accepted = quality["accepted"]
+                        if not isinstance(accepted, bool) or accepted != all(
+                            gates.values()
+                        ):
+                            raise ContractError(
+                                f"measurement_sources.{name}.quality_validation.accepted "
+                                "must equal the conjunction of its gates"
+                            )
             elif is_effort:
                 joint = name.removeprefix("main_drive_effort_limit:")
                 if not re.fullmatch(r"main_[0-5]", joint) or frame != joint:

@@ -7,6 +7,7 @@ import signal
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -16,19 +17,23 @@ from datetime import datetime
 from pathlib import Path
 
 from .commands import (
+    DEFAULT_TASK,
     DEFAULT_VIDEO_PRESET,
     DEFAULT_FOLLOW_CAMERA_EYE,
     DEFAULT_FOLLOW_CAMERA_LOOKAT,
+    FORWARD_FAST_TASK,
     TrainingParams,
     VideoParams,
     display_isaaclab_command,
     export_onnx_argv,
     play_argv,
+    resolve_spring_backend,
     shell_for_command,
     shell_for_isaaclab,
     tensorboard_argv,
     training_argv,
 )
+from .provenance import git_provenance
 from .config import PanelPaths, timestamp_id
 from .deploy import latest_deploy_report
 from .history import HistoryStore, latest_checkpoint, latest_onnx, latest_video, tail_file
@@ -182,6 +187,7 @@ class ProcessRegistry:
             "updated_at": queued_at,
             "queued_at": queued_at,
             "params": params.to_dict(),
+            "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
             "log_dir": None,
@@ -225,6 +231,7 @@ class ProcessRegistry:
             "started_at": started_at,
             "queued_at": (existing_record or {}).get("queued_at"),
             "params": params.to_dict(),
+            "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
             "log_dir": None,
@@ -466,10 +473,15 @@ class ProcessRegistry:
     def start_play(self, run_id: str, checkpoint: str, device: str = "cuda:0") -> dict:
         self.paths.ensure_dirs()
         play_id = f"play_{timestamp_id()}"
+        run = self.history.get_run(run_id)
+        spring_backend = resolve_spring_backend(run, checkpoint)
+        task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
         terrain_override_file = self._write_process_terrain_override(play_id, run_id, checkpoint)
         argv = play_argv(
             checkpoint=checkpoint,
+            task=task,
             device=device,
+            spring_backend=spring_backend,
             terrain_override_file=terrain_override_file,
             camera_follow_robot=True,
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
@@ -511,10 +523,15 @@ class ProcessRegistry:
         params = video_params or VideoParams.from_preset(DEFAULT_VIDEO_PRESET)
         params.validate()
         video_id = f"video_{timestamp_id()}"
+        run = self.history.get_run(run_id)
+        spring_backend = resolve_spring_backend(run, checkpoint)
+        task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
         terrain_override_file = self._write_process_terrain_override(video_id, run_id, checkpoint)
         argv = play_argv(
             checkpoint=checkpoint,
+            task=task,
             device=device,
+            spring_backend=spring_backend,
             num_envs=1,
             headless=True,
             video=True,
@@ -523,6 +540,7 @@ class ProcessRegistry:
             video_height=params.height,
             video_fps=params.fps,
             rendering_mode=params.rendering_mode,
+            initial_command="forward" if task == FORWARD_FAST_TASK else None,
             terrain_override_file=terrain_override_file,
             camera_follow_robot=True,
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
@@ -579,7 +597,10 @@ class ProcessRegistry:
 
     def start_onnx_export(self, run_id: str, checkpoint: str, device: str = "cuda:0") -> dict:
         onnx_id = f"onnx_{timestamp_id()}"
-        argv = export_onnx_argv(checkpoint=checkpoint, device=device)
+        run = self.history.get_run(run_id)
+        spring_backend = resolve_spring_backend(run, checkpoint)
+        task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
+        argv = export_onnx_argv(checkpoint=checkpoint, task=task, device=device, spring_backend=spring_backend)
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{onnx_id}.log"
         spawned = self._spawn_shell(onnx_id, shell, log_file)
@@ -1149,12 +1170,10 @@ class ProcessRegistry:
         process_log = Path(str(run.get("process_log") or ""))
         if process_log.exists():
             text = self._head_file(process_log, max_chars=120000) + "\n" + tail_file(process_log, max_chars=120000)
-            match = re.search(r"Exact experiment name requested from command line:\s*(\S+)", text)
-            if match:
-                candidates = sorted(self.paths.rsl_rl_log_root.glob(f"{match.group(1)}*"))
-                candidates = [path for path in candidates if path.is_dir()]
-                if candidates:
-                    return str(max(candidates, key=lambda path: path.stat().st_mtime))
+            log_dir, has_exact_name = self._log_dir_from_process_log_text(text)
+            if log_dir:
+                return log_dir
+            if has_exact_name:
                 return None
         if not allow_time_fallback:
             return None
@@ -1591,25 +1610,79 @@ class ProcessRegistry:
 
     def _log_dir_from_process_log_path(self, process_log: Path) -> str | None:
         text = self._head_file(process_log, max_chars=120000) + "\n" + tail_file(process_log, max_chars=300000)
-        exact_names = re.findall(r"Exact experiment name requested from command line:\s*(\S+)", text)
-        for name in reversed(exact_names):
-            candidates = [path for path in self.paths.rsl_rl_log_root.glob(f"{name}*") if path.is_dir()]
+        log_dir, _ = self._log_dir_from_process_log_text(text)
+        return log_dir
+
+    @staticmethod
+    def _canonical_contained_log_dir(
+        path: Path, *roots: Path, allow_missing: bool = False
+    ) -> tuple[Path, float | None] | None:
+        try:
+            canonical_path = path.resolve()
+            path_stat = canonical_path.stat()
+        except OSError:
+            if allow_missing and all(canonical_path.is_relative_to(root) for root in roots):
+                return canonical_path, None
+            return None
+        if not stat.S_ISDIR(path_stat.st_mode) or any(
+            not canonical_path.is_relative_to(root) for root in roots
+        ):
+            return None
+        return canonical_path, path_stat.st_mtime
+
+    def _log_dir_from_process_log_text(self, text: str) -> tuple[str | None, bool]:
+        experiment_roots = list(
+            re.finditer(r"\[INFO\][ \t]+Logging experiment in directory:[ \t]*([^\r\n]+)", text)
+        )
+        exact_names = list(re.finditer(r"Exact experiment name requested from command line:\s*(\S+)", text))
+        rsl_rl_root = (self.paths.repo_root / "logs" / "rsl_rl").resolve()
+        for name_match in reversed(exact_names):
+            name = name_match.group(1)
+            root_matches = [root_match for root_match in experiment_roots if root_match.start() < name_match.start()]
+            if root_matches:
+                root_path = Path(root_matches[-1].group(1).strip()).resolve()
+                if not root_path.is_relative_to(rsl_rl_root):
+                    return None, True
+                candidates = [
+                    candidate
+                    for path in root_path.glob(f"{name}*")
+                    if (candidate := self._canonical_contained_log_dir(
+                        path, rsl_rl_root, root_path
+                    ))
+                    is not None
+                ]
+                if candidates:
+                    return str(max(candidates, key=lambda item: item[1])[0]), True
+                return None, True
+            legacy_root = self.paths.rsl_rl_log_root.resolve()
+            candidates = [
+                candidate
+                for path in legacy_root.glob(f"{name}*")
+                if (candidate := self._canonical_contained_log_dir(path, legacy_root))
+                is not None
+            ]
             if candidates:
-                return str(max(candidates, key=lambda path: path.stat().st_mtime))
-        root = re.escape(str(self.paths.rsl_rl_log_root))
+                return str(max(candidates, key=lambda item: item[1])[0]), True
+        log_root = self.paths.rsl_rl_log_root
+        canonical_log_root = log_root.resolve()
+        root = re.escape(str(log_root))
         matches = re.findall(rf"({root}/[^\s'\"<>]+)", text)
         log_dirs = []
         for match in matches:
             path = Path(match)
             if path.name.startswith("events.out.tfevents") or path.name.startswith("model_"):
                 path = path.parent
-            while path.parent != self.paths.rsl_rl_log_root and path != self.paths.rsl_rl_log_root:
+            while path.parent != log_root and path != log_root:
                 path = path.parent
-            if path.parent == self.paths.rsl_rl_log_root:
-                log_dirs.append(path)
+            if path.parent == log_root and (
+                candidate := self._canonical_contained_log_dir(
+                    path, canonical_log_root, allow_missing=True
+                )
+            ):
+                log_dirs.append(candidate)
         if not log_dirs:
-            return None
-        return str(log_dirs[-1])
+            return None, bool(exact_names)
+        return str(log_dirs[-1][0]), bool(exact_names)
 
     def _is_repo_training_process(self, command: str, pid_text: str) -> bool:
         if self._is_tmux_server_command(command):
@@ -1712,7 +1785,7 @@ class ProcessRegistry:
     def _training_commands_match(recorded_command: str, process_command: str) -> bool:
         if not recorded_command or "scripts/rsl_rl/train.py" not in process_command:
             return False
-        keys = ("--task", "--num_envs", "--max_iterations", "--device", "--seed", "--checkpoint")
+        keys = ("--task", "--num_envs", "--max_iterations", "--device", "--seed", "--checkpoint", "--spring-backend")
         matched = 0
         for key in keys:
             recorded = ProcessRegistry._arg_value(recorded_command, key)
@@ -2003,10 +2076,13 @@ class ProcessRegistry:
         checker = ConvergenceChecker()
         convergence_detected = False
         convergence_notified_at: float | None = None
+        divergence_detected = False
         log_dir: str | None = None
         log_poll_interval = 2.0
         convergence_poll_interval = 60.0
         next_convergence_check = 0.0
+        progress_poll_interval = 5.0
+        next_progress_check = 0.0
 
         # Poll while training is running, checking for convergence each cycle.
         while proc.poll() is None:
@@ -2046,6 +2122,40 @@ class ProcessRegistry:
                                     self.history.update_run(run_id, queue_video_on_completion=True)
                 except Exception:
                     pass  # never let convergence logic crash the monitor thread
+            if log_dir and not divergence_detected and should_check_convergence:
+                try:
+                    cfg = load_convergence_config(self.paths.convergence_config_file)
+                    divergence = checker.check_divergence(Path(log_dir), cfg)
+                    if divergence.detected:
+                        divergence_detected = True
+                        self.history.update_run(
+                            run_id,
+                            divergence_detected=True,
+                            divergence_iteration=divergence.iteration,
+                            divergence_kind=divergence.kind,
+                            divergence_reason=divergence.reason,
+                        )
+                        try:
+                            from .notifications import send_divergence_notification
+
+                            send_divergence_notification(self.history.get_run(run_id) or {}, divergence)
+                        except Exception:
+                            pass  # notification failure must not affect the run
+                        if cfg.divergence_action == "stop":
+                            self.stop(run_id)
+                except Exception:
+                    pass  # never let divergence logic crash the monitor thread
+            if now >= next_progress_check:
+                next_progress_check = now + progress_poll_interval
+                try:
+                    from .progress import progress_snapshot
+
+                    process_log = self.paths.process_log_dir / f"{run_id}.log"
+                    snapshot = progress_snapshot(tail_file(process_log, max_chars=20000))
+                    if snapshot:
+                        self.history.update_run(run_id, progress=snapshot)
+                except Exception:
+                    pass  # progress display must never kill the monitor thread
             time.sleep(log_poll_interval)
 
         returncode = proc.wait()

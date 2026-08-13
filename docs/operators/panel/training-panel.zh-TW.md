@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="start"></a>
@@ -21,7 +21,9 @@ python -m tools.training_panel --host 127.0.0.1 --port 8080
 <a id="launch-and-history"></a>
 ## 啟動與管理 run
 
-在 Train 選擇 task、environment 數量、iteration、reward/terrain preset 與 resume 選項。面板會傳入 `--panel_overrides`，把每個工作綁定到其儲存的 override 檔案。History 會探索 checkpoint、event、export、video、note、folder 與部署報告。
+在 Train 選擇 task、environment 數量、iteration、reward/terrain preset、spring backend 與 resume 選項。面板會傳入 `--panel_overrides`，把每個工作綁定到其儲存的 override 檔案。History 會探索 checkpoint、event、export、video、note、folder 與部署報告。執行中的 card 會顯示 iteration progress、throughput 與 ETA；detail 包含 reward/episode-length curve 與啟動時的 Git provenance。
+
+Seed 留白時，面板會選擇並記錄一個值。先以目前 task 的 reward scale 驗證 divergence handling，再啟用 automatic stop；驗證前保持只通知。目前 view/run 會透過 URL 在 refresh 後保留，而 topbar freshness indicator 會顯示 backend 是否仍有回應。
 
 同一時間只能執行一個 Isaac GPU 工作。Queue 會在工作之間保留 settle window。請從 Process Console 停止選定程序，並等候完全結束後再啟動另一個工作。
 

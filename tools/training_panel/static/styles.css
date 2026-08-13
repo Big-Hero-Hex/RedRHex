@@ -141,7 +141,8 @@ button {
 
 button:disabled,
 input:disabled,
-textarea:disabled {
+textarea:disabled,
+select:disabled {
   cursor: not-allowed;
   opacity: 0.55;
   transform: none;
@@ -157,7 +158,8 @@ button:not(:disabled):active {
 
 button:focus-visible,
 input:focus-visible,
-textarea:focus-visible {
+textarea:focus-visible,
+select:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
@@ -270,7 +272,8 @@ label {
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 7px;
@@ -1392,7 +1395,8 @@ html[data-theme="dark"] .comparison-diff {
   line-height: 1.25;
 }
 
-[data-tooltip]:hover::after {
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
   opacity: 1;
 }
 
@@ -2649,4 +2653,237 @@ pre {
 #terminal-command {
   max-height: 220px;
   overflow: auto;
+}
+
+/* ── Live training progress (V3.5) ── */
+.run-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0 2px;
+}
+
+.run-progress-track {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.run-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--blue);
+  transition: width 0.4s ease;
+}
+
+.run-progress-label {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Training curves (V3.5) ── */
+.run-curves {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.curve-card {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+
+.curve-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+.curve-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.curve-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 64px;
+  color: var(--blue);
+}
+
+/* ── Global status toasts (V3.6) ── */
+.panel-status {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 36px));
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  animation: toast-in 140ms ease-out;
+}
+
+.toast-error {
+  border-left-color: var(--red);
+}
+
+.toast-body {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.toast-close {
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.toast-close:hover {
+  color: var(--text);
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
+
+/* ── Run card overflow menu (V3.6) ── */
+.run-menu-wrap {
+  position: relative;
+  display: inline-block;
+}
+
+.run-menu-trigger {
+  padding: 4px 9px;
+  line-height: 1;
+  font-size: 1rem;
+}
+
+.run-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  display: none;
+  flex-direction: column;
+  min-width: 170px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.run-menu[data-open="true"] {
+  display: flex;
+}
+
+.run-menu button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  padding: 7px 9px;
+  border-radius: 6px;
+}
+
+.run-menu button:not(:disabled):hover {
+  background: var(--surface-hover);
+  transform: none;
+}
+
+.run-menu button:disabled {
+  color: var(--muted);
+}
+
+/* ── Loading skeletons (V3.6) ── */
+.skeleton-row {
+  height: 62px;
+  margin-bottom: 8px;
+  border-radius: 9px;
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-hover) 37%, var(--surface-2) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  from { background-position: 100% 50%; }
+  to   { background-position: 0 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-row {
+    animation: none;
+    background: var(--surface-2);
+  }
+}
+
+/* ── Freshness indicator (V3.6) ── */
+.freshness {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.freshness-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.freshness[data-state="live"] .freshness-dot { background: var(--green); }
+.freshness[data-state="stale"] .freshness-dot { background: var(--amber); }
+.freshness[data-state="failed"] .freshness-dot { background: var(--red); }
+.freshness[data-state="failed"] { color: var(--red); }
+
+/* Anchored at the right edge of the topbar, so its tooltip must grow
+   leftward instead of centering — a centered tooltip here overshoots the
+   viewport on narrow screens. */
+.freshness[data-tooltip]::after {
+  left: auto;
+  right: 0;
+  transform: none;
 }
