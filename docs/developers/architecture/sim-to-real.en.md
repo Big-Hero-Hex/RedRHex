@@ -6,7 +6,7 @@ audience: developer
 type: explanation
 status: active
 owner: sim2real
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="roles"></a>
@@ -28,6 +28,11 @@ A `CalibrationProfileV1` is versioned data, not an implicit global setting. Trai
 ## Failure model
 
 The workflow fails closed on incomplete provenance, duplicate or non-finite JSON, unresolved hardware mapping, publisher ambiguity, timing conflicts, unauthenticated artifacts, failed physics audits, incomplete held-out metrics, and nonstationary evidence. Output paths are not overwritten silently.
+
+<a id="torsion-springs"></a>
+## Torsion-spring boundary
+
+The passive-spring profile uses canonical aliases `damper_0` through `damper_5`. Representative calibration and distinct holdout evidence come from `damper_0`; accepted neutral-constrained stiffness propagates to all aliases while damping remains zero until separately identified. `explicit` and `native` are equivalent contract implementations, not interchangeable evidence: the selected backend, profile ID/hash, and calibration status are bound to training, playback, evaluation, Panel history, and deployment checks.
 
 <a id="limits"></a>
 ## Interpretation limits

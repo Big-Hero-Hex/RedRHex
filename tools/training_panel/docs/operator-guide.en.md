@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="start"></a>
@@ -21,14 +21,14 @@ Open `http://127.0.0.1:8080`. Prefer an SSH tunnel for another machine. The loca
 <a id="train"></a>
 ## Train and queue
 
-In Train, choose task, environments, iterations, device, reward preset, terrain preset, and resume mode. Isaac/GPU actions—training, playback, video, and ONNX export—are serialized. A training request becomes queued while another GPU action is active; History can cancel it. A settle window separates completed Isaac jobs.
+In Train, choose task, environments, iterations, device, reward preset, terrain preset, spring backend, and resume mode. Isaac/GPU actions—training, playback, video, and ONNX export—are serialized. A training request becomes queued while another GPU action is active; History can cancel it. A settle window separates completed Isaac jobs.
 
 Panel-launched training uses a run-scoped override snapshot and passes `--panel_overrides`. Built-in reward and terrain presets are read-only; duplicate before editing.
 
 <a id="history"></a>
 ## Use History
 
-History combines panel requests and discovered RSL-RL runs. Select a run to inspect configuration, checkpoint, reward/terrain differences, notes, folder, event state, video, export, and readiness evidence. Available actions include TensorBoard, Play, Record Video, Export ONNX, Resume to Train, Compare, Compact Run, and Process Console.
+History combines panel requests and discovered RSL-RL runs. Select a run to inspect configuration, checkpoint, spring backend/calibration status, reward/terrain differences, notes, folder, event state, video, export, and readiness evidence. Play, recording, export, and deployment checks reuse the recorded backend and reject incompatible spring metadata. Available actions include TensorBoard, Play, Record Video, Export ONNX, Resume to Train, Compare, Compact Run, and Process Console.
 
 Compaction keeps the highest top-level `model_*.pt` and preserves events, parameters, videos, exports, notes, and deployment reports. Deletion requires the exact run ID and is rejected while a related process is active.
 

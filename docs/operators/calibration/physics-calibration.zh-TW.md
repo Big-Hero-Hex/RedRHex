@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: sim2real
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="safety"></a>
@@ -26,6 +26,8 @@ last_reviewed: 2026-08-07
 7. 只用已驗證的直接量測與證據建立 profile。
 8. 所有 audit 與 holdout gate 通過後才可 promote profile。
 
+被動扭轉彈簧有更嚴格的順序：mechanical-owner envelope approval、分開的 calibration 與 holdout episodes、linear-model quality gates、相符的 explicit/native 120/240 Hz characterization，以及 policy retraining。請依照[校準並驗證被動扭轉彈簧](torsion-spring-calibration.zh-TW.md)。
+
 <a id="tool"></a>
 ## 校準工具
 
@@ -34,7 +36,7 @@ last_reviewed: 2026-08-07
 <a id="promotion"></a>
 ## Promotion 規則
 
-若證據缺少 hash、joint mapping 未解決、ROS publisher 混淆、初始狀態不完整、geometry 或 mass/CoM audit 失敗、holdout 資料非穩態，或 held-out 指標不完整，均不可 promote。Replay 相符只代表該量測場景的證據，不能證明所有 locomotion 物理都正確。
+若證據缺少 hash、joint mapping 未解決、ROS publisher 混淆、初始狀態不完整、geometry 或 mass/CoM audit 失敗、holdout 資料非穩態、held-out 指標不完整，或 torsion-spring metadata 未校準，均不可 promote。Replay 相符只代表該量測場景的證據，不能證明所有 locomotion 物理都正確。
 
 <a id="developer-context"></a>
 ## 開發背景

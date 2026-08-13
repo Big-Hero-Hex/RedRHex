@@ -6,7 +6,7 @@ audience: developer
 type: explanation
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="components"></a>
@@ -23,6 +23,11 @@ The local mother is a Python `ThreadingHTTPServer` with static assets and APIs b
 ## Remote contract
 
 Remote roles and job types are defined centrally in `remote_config.py`. A heartbeat reports panel version, machine ID, paths, active job, queue depth, GPU lock, acceptance state, tunnel, and time. The worker claims authorized jobs, executes through the same process registry, and syncs runs, artifacts, metadata, folders, tombstones, and notifications.
+
+<a id="spring-contract"></a>
+## Spring-backend contract
+
+Run creation accepts only `explicit` or `native` and records the selection in parameters and history. Training, Play, automatic video, export, deployment validation, and remote synchronization reuse the stored backend and fail closed on missing or invalid spring metadata. ForwardFast automatic recording alone adds `--initial_command forward`; interactive Play and full Direct recordings do not.
 
 <a id="security"></a>
 ## Security boundary
