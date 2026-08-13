@@ -302,7 +302,11 @@ def _iso_now() -> str:
 
 
 def _module_status(name: str) -> dict[str, Any]:
-    if importlib.util.find_spec(name) is None:
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ModuleNotFoundError) as exc:
+        return {"installed": False, "version": "", "error": str(exc)}
+    if spec is None:
         return {"installed": False, "version": ""}
     try:
         module = importlib.import_module(name)

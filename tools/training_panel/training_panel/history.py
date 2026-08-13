@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,21 @@ PANEL_RUN_TIME_RE = re.compile(r"^panel_(\d{8})_(\d{6})")
 ACTIVE_PANEL_LOG_CLAIM_GRACE_SECONDS = 5
 ACTIVE_PANEL_LOG_CLAIM_WINDOW_SECONDS = 10 * 60
 
+# Display-only fields written on a short heartbeat while a run trains. An update
+# that touches only these must not bump the record's `updated_at`: mother/child
+# metadata sync resolves conflicts by last-write-wins on that field, and a
+# 5-second heartbeat would make the local record permanently "newer" and block
+# every incoming pull. `progress` carries its own `updated_at` for display.
+VOLATILE_RUN_FIELDS = frozenset({"progress"})
+
+
+class HistoryCorruptError(RuntimeError):
+    """Raised when the history file exists but does not parse.
+
+    Never swallowed into an empty default: the next write would otherwise
+    persist that emptiness and destroy the whole run history.
+    """
+
 
 def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
@@ -27,6 +43,31 @@ def _read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return default
+
+
+def _read_history_json(path: Path, default: Any) -> Any:
+    """Strict reader for the run-history file.
+
+    A missing file is legitimately empty and yields the default. A file that
+    exists but does not parse is corruption: a rescue copy is made once and
+    the read raises, so no writer can publish an empty history over it.
+    """
+    if not path.exists():
+        return default
+    text = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        rescue = path.with_name(f"{path.name}.corrupt-{datetime.now():%Y%m%d_%H%M%S}")
+        if not rescue.exists():
+            try:
+                shutil.copy2(path, rescue)
+            except OSError:
+                rescue = path
+        raise HistoryCorruptError(
+            f"{path} is not valid JSON ({exc}). Refusing to overwrite it with an empty "
+            f"history. A copy was preserved at {rescue}; repair or remove {path} to continue."
+        ) from exc
 
 
 def _safe_note_id(run_id: str) -> str:
@@ -138,7 +179,7 @@ class HistoryStore:
 
     def _load_data(self) -> dict:
         with self._lock:
-            data = _read_json(
+            data = _read_history_json(
                 self.paths.history_file, {"runs": [], "folders": [], "deleted_runs": [], "deleted_folders": []}
             )
             if not isinstance(data, dict):
@@ -153,9 +194,17 @@ class HistoryStore:
         with self._lock:
             self.paths.ensure_dirs()
             history_file = self.paths.history_file
-            tmp_path = history_file.with_name(history_file.name + ".tmp")
-            tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            os.replace(tmp_path, history_file)
+            # The tmp name must be unique per writer: the panel and the remote
+            # worker are separate OS processes sharing this directory, and a
+            # shared scratch filename lets one truncate the other's half-written
+            # file and publish a spliced, unparseable runs.json.
+            tmp_path = history_file.with_name(f"{history_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                os.replace(tmp_path, history_file)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
 
     def _load_records(self) -> list[dict]:
         data = self._load_data()
@@ -497,10 +546,12 @@ class HistoryStore:
                 updates = dict(updates)
                 updates.pop("source", None)
             records = self._load_records()
+            touch = bool(updates) and not set(updates).issubset(VOLATILE_RUN_FIELDS)
             for record in records:
                 if record.get("id") == run_id:
                     record.update(updates)
-                    record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                    if touch:
+                        record["updated_at"] = datetime.now().isoformat(timespec="seconds")
                     break
             self._save_records(records)
 

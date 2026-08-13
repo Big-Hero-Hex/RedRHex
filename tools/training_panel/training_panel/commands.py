@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 import re
 import shlex
 from dataclasses import asdict, dataclass, field
@@ -151,7 +152,9 @@ class TrainingParams:
             device=str(data.get("device") or "cuda:0"),
             spring_backend=data["spring_backend"] if "spring_backend" in data else "explicit",
             headless=bool(data.get("headless", True)),
-            seed=int(data["seed"]) if data.get("seed") not in (None, "") else None,
+            # A blank seed used to mean "env default", which made runs
+            # unreproducible. The panel now picks one and records it.
+            seed=int(data["seed"]) if data.get("seed") not in (None, "") else random.randint(0, 2 ** 31 - 1),
             resume=bool(data.get("resume", False)),
             checkpoint=str(data["checkpoint"]) if data.get("checkpoint") else None,
             reward_preset_id=str(data.get("reward_preset_id") or "baseline"),

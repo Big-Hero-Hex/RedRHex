@@ -37,7 +37,9 @@ Mother 沒有內建 authentication，且可啟動或刪除本機工作；預設�
 <a id="version"></a>
 ## 版本 contract
 
-Version `3.4.10-sync-health` 出現在 Python、本機 UI asset、child asset URL、child release metadata、heartbeat 與 worker schema。變更時必須一起更新並加入 release entry。測試涵蓋 command construction、history、queue/process behavior、remote role/sync、notification、contract parity、deployment 與 UI asset。
+本機 Mother package 與 UI 的 release 是 `3.6.0-panel-ux`。獨立部署的 remote Child asset、Child release metadata、heartbeat schema 與 worker synchronization contract 仍為 `3.4.10-sync-health`。本機 UI release 不會暗中改變 remote protocol。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
+
+V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment 與 UI asset。
 
 <a id="pages"></a>
 ## Pages artifact
