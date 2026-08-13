@@ -32,7 +32,7 @@
 - Consumes: Windows `ssh.exe`, `powershell.exe`, Tailscale connectivity to `100.90.246.97`, workstation HTTP endpoints on ports `8080` and `6006`
 - Produces: `Get-RedRHexSshArguments` returning `string[]`; `Get-RedRHexInstallPaths` returning a `PSCustomObject`; `New-RedRHexTunnelCommand` returning `string`; `Install-RedRHexLauncher`; `Start-RedRHexRemote`; desktop shortcut `RedRHex Remote.lnk`
 
-- [ ] **Step 1: Write the failing dependency-free PowerShell tests**
+- [x] **Step 1: Write the failing dependency-free PowerShell tests**
 
 Create `tools/windows/tests/test_redrhex_remote.ps1`:
 
@@ -108,7 +108,7 @@ if ($script:FailureCount -gt 0) {
 Write-Host "All RedRHex Remote tests passed." -ForegroundColor Green
 ~~~
 
-- [ ] **Step 2: Run the tests to verify the launcher is missing**
+- [x] **Step 2: Run the tests to verify the launcher is missing**
 
 Run on Windows from the repository root:
 
@@ -118,7 +118,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\windows\tests\te
 
 Expected: FAIL with `Launcher not found` because `tools/windows/redrhex_remote.ps1` does not exist.
 
-- [ ] **Step 3: Implement the self-installing launcher**
+- [x] **Step 3: Implement the self-installing launcher**
 
 Create `tools/windows/redrhex_remote.ps1`:
 
@@ -172,11 +172,12 @@ function Get-RedRHexInstallPaths {
         throw "Windows did not provide a Desktop directory."
     }
 
-    $installDirectory = Join-Path $LocalAppData "RedRHex Remote"
+    $trimCharacters = [char[]]@("\", "/")
+    $installDirectory = $LocalAppData.TrimEnd($trimCharacters) + "\RedRHex Remote"
     return [pscustomobject]@{
         InstallDirectory = $installDirectory
-        InstalledScript  = Join-Path $installDirectory "redrhex_remote.ps1"
-        Shortcut         = Join-Path $Desktop "RedRHex Remote.lnk"
+        InstalledScript  = $installDirectory + "\redrhex_remote.ps1"
+        Shortcut         = $Desktop.TrimEnd($trimCharacters) + "\RedRHex Remote.lnk"
     }
 }
 
@@ -345,7 +346,7 @@ if ($MyInvocation.InvocationName -ne ".") {
 }
 ~~~
 
-- [ ] **Step 4: Run the dependency-free tests**
+- [x] **Step 4: Run the dependency-free tests**
 
 Run on Windows from the repository root:
 
@@ -355,7 +356,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\windows\tests\te
 
 Expected: every assertion prints `PASS` and the final line is `All RedRHex Remote tests passed.`
 
-- [ ] **Step 5: Document installation, use, and removal**
+- [x] **Step 5: Document installation, use, and removal**
 
 Create `tools/windows/README.md`:
 
@@ -402,7 +403,7 @@ Remove-Item (Join-Path $env:LOCALAPPDATA "RedRHex Remote") -Recurse -Force
 Removal deletes only the per-user shortcut and installed launcher copy.
 ~~~~
 
-- [ ] **Step 6: Run repository-side static checks**
+- [x] **Step 6: Run repository-side static checks**
 
 Run on the Ubuntu workstation:
 
