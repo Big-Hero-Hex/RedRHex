@@ -6,7 +6,7 @@ audience: developer
 type: plan
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="objective"></a>
@@ -17,10 +17,10 @@ Implement the [approved Windows launcher design](../../designs/active/2026-08-01
 <a id="implementation"></a>
 ## Implementation tasks
 
-- [ ] Add `tools/windows/redrhex_remote.ps1` with pure argument/path/command helpers, endpoint probing, visible tunnel startup, readiness timeout, browser launch, and `-Install` mode.
-- [ ] Add `tools/windows/tests/test_redrhex_remote.ps1` and prove the test fails before implementation and passes afterward on Windows PowerShell 5.1+.
-- [ ] Add a bilingual router at `tools/windows/README.md` that links to canonical operator and developer documentation.
-- [ ] Preserve the fixed SSH/port contract from the design and store no secrets.
+- [x] Add `tools/windows/redrhex_remote.ps1` with pure argument/path/command helpers, endpoint probing, visible tunnel startup, readiness timeout, browser launch, and `-Install` mode.
+- [ ] Add `tools/windows/tests/test_redrhex_remote.ps1` and prove the test fails before implementation and passes afterward on Windows PowerShell 5.1+. The test source is committed; Windows execution evidence remains pending.
+- [x] Add a bilingual router at `tools/windows/README.md` that links to canonical operator and developer documentation.
+- [x] Preserve the fixed SSH/port contract from the design and store no secrets.
 
 <a id="windows-smoke"></a>
 ## Windows smoke verification

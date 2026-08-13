@@ -6,7 +6,7 @@ audience: developer
 type: plan
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="objective"></a>
@@ -17,10 +17,10 @@ last_reviewed: 2026-08-07
 <a id="implementation"></a>
 ## 實作工作
 
-- [ ] 新增 `tools/windows/redrhex_remote.ps1`，包含 pure argument/path/command helper、endpoint probe、visible tunnel startup、readiness timeout、browser launch 與 `-Install` mode。
-- [ ] 新增 `tools/windows/tests/test_redrhex_remote.ps1`，證明測試在 implementation 前失敗，之後於 Windows PowerShell 5.1+ 通過。
-- [ ] 在 `tools/windows/README.md` 新增雙語 router，連到 canonical operator 與 developer 文件。
-- [ ] 保留 design 的固定 SSH/port contract，不儲存任何 secret。
+- [x] 新增 `tools/windows/redrhex_remote.ps1`，包含 pure argument/path/command helper、endpoint probe、visible tunnel startup、readiness timeout、browser launch 與 `-Install` mode。
+- [ ] 新增 `tools/windows/tests/test_redrhex_remote.ps1`，證明測試在 implementation 前失敗，之後於 Windows PowerShell 5.1+ 通過。Test source 已提交；仍待 Windows execution evidence。
+- [x] 在 `tools/windows/README.md` 新增雙語 router，連到 canonical operator 與 developer 文件。
+- [x] 保留 design 的固定 SSH/port contract，不儲存任何 secret。
 
 <a id="windows-smoke"></a>
 ## Windows smoke 驗證

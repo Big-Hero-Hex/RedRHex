@@ -16,6 +16,10 @@
     {
       "destination": "components/ros2-deployment",
       "source": "ros2_ws/src/redrhex_rl_controller/docs"
+    },
+    {
+      "destination": "components/windows-remote-launcher",
+      "source": "tools/windows/docs"
     }
   ]
 }
