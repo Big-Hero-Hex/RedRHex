@@ -6,12 +6,13 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="published-evidence"></a>
 ## 已發布證據
 
+- [純感測器學生蒸餾 V2 程式路徑稽核](2026-08-13-student-distillation-v2-audit.zh-TW.md)
 - [2026-08-13 研究就緒度稽核修正附錄 1](2026-08-13-research-readiness-audit-addendum-1.zh-TW.md)
 - [2026-08-13 研究就緒度稽核](2026-08-13-research-readiness-audit.zh-TW.md)
 - [2026-08-07 文件系統 v1 稽核](2026-08-07-documentation-system-audit.zh-TW.md)

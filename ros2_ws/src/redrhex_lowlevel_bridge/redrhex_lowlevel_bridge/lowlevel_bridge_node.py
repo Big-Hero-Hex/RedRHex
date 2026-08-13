@@ -39,6 +39,15 @@ MAIN_JOINT_NAMES_POLICY_ORDER = [
     "Revolute_24",
 ]
 
+ABAD_JOINT_NAMES_POLICY_ORDER = [
+    "Revolute_14",
+    "Revolute_6",
+    "Revolute_11",
+    "Revolute_17",
+    "Revolute_22",
+    "Revolute_21",
+]
+
 
 class LowLevelBridgeNode(Node):
     def __init__(self) -> None:
@@ -88,6 +97,15 @@ class LowLevelBridgeNode(Node):
         self.declare_parameter("rinbo.abad_encoder_min", 0)
         self.declare_parameter("rinbo.abad_encoder_max", 65535)
         self.declare_parameter("rinbo.abad_sign_rinbo_order", [1.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        # Additive V2 feedback route.  Defaults preserve the V1 six-joint topic
+        # and keep all calibration gates closed.
+        self.declare_parameter("rinbo.publish_abad_joint_states", False)
+        self.declare_parameter("rinbo.joint_feedback_status_topic_v2", "/redrhex/joint_feedback_status_v2")
+        self.declare_parameter("rinbo.main_encoder_calibration_verified", False)
+        self.declare_parameter("rinbo.abad_encoder_calibration_verified", False)
+        self.declare_parameter("rinbo.abad_velocity_filter_alpha", 0.35)
+        self.declare_parameter("rinbo.abad_velocity_max_dt_s", 0.20)
+        self.declare_parameter("rinbo.abad_velocity_clip_rad_s", 20.0)
         self.declare_parameter("rinbo.servo_control_mode", 2)
         self.declare_parameter("sim2real_probe.session_timeout_s", 0.25)
         self.declare_parameter("feedback_rate_hz", 50.0)
@@ -152,6 +170,14 @@ class LowLevelBridgeNode(Node):
                 list(self.get_parameter("rinbo.abad_sign_rinbo_order").value),
                 int(self.get_parameter("rinbo.servo_control_mode").value),
                 MAIN_JOINT_NAMES_POLICY_ORDER,
+                ABAD_JOINT_NAMES_POLICY_ORDER,
+                bool(self.get_parameter("rinbo.publish_abad_joint_states").value),
+                str(self.get_parameter("rinbo.joint_feedback_status_topic_v2").value),
+                bool(self.get_parameter("rinbo.main_encoder_calibration_verified").value),
+                bool(self.get_parameter("rinbo.abad_encoder_calibration_verified").value),
+                float(self.get_parameter("rinbo.abad_velocity_filter_alpha").value),
+                float(self.get_parameter("rinbo.abad_velocity_max_dt_s").value),
+                float(self.get_parameter("rinbo.abad_velocity_clip_rad_s").value),
             )
         else:
             raise ValueError(

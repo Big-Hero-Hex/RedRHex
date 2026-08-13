@@ -35,10 +35,13 @@ redrhex_lowlevel_bridge:
       # It publishes rinbo_msgs/MotorCmdStamped and subscribes rinbo_msgs/MotorStateStamped.
       command_topic: "/motor/command"
       state_topic: "/motor/state"
-      # The adapter republishes six main-drive encoder positions as /joint_states
-      # in IsaacLab policy order. ABAD feedback is still "commanded" because the
-      # real ABAD motors currently do not provide feedback.
+      # V1 default: publish only six main-drive encoders. The V2 config enables
+      # measured ABAD publication separately after calibration review.
       joint_state_topic: "/joint_states"
+      publish_abad_joint_states: false
+      joint_feedback_status_topic_v2: "/redrhex/joint_feedback_status_v2"
+      main_encoder_calibration_verified: false
+      abad_encoder_calibration_verified: false
       # Safe debug topic. This mirrors the converted rinbo_msgs command so you
       # can inspect mapping while allow_enable=false. BioRoLaROS2 does NOT subscribe
       # to this topic.
@@ -103,4 +106,7 @@ redrhex_lowlevel_bridge:
       # Servo direction hook in rinbo servo order. Flip during low-power ABAD tests
       # if positive policy ABAD angle moves opposite to IsaacLab.
       abad_sign_rinbo_order: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      abad_velocity_filter_alpha: 0.35
+      abad_velocity_max_dt_s: 0.20
+      abad_velocity_clip_rad_s: 20.0
       servo_control_mode: 2

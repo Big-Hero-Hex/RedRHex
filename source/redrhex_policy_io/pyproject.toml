@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "redrhex-policy-io"
+version = "2.0.0"
+description = "Versioned sensor and action contracts shared by RedRHex simulation and deployment"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["redrhex_policy_io*"]
+
+[tool.setuptools.package-data]
+redrhex_policy_io = ["data/*.json"]

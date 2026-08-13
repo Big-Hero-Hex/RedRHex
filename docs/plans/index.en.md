@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="active-plans"></a>
 ## Active plans
 
+- [Sensor-only student distillation V2 implementation](active/2026-08-13-student-distillation-v2.en.md)
 - [macOS remote launcher implementation](active/2026-08-13-macos-remote-launcher.en.md)
 - [Windows remote launcher implementation](active/2026-08-01-windows-remote-launcher.en.md)
 

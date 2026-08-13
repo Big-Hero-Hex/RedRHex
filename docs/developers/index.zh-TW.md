@@ -14,6 +14,7 @@ last_reviewed: 2026-08-14
 
 - [系統總覽](architecture/system-overview.zh-TW.md)
 - [訓練與策略架構](architecture/training-and-policy.zh-TW.md)
+- [純感測器蒸餾 V2 架構](architecture/sensor-distillation-v2.zh-TW.md)
 - [Reward 與能量模型](architecture/reward-and-energy.zh-TW.md)
 - [Sim-to-real 校正架構](architecture/sim-to-real.zh-TW.md)
 - [ROS 2 部署架構](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.zh-TW.md)

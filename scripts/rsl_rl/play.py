@@ -78,7 +78,7 @@ parser.add_argument(
 parser.add_argument(
     "--initial_command",
     type=str,
-    default="stop",
+    default="forward",
     choices=["forward", "backward", "left", "right", "diag_left", "diag_right", "yaw_ccw", "yaw_cw", "stop"],
     help="Initial command when keyboard control is enabled.",
 )
@@ -147,8 +147,6 @@ import torch
 import threading
 import re
 
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
-
 from isaaclab.envs import (
     DirectMARLEnv,
     DirectMARLEnvCfg,
@@ -167,6 +165,11 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import RedRhex.tasks as _redrhex_tasks  # noqa: F401
+from scripts.rsl_rl.runner_factory import (
+    create_runner,
+    get_exportable_actor,
+    runner_protocol,
+)
 
 
 assert_redrhex_module_source(_redrhex_tasks, _REPO_ROOT)
@@ -737,26 +740,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    protocol = runner_protocol(agent_cfg.class_name)
+    runner = create_runner(
+        agent_cfg.class_name,
+        env,
+        agent_cfg.to_dict(),
+        log_dir=None,
+        device=agent_cfg.device,
+    )
+    if protocol.strict_checkpoint:
+        runner.load(resume_path, load_optimizer=False)
     else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
+        _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
 
     # obtain the trained policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     # extract the neural network module
     # we do this in a try-except to maintain backwards compatibility.
-    try:
-        # version 2.3 onwards
-        policy_nn = runner.alg.policy
-    except AttributeError:
-        # version 2.2 and below
-        policy_nn = runner.alg.actor_critic
+    policy_nn = get_exportable_actor(runner, protocol)
 
     # extract the normalizer
     if hasattr(policy_nn, "actor_obs_normalizer"):
@@ -766,12 +768,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         normalizer = None
 
-    # export policy to onnx/jit
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-    export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-    export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
-    print(f"[INFO] Exported JIT policy to: {os.path.join(export_model_dir, 'policy.pt')}")
-    print(f"[INFO] Exported ONNX policy to: {os.path.join(export_model_dir, 'policy.onnx')}")
+    if protocol.v2:
+        if not (args_cli.export_policy_only or args_cli.export_policy):
+            print("[INFO] V2 export is explicit; skipping automatic bundle rewrite during playback.")
+        else:
+            from RedRhex.tasks.direct.redrhex.agents.sensor_v2.export import (
+                export_runner_policy_bundle_v2,
+            )
+
+            exported = export_runner_policy_bundle_v2(
+                runner,
+                policy_nn,
+                resume_path,
+                export_model_dir,
+            )
+            print(f"[INFO] Exported Sensor V2 ONNX bundle to: {exported}")
+    else:
+        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+        export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+        print(f"[INFO] Exported JIT policy to: {os.path.join(export_model_dir, 'policy.pt')}")
+        print(f"[INFO] Exported ONNX policy to: {os.path.join(export_model_dir, 'policy.onnx')}")
 
     if args_cli.export_policy_only or args_cli.export_policy:
         flag = "--export_policy_only" if args_cli.export_policy_only else "--export_policy"

@@ -93,8 +93,6 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import torch
 
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
-
 from isaaclab.envs import (
     DirectMARLEnv,
     DirectMARLEnvCfg,
@@ -111,6 +109,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import RedRhex.tasks  # noqa: F401
+from scripts.rsl_rl.runner_factory import create_runner, get_exportable_actor, runner_protocol
 
 
 def _load_runner_checkpoint_with_policy_fallback(runner, resume_path: str, device: str) -> None:
@@ -649,21 +648,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    protocol = runner_protocol(agent_cfg.class_name)
+    runner = create_runner(
+        agent_cfg.class_name,
+        env,
+        agent_cfg.to_dict(),
+        log_dir=None,
+        device=agent_cfg.device,
+    )
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
+    if protocol.strict_checkpoint:
+        runner.load(resume_path, load_optimizer=False)
+    else:
+        _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
-    try:
-        policy_nn = runner.alg.policy
-    except AttributeError:
-        policy_nn = runner.alg.actor_critic
+    policy_nn = get_exportable_actor(runner, protocol)
 
     unwrapped_env = env.unwrapped
     if hasattr(unwrapped_env, "external_control"):

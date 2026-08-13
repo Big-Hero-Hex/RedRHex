@@ -14,6 +14,7 @@ last_reviewed: 2026-08-14
 
 - [System overview](architecture/system-overview.en.md)
 - [Training and policy architecture](architecture/training-and-policy.en.md)
+- [Sensor-only distillation V2 architecture](architecture/sensor-distillation-v2.en.md)
 - [Reward and energy model](architecture/reward-and-energy.en.md)
 - [Sim-to-real calibration architecture](architecture/sim-to-real.en.md)
 - [ROS 2 deployment architecture](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.en.md)
