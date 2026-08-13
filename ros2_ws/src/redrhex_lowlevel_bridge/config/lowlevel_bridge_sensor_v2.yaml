@@ -1,0 +1,21 @@
+redrhex_lowlevel_bridge:
+  ros__parameters:
+    # Sensor-only V2 feedback overlay. Motor output remains blocked.
+    backend: "mock"
+    feedback_rate_hz: 60.0
+    rinbo:
+      allow_enable: false
+      publish_when_disabled: false
+      publish_abad_joint_states: true
+      joint_state_topic: "/joint_states"
+      joint_feedback_status_topic_v2: "/redrhex/joint_feedback_status_v2"
+      main_encoder_calibration_verified: false
+      abad_encoder_calibration_verified: false
+      main_encoder_zero_counts_rinbo_order: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      main_encoder_sign_rinbo_order: [-1.0, -1.0, -1.0, 1.0, 1.0, 1.0]
+      abad_encoder_zero_rinbo_order: [740, 2565, 3283, 1944, 2071, 989]
+      abad_encoder_counts_per_rad: 1000.0
+      abad_sign_rinbo_order: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      abad_velocity_filter_alpha: 0.35
+      abad_velocity_max_dt_s: 0.20
+      abad_velocity_clip_rad_s: 20.0

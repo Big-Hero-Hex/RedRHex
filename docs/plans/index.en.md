@@ -6,12 +6,13 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="active-plans"></a>
 ## Active plans
 
+- [Sensor-only student distillation V2 implementation](active/2026-08-13-student-distillation-v2.en.md)
 - [Windows remote launcher implementation](active/2026-08-01-windows-remote-launcher.en.md)
 
 <a id="plan-lifecycle"></a>

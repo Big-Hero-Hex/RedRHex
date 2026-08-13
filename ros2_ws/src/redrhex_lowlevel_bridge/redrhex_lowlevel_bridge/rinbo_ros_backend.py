@@ -4,8 +4,11 @@ This backend is for the existing BioRoLaROS2/RhexROS2 stack:
   /motor/command  rinbo_msgs/msg/MotorCmdStamped
   /motor/state    rinbo_msgs/msg/MotorStateStamped
 
-It also publishes /joint_states from the six main-drive encoders so the RL
-controller can build IsaacLab-compatible observations.
+It also publishes /joint_states from the six main-drive encoders so the V1 RL
+controller can build IsaacLab-compatible observations.  An explicitly enabled
+V2 route appends the six measured ABAD encoders in canonical policy order and
+publishes a versioned per-channel validity diagnostic.  The V1 default remains
+the original six-joint message.
 """
 
 from __future__ import annotations
@@ -97,6 +100,14 @@ class RinboRosBackend(LowLevelBridgeBase):
         abad_sign_rinbo_order: list[float],
         servo_control_mode: int,
         main_joint_names_policy_order: list[str],
+        abad_joint_names_policy_order: list[str] | None = None,
+        publish_abad_joint_states: bool = False,
+        joint_feedback_status_topic_v2: str = "/redrhex/joint_feedback_status_v2",
+        main_encoder_calibration_verified: bool = False,
+        abad_encoder_calibration_verified: bool = False,
+        abad_velocity_filter_alpha: float = 0.35,
+        abad_velocity_max_dt_s: float = 0.20,
+        abad_velocity_clip_rad_s: float = 20.0,
     ) -> None:
         self.node = node
         self.command_topic = command_topic
@@ -131,6 +142,14 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.abad_sign_rinbo_order = [float(x) for x in abad_sign_rinbo_order]
         self.servo_control_mode = int(servo_control_mode)
         self.main_joint_names_policy_order = list(main_joint_names_policy_order)
+        self.abad_joint_names_policy_order = list(abad_joint_names_policy_order or [])
+        self.publish_abad_joint_states = bool(publish_abad_joint_states)
+        self.joint_feedback_status_topic_v2 = str(joint_feedback_status_topic_v2)
+        self.main_encoder_calibration_verified = bool(main_encoder_calibration_verified)
+        self.abad_encoder_calibration_verified = bool(abad_encoder_calibration_verified)
+        self.abad_velocity_filter_alpha = float(abad_velocity_filter_alpha)
+        self.abad_velocity_max_dt_s = float(abad_velocity_max_dt_s)
+        self.abad_velocity_clip_rad_s = float(abad_velocity_clip_rad_s)
 
         if len(self.main_encoder_zero_counts_rinbo_order) != 6:
             raise ValueError("main_encoder_zero_counts_rinbo_order must have length 6")
@@ -146,6 +165,12 @@ class RinboRosBackend(LowLevelBridgeBase):
             raise ValueError("abad_sign_rinbo_order must have length 6")
         if len(self.main_joint_names_policy_order) != 6:
             raise ValueError("main_joint_names_policy_order must have length 6")
+        if self.publish_abad_joint_states and len(self.abad_joint_names_policy_order) != 6:
+            raise ValueError("abad_joint_names_policy_order must have length 6 when ABAD publication is enabled")
+        if self.abad_joint_names_policy_order and len(self.abad_joint_names_policy_order) != 6:
+            raise ValueError("abad_joint_names_policy_order must be empty or have length 6")
+        if set(self.main_joint_names_policy_order).intersection(self.abad_joint_names_policy_order):
+            raise ValueError("main and ABAD joint names must not overlap")
         if not math.isfinite(self.state_timeout_s) or self.state_timeout_s <= 0.0:
             raise ValueError("state_timeout_s must be positive and finite")
         if (
@@ -183,6 +208,15 @@ class RinboRosBackend(LowLevelBridgeBase):
             raise ValueError("main_velocity_max_dt_s must be positive and finite")
         if not math.isfinite(self.main_velocity_clip_rad_s) or self.main_velocity_clip_rad_s <= 0.0:
             raise ValueError("main_velocity_clip_rad_s must be positive and finite")
+        if (
+            not math.isfinite(self.abad_velocity_filter_alpha)
+            or not 0.0 <= self.abad_velocity_filter_alpha <= 1.0
+        ):
+            raise ValueError("abad_velocity_filter_alpha must be finite and in [0, 1]")
+        if not math.isfinite(self.abad_velocity_max_dt_s) or self.abad_velocity_max_dt_s <= 0.0:
+            raise ValueError("abad_velocity_max_dt_s must be positive and finite")
+        if not math.isfinite(self.abad_velocity_clip_rad_s) or self.abad_velocity_clip_rad_s <= 0.0:
+            raise ValueError("abad_velocity_clip_rad_s must be positive and finite")
         if self.shutdown_disable_repeats < 2:
             raise ValueError("shutdown_disable_repeats must be at least 2")
         if not math.isfinite(self.shutdown_disable_period_s) or self.shutdown_disable_period_s < 0.0:
@@ -198,8 +232,14 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.latest_velocities_policy = [0.0] * 6
         self._prev_positions_policy: list[float] | None = None
         self._prev_state_time: float | None = None
+        self.latest_abad_positions_policy = [0.0] * 6
+        self.latest_abad_velocities_policy = [0.0] * 6
+        self.latest_joint_validity_policy = [False] * 12
+        self._prev_abad_positions_policy: list[float] | None = None
+        self._prev_abad_state_time: float | None = None
         self.latest_raw_positions_rinbo = [0.0] * 6
         self.latest_servo_positions_rinbo = list(self.abad_encoder_zero_rinbo_order)
+        self.latest_servo_raw_validity_rinbo = [False] * 6
         self.last_command_was_enabled = False
         self.last_pwm_rinbo_order = [0.0] * 6
         self.last_abad_encoder_targets_rinbo_order = list(self.abad_encoder_zero_rinbo_order)
@@ -220,6 +260,7 @@ class RinboRosBackend(LowLevelBridgeBase):
 
         try:
             from rinbo_msgs.msg import MotorCmdStamped, MotorStateStamped
+            from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
         except Exception as exc:  # pragma: no cover - requires external BioRoLaROS2 overlay
             raise RuntimeError(
                 "rinbo_msgs is required for backend='biorola_ros'/'rinbo_ros'. Build/source BioRoLaROS2 first."
@@ -227,9 +268,17 @@ class RinboRosBackend(LowLevelBridgeBase):
 
         self.MotorCmdStamped = MotorCmdStamped
         self.MotorStateStamped = MotorStateStamped
+        self.DiagnosticArray = DiagnosticArray
+        self.DiagnosticStatus = DiagnosticStatus
+        self.KeyValue = KeyValue
         self.cmd_pub = self.node.create_publisher(MotorCmdStamped, self.command_topic, 10)
         self.preview_pub = self.node.create_publisher(MotorCmdStamped, self.preview_topic, 10)
         self.joint_pub = self.node.create_publisher(JointState, self.joint_state_topic, 10)
+        self.joint_feedback_status_pub_v2 = None
+        if self.publish_abad_joint_states:
+            self.joint_feedback_status_pub_v2 = self.node.create_publisher(
+                DiagnosticArray, self.joint_feedback_status_topic_v2, 10
+            )
         self.state_sub = self.node.create_subscription(MotorStateStamped, self.state_topic, self._on_rinbo_state, 10)
         self.connected = True
         self.node.get_logger().info(
@@ -575,13 +624,15 @@ class RinboRosBackend(LowLevelBridgeBase):
             float(msg.r3.position),
         ]
         self.latest_raw_positions_rinbo = rinbo_positions
+        servo_messages = [msg.sl1, msg.sl2, msg.sl3, msg.sr1, msg.sr2, msg.sr3]
+        self.latest_servo_raw_validity_rinbo = [
+            hasattr(servo, "position_encoder")
+            and isinstance(getattr(servo, "position_encoder", None), (int, float))
+            and math.isfinite(float(getattr(servo, "position_encoder", 0)))
+            for servo in servo_messages
+        ]
         self.latest_servo_positions_rinbo = [
-            int(getattr(msg.sl1, "position_encoder", 0)),
-            int(getattr(msg.sl2, "position_encoder", 0)),
-            int(getattr(msg.sl3, "position_encoder", 0)),
-            int(getattr(msg.sr1, "position_encoder", 0)),
-            int(getattr(msg.sr2, "position_encoder", 0)),
-            int(getattr(msg.sr3, "position_encoder", 0)),
+            int(getattr(servo, "position_encoder", 0)) for servo in servo_messages
         ]
 
         rinbo_rad = [
@@ -599,13 +650,31 @@ class RinboRosBackend(LowLevelBridgeBase):
         self.latest_positions_policy = policy_positions
         self.latest_velocities_policy = policy_velocities
 
+        abad_positions_policy, abad_validity_policy = self._convert_abad_feedback_to_policy(
+            self.latest_servo_positions_rinbo,
+            self.latest_servo_raw_validity_rinbo,
+        )
+        abad_velocities_policy = self._estimate_abad_policy_velocities(abad_positions_policy, state_time)
+        self.latest_abad_positions_policy = abad_positions_policy
+        self.latest_abad_velocities_policy = abad_velocities_policy
+        main_valid = bool(
+            self.main_encoder_calibration_verified
+            and all(math.isfinite(value) for value in policy_positions + policy_velocities)
+        )
+        self.latest_joint_validity_policy = [main_valid] * 6 + abad_validity_policy
+
         js = JointState()
-        js.header.stamp = self.node.get_clock().now().to_msg()
+        js.header.stamp = self._joint_state_source_stamp(msg)
         js.header.frame_id = "redrhex_base"
         js.name = list(self.main_joint_names_policy_order)
         js.position = [float(x) for x in policy_positions]
         js.velocity = [float(x) for x in policy_velocities]
+        if self.publish_abad_joint_states:
+            js.name.extend(self.abad_joint_names_policy_order)
+            js.position.extend(float(x) for x in abad_positions_policy)
+            js.velocity.extend(float(x) for x in abad_velocities_policy)
         self.joint_pub.publish(js)
+        self._publish_joint_feedback_status_v2(js.header.stamp)
 
         state = RedRhexMotorState()
         state.header.stamp = js.header.stamp
@@ -618,6 +687,100 @@ class RinboRosBackend(LowLevelBridgeBase):
         state.temperature_c = []
         state.fault = [False] * 6
         self.latest_motor_state = state
+
+    def _convert_abad_feedback_to_policy(
+        self,
+        raw_rinbo: list[int],
+        raw_validity_rinbo: list[bool] | None = None,
+    ) -> tuple[list[float], list[bool]]:
+        """Convert six raw servo encoders to neutral-relative radians in policy order.
+
+        Calibration validity is deliberately independent from numeric conversion:
+        provisional values can be inspected offline, but V2 readiness stays false
+        until the reviewed calibration gate is explicitly enabled.
+        """
+        if len(raw_rinbo) != 6:
+            raise ValueError("raw Rinbo ABAD feedback must have length 6")
+        if raw_validity_rinbo is None:
+            raw_validity_rinbo = [True] * 6
+        if len(raw_validity_rinbo) != 6:
+            raise ValueError("raw Rinbo ABAD validity must have length 6")
+        policy_positions = [0.0] * 6
+        policy_validity = [False] * 6
+        for servo_idx, raw in enumerate(raw_rinbo):
+            numeric_valid = isinstance(raw, (int, float)) and math.isfinite(float(raw))
+            in_range = (
+                bool(raw_validity_rinbo[servo_idx])
+                and numeric_valid
+                and self.abad_encoder_min <= float(raw) <= self.abad_encoder_max
+            )
+            policy_idx = self.POLICY_ABAD_INDEX_BY_RINBO_SERVO[servo_idx]
+            if numeric_valid:
+                policy_positions[policy_idx] = (
+                    (float(raw) - self.abad_encoder_zero_rinbo_order[servo_idx])
+                    * self.abad_sign_rinbo_order[servo_idx]
+                    / self.abad_encoder_counts_per_rad
+                )
+            policy_validity[policy_idx] = bool(in_range and self.abad_encoder_calibration_verified)
+        return policy_positions, policy_validity
+
+    def _joint_state_source_stamp(self, rinbo_state_msg):
+        """Preserve the hardware source stamp on the explicit V2 route."""
+        if self.publish_abad_joint_states:
+            stamp = getattr(getattr(rinbo_state_msg, "header", None), "stamp", None)
+            if stamp is not None:
+                seconds = float(getattr(stamp, "sec", 0)) + 1.0e-9 * float(
+                    getattr(stamp, "nanosec", 0)
+                )
+                if math.isfinite(seconds) and seconds > 0.0:
+                    return stamp
+        return self.node.get_clock().now().to_msg()
+
+    def _estimate_abad_policy_velocities(
+        self, policy_positions: list[float], state_time: float
+    ) -> list[float]:
+        if self._prev_abad_positions_policy is None or self._prev_abad_state_time is None:
+            self._prev_abad_positions_policy = list(policy_positions)
+            self._prev_abad_state_time = state_time
+            return [0.0] * 6
+        previous = list(self._prev_abad_positions_policy)
+        dt = state_time - self._prev_abad_state_time
+        self._prev_abad_positions_policy = list(policy_positions)
+        self._prev_abad_state_time = state_time
+        if dt <= 1.0e-6 or dt > self.abad_velocity_max_dt_s:
+            return [0.0] * 6
+        limit = self.abad_velocity_clip_rad_s
+        raw_velocity = [
+            max(-limit, min(limit, (float(policy_positions[i]) - float(previous[i])) / dt))
+            for i in range(6)
+        ]
+        alpha = self.abad_velocity_filter_alpha
+        return [
+            alpha * raw_velocity[i] + (1.0 - alpha) * self.latest_abad_velocities_policy[i]
+            for i in range(6)
+        ]
+
+    def _publish_joint_feedback_status_v2(self, source_stamp) -> None:
+        publisher = getattr(self, "joint_feedback_status_pub_v2", None)
+        if not self.publish_abad_joint_states or publisher is None:
+            return
+        array = self.DiagnosticArray()
+        array.header.stamp = source_stamp
+        names = self.main_joint_names_policy_order + self.abad_joint_names_policy_order
+        statuses = []
+        for name, valid in zip(names, self.latest_joint_validity_policy, strict=True):
+            status = self.DiagnosticStatus()
+            status.name = f"redrhex_joint_feedback_v2/{name}"
+            status.hardware_id = "rinbo"
+            status.level = self.DiagnosticStatus.OK if valid else self.DiagnosticStatus.ERROR
+            status.message = "valid" if valid else "calibration or raw feedback unverified"
+            status.values = [
+                self.KeyValue(key="joint_name", value=name),
+                self.KeyValue(key="valid", value=str(bool(valid)).lower()),
+            ]
+            statuses.append(status)
+        array.status = statuses
+        publisher.publish(array)
 
     def _estimate_policy_velocities(self, policy_positions: list[float], state_time: float) -> list[float]:
         if self._prev_positions_policy is None or self._prev_state_time is None:

@@ -27,6 +27,18 @@ def redrhex_source_root(repo_root: str | Path | None = None) -> Path:
     return source
 
 
+def policy_io_source_root(repo_root: str | Path | None = None) -> Path | None:
+    """Return the additive policy-I/O source root when present.
+
+    V1 repositories and installed legacy environments do not require this
+    package, so absence is intentionally non-fatal.
+    """
+
+    root = repository_root() if repo_root is None else Path(repo_root).resolve()
+    source = (root / "source" / "redrhex_policy_io").resolve()
+    return source if source.is_dir() else None
+
+
 def _require_inside(path: Path, source: Path, label: str) -> Path:
     resolved = path.resolve()
     try:
@@ -56,12 +68,18 @@ def bind_redrhex_source(repo_root: str | Path | None = None) -> Path:
             _module_path(module, source)
 
     source_text = str(source)
+    policy_source = policy_io_source_root(repo_root)
+    selected_sources = [source_text]
+    if policy_source is not None:
+        selected_sources.append(str(policy_source))
     sys.path[:] = [
-        source_text,
+        *selected_sources,
         *(
             entry
             for entry in sys.path
-            if not entry or Path(entry).resolve() != source
+            if not entry
+            or Path(entry).resolve()
+            not in {source, policy_source}
         ),
     ]
     spec = importlib.util.find_spec("RedRhex")

@@ -86,11 +86,53 @@ parser.add_argument(
     default=None,
     help="Optional action std reset value after loading checkpoint (useful with --resume_policy_only).",
 )
+parser.add_argument(
+    "--teacher_checkpoint",
+    type=str,
+    default=None,
+    help="V2 only: strict teacher_v2 checkpoint used to start a new F2 distillation run.",
+)
+parser.add_argument(
+    "--student_checkpoint",
+    type=str,
+    default=None,
+    help="V2 only: strict student_distilled_v2 checkpoint used to bootstrap a new F3 PPO run.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+
+def _is_sensor_v2_task(task_name: str | None) -> bool:
+    return bool(task_name and task_name.split(":")[-1] == "Template-Redrhex-ForwardSensorV2-Direct-v0")
+
+
+def _validate_checkpoint_cli() -> None:
+    bootstrap = [
+        name
+        for name, value in (
+            ("--teacher_checkpoint", args_cli.teacher_checkpoint),
+            ("--student_checkpoint", args_cli.student_checkpoint),
+        )
+        if value is not None
+    ]
+    if len(bootstrap) > 1:
+        parser.error("--teacher_checkpoint and --student_checkpoint are mutually exclusive")
+    if bootstrap and args_cli.resume:
+        parser.error(f"{bootstrap[0]} cannot be combined with --resume")
+    if bootstrap and args_cli.checkpoint is not None:
+        parser.error(f"{bootstrap[0]} cannot be combined with --checkpoint")
+    if bootstrap and not _is_sensor_v2_task(args_cli.task):
+        parser.error(f"{bootstrap[0]} is valid only for the ForwardSensorV2 task")
+    if _is_sensor_v2_task(args_cli.task) and args_cli.resume and args_cli.checkpoint is None:
+        parser.error("V2 resume requires --resume --checkpoint PATH for exact same-kind loading")
+    if _is_sensor_v2_task(args_cli.task) and args_cli.resume_policy_only:
+        parser.error("V2 forbids --resume_policy_only and shape-compatible partial loading")
+
+
+_validate_checkpoint_cli()
 
 # always enable cameras to record video
 if args_cli.video:
@@ -125,6 +167,13 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
         f"\n\n\t{' '.join(cmd)}\n"
     )
     exit(1)
+if _is_sensor_v2_task(args_cli.task) and not (
+    version.parse("3.1.2") <= version.parse(installed_version) < version.parse("3.2")
+):
+    raise RuntimeError(
+        "Sensor Distillation V2 is version-gated to rsl-rl-lib >=3.1.2,<3.2; "
+        f"installed version is {installed_version}. Legacy tasks retain the existing >=3.0.1 gate."
+    )
 
 """Rest everything follows."""
 
@@ -132,8 +181,6 @@ import gymnasium as gym
 import os
 import torch
 from datetime import datetime
-
-from rsl_rl.runners import DistillationRunner, OnPolicyRunner
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -153,6 +200,7 @@ from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import RedRhex.tasks as _redrhex_tasks  # noqa: F401
+from scripts.rsl_rl.runner_factory import create_runner, runner_protocol
 
 
 assert_redrhex_module_source(_redrhex_tasks, _REPO_ROOT)
@@ -310,10 +358,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
 
     env_cfg.spring_backend = args_cli.spring_backend
-    resume_requested = agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation"
+    protocol = runner_protocol(agent_cfg.class_name)
+    bootstrap_path = args_cli.teacher_checkpoint or args_cli.student_checkpoint
+    resume_requested = agent_cfg.resume or bootstrap_path is not None or (
+        not protocol.v2 and agent_cfg.algorithm.class_name == "Distillation"
+    )
     resume_path = None
     if resume_requested:
-        if agent_cfg.load_checkpoint and (
+        if bootstrap_path is not None:
+            resume_path = retrieve_file_path(bootstrap_path)
+        elif protocol.v2 and args_cli.checkpoint is not None:
+            resume_path = retrieve_file_path(args_cli.checkpoint)
+        elif agent_cfg.load_checkpoint and (
             os.path.isabs(agent_cfg.load_checkpoint) or os.path.exists(agent_cfg.load_checkpoint)
         ):
             resume_path = retrieve_file_path(agent_cfg.load_checkpoint)
@@ -399,13 +455,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    # create runner from rsl-rl
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
-    else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+    runner = create_runner(
+        agent_cfg.class_name,
+        env,
+        agent_cfg.to_dict(),
+        log_dir=log_dir,
+        device=agent_cfg.device,
+    )
     # write git state to logs (opt-in; some repos contain non-UTF8 filenames that can crash logging)
     if args_cli.store_code_state:
         runner.add_git_repo_to_log(__file__)
@@ -414,7 +470,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # load the checkpoint
     if resume_requested:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-        if args_cli.resume_policy_only:
+        if protocol.v2:
+            if args_cli.teacher_checkpoint:
+                runner.load_teacher_v2(resume_path)
+            elif args_cli.student_checkpoint:
+                runner.bootstrap_student_v2(resume_path)
+            else:
+                runner.load(resume_path, load_optimizer=True)
+        elif args_cli.resume_policy_only:
             _load_runner_checkpoint_with_policy_fallback(
                 runner,
                 resume_path,

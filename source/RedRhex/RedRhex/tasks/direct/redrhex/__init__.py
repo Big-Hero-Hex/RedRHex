@@ -38,3 +38,32 @@ gym.register(
         "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
     },
 )
+
+
+gym.register(
+    id="Template-Redrhex-ForwardSensorV2-Direct-v0",
+    entry_point=f"{__name__}.redrhex_sensor_v2_env:RedrhexForwardSensorV2Env",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.redrhex_sensor_v2_env_cfg:RedrhexForwardSensorV2EnvCfg"
+        ),
+        # The default V2 route is the versioned privileged Teacher A.  F2/F3
+        # are selected explicitly with --agent and cannot alter a V1 runner.
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2TeacherRunnerCfg"
+        ),
+        "rsl_rl_teacher_v2_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2TeacherRunnerCfg"
+        ),
+        "rsl_rl_teacher_b_v2_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2TeacherBRunnerCfg"
+        ),
+        "rsl_rl_distillation_v2_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2DistillationRunnerCfg"
+        ),
+        "rsl_rl_ppo_v2_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2PpoRunnerCfg"
+        ),
+    },
+)

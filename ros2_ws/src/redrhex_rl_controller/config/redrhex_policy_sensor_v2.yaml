@@ -1,0 +1,78 @@
+redrhex_rl_controller_v2:
+  ros__parameters:
+    # Route selection is exact and fail-closed; this file cannot load a V1 graph.
+    policy:
+      contract_id: "redrhex.student-observation.v2"
+      onnx_path: "/home/jetson/redrhex_models/sensor_policy_v2.onnx"
+      sidecar_path: "/home/jetson/redrhex_models/sensor_policy_v2.onnx.json"
+      use_cuda: false
+      use_tensorrt: false
+      policy_hz: 60.0
+      expected_contract_hash: "UNVERIFIED"
+      expected_action_contract_hash: "UNVERIFIED"
+      expected_calibration_hash: "UNVERIFIED"
+
+    observation:
+      sensor_frame_dim: 36
+      history_length: 60
+      history_order: "oldest_to_newest"
+      sample_rate_hz: 60.0
+      main_drive_joint_names:
+        ["Revolute_15", "Revolute_7", "Revolute_12", "Revolute_18", "Revolute_23", "Revolute_24"]
+      abad_joint_names:
+        ["Revolute_14", "Revolute_6", "Revolute_11", "Revolute_17", "Revolute_22", "Revolute_21"]
+      attitude_mode: "validated_quaternion"  # or causal_gyro_accel; never auto/fallback
+      imu_frame_id: "UNVERIFIED"
+      policy_body_frame_id: "redrhex_policy_body"
+      imu_mount_rpy_deg: [0.0, 0.0, 0.0]
+      imu_mount_calibration_verified: false
+      rest_gravity_verified: false
+      expected_rest_projected_gravity: [0.0, 0.0, -1.0]
+      quaternion_norm_tolerance: 0.02
+      causal_accel_correction_gain: 0.02
+      sensor_timeout_s: 0.10
+      min_channel_period_s: 0.001
+      command_timeout_s: 0.25
+
+    calibration:
+      profile_id: "UNVERIFIED"
+      evidence_id: "UNVERIFIED"
+      main_encoder_sign: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      main_encoder_zero_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      abad_encoder_sign: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      abad_encoder_zero_rad: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      twelve_encoders_verified: false
+
+    action:
+      # Decoder semantics are loaded from and checked against the bundle.
+      contract_id: "redrhex.forward-residual-action.v2"
+      expected_decoder_hash: "UNVERIFIED"
+      learned_abad: false
+      independent_limits_may_only_tighten: true
+
+    state_machine:
+      enable_policy_on_start: false
+      enable_motor_output_on_start: false
+      init_stand_duration_s: 2.0
+      warmup_duration_s: 1.0
+      require_history_ready: true
+
+    safety:
+      require_motor_feedback: true
+      require_lowlevel_heartbeat: true
+      sensor_timeout_s: 0.10
+      cmd_timeout_s: 0.25
+      motor_feedback_timeout_s: 0.25
+      heartbeat_timeout_s: 0.10
+      max_abs_roll_rad: 0.7
+      max_abs_pitch_rad: 0.7
+      action_clip: 1.0
+      main_drive_vel_limit_rad_s: 30.0
+      abad_pos_limit_rad: 0.7
+
+    hardware_gate:
+      # Code support is intentionally deploy-disabled until recorded evidence
+      # proves one explicit IMU mode and all twelve encoder calibrations.
+      recorded_imu_evidence: false
+      recorded_encoder_evidence: false
+      allow_motor_enable: false
