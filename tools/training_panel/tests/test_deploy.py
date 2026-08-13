@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.deploy import (
+    _module_status,
     build_policy_manifest,
     deploy_defaults,
     run_deploy_validation,
@@ -114,6 +115,16 @@ class DeployReadinessTests(unittest.TestCase):
                 self.assertIn(name, defaults["deploy_runtime_dependencies"])
                 self.assertIn("installed", defaults["deploy_runtime_dependencies"][name])
                 self.assertIn("version", defaults["deploy_runtime_dependencies"][name])
+
+    def test_module_status_treats_missing_parent_package_as_unavailable(self):
+        with patch(
+            "tools.training_panel.training_panel.deploy.importlib.util.find_spec",
+            side_effect=ModuleNotFoundError("No module named 'mujoco'"),
+        ):
+            status = _module_status("mujoco.viewer")
+
+        self.assertFalse(status["installed"])
+        self.assertEqual(status["version"], "")
 
     def test_deploy_validation_writes_report_even_when_fake_onnx_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
