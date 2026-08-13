@@ -6,12 +6,13 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="approved-designs"></a>
 ## 已核准設計
 
+- [macOS 遠端啟動器](active/2026-08-13-macos-remote-launcher.zh-TW.md)
 - [Windows 遠端啟動器](active/2026-08-01-windows-remote-launcher.zh-TW.md)
 
 <a id="proposed-designs"></a>
