@@ -45,7 +45,7 @@ last_reviewed: 2026-08-14
 <a id="evidence"></a>
 ## 證據
 
-主要程式證據位於 [legacy environment](../../source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py)、[environment configuration](../../source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py)、[V2 training backends](../../source/RedRhex/RedRhex/tasks/direct/redrhex/agents/sensor_v2/backends.py)、[training entry point](../../scripts/rsl_rl/train.py)、[full pipeline](../../scripts/rsl_rl/train_sensor_v2_pipeline.py)、[ROS observation builder](../../ros2_ws/src/redrhex_rl_controller/redrhex_rl_controller/observation_builder.py)、[ONNX runner](../../ros2_ws/src/redrhex_rl_controller/redrhex_rl_controller/policy_onnx_runner.py)、[Rinbo bridge](../../ros2_ws/src/redrhex_lowlevel_bridge/redrhex_lowlevel_bridge/rinbo_ros_backend.py) 與 [real-trace importer](../../tools/sim2real/import_real.py)。復原出的 Panel paths 是堆疊 proposal 的證據，不屬於此 core branch。
+主要程式證據位於 `source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py`、`source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py`、`source/RedRhex/RedRhex/tasks/direct/redrhex/agents/sensor_v2/backends.py`、`scripts/rsl_rl/train.py`、`scripts/rsl_rl/train_sensor_v2_pipeline.py`、`ros2_ws/src/redrhex_rl_controller/redrhex_rl_controller/observation_builder.py`、`ros2_ws/src/redrhex_rl_controller/redrhex_rl_controller/policy_onnx_runner.py`、`ros2_ws/src/redrhex_lowlevel_bridge/redrhex_lowlevel_bridge/rinbo_ros_backend.py` 與 `tools/sim2real/import_real.py`。復原出的 Panel paths 是堆疊 proposal 的證據，不屬於此 core branch。
 
 <a id="follow-up"></a>
 ## 後續
