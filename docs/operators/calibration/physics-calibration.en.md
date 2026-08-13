@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: sim2real
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="safety"></a>
@@ -26,6 +26,8 @@ Calibration uses bounded scenarios and immutable evidence; it does not authorize
 7. Build a profile only from authenticated direct measurements and evidence.
 8. Promote a profile only after all audit and holdout gates pass.
 
+Passive torsion springs add a stricter sequence: mechanical-owner envelope approval, distinct calibration and holdout episodes, linear-model quality gates, matched explicit/native characterization at 120/240 Hz, and policy retraining. Follow [Calibrate and validate the passive torsion springs](torsion-spring-calibration.en.md).
+
 <a id="tool"></a>
 ## Calibration tool
 
@@ -34,7 +36,7 @@ Use `python -m tools.sim2real --help` to list the current subcommands and requir
 <a id="promotion"></a>
 ## Promotion rules
 
-Do not promote evidence with missing hashes, unresolved joint mapping, aliased ROS publishers, incomplete initial state, failed geometry or mass/CoM audit, nonstationary holdout data, or missing held-out metrics. A replay match is evidence for the measured scenario, not proof that all locomotion physics are correct.
+Do not promote evidence with missing hashes, unresolved joint mapping, aliased ROS publishers, incomplete initial state, failed geometry or mass/CoM audit, nonstationary holdout data, missing held-out metrics, or uncalibrated torsion-spring metadata. A replay match is evidence for the measured scenario, not proof that all locomotion physics are correct.
 
 <a id="developer-context"></a>
 ## Developer context

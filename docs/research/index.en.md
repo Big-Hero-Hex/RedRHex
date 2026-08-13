@@ -15,6 +15,7 @@ last_reviewed: 2026-08-13
 - [Correction addendum 1 to the 2026-08-13 research-readiness audit](2026-08-13-research-readiness-audit-addendum-1.en.md)
 - [2026-08-13 research-readiness audit](2026-08-13-research-readiness-audit.en.md)
 - [2026-08-07 documentation-system v1 audit](2026-08-07-documentation-system-audit.en.md)
+- [2026-08-01 torsion-spring V11 provisional checkpoint](2026-08-01-torsion-spring-v11-checkpoint.en.md)
 - [2026-07-09 project audit](2026-07-09-project-audit.en.md)
 - [2026-07-10 training-stack evidence](2026-07-10-training-stack-evidence.en.md)
 - [Locomotion literature and design rationale](locomotion-literature.en.md)

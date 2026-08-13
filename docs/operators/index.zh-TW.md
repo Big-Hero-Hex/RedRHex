@@ -29,6 +29,7 @@ last_reviewed: 2026-08-13
 - [檢查部署就緒狀態](deployment/deployment-readiness.zh-TW.md)
 - [使用 Windows 遠端啟動器（草稿）](../../tools/windows/docs/operator-guide.zh-TW.md)
 - [進行 sim-to-real 物理校正](calibration/physics-calibration.zh-TW.md)
+- [校準並驗證被動扭轉彈簧](calibration/torsion-spring-calibration.zh-TW.md)
 - [安全啟動 ROS 2](../../ros2_ws/src/redrhex_rl_controller/docs/bring-up.zh-TW.md)
 - [分階段部署至硬體](../../ros2_ws/src/redrhex_rl_controller/docs/deployment.zh-TW.md)
 - [排解訓練問題](troubleshooting/training-troubleshooting.zh-TW.md)

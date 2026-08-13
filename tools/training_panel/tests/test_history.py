@@ -451,6 +451,47 @@ class HistoryTests(unittest.TestCase):
             self.assertIn("Good Runs", payload["folders"])
             self.assertEqual(payload["runs"][0]["folder"], "Good Runs")
 
+    def test_runs_payload_exposes_backend_discovered_from_torsion_yaml(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "native_run"
+            params_dir = run / "params"
+            params_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            payload = handler._runs_payload()
+
+            assert payload["runs"][0]["effective_spring_backend"] == "native"
+
+    def test_runs_payload_rejects_malformed_torsion_backend_metadata(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "invalid_run"
+            params_dir = run / "params"
+            params_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("x", encoding="utf-8")
+            (params_dir / "torsion_spring.yaml").write_text("spring_backend: invalid\n", encoding="utf-8")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            with self.assertRaisesRegex(ValueError, "spring_backend"):
+                handler._runs_payload()
+
     def test_open_location_rejects_paths_outside_log_roots(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -460,6 +501,97 @@ class HistoryTests(unittest.TestCase):
             handler.state = PanelState(self.make_paths(root))
             with self.assertRaises(ValueError):
                 handler._open_location(str(outside))
+
+    def test_send_run_video_allows_forward_fast_video_inside_run_log_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_forward_fast" / "forward_fast_run"
+            video = log_dir / "videos" / "play" / "model_199.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+
+            class FakeHistory:
+                def get_run(self, run_id):
+                    self.requested_run_id = run_id
+                    return {"id": run_id, "log_dir": str(log_dir), "latest_video": str(video)}
+
+            served = []
+            errors = []
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": FakeHistory(), "paths": self.make_paths(root)},
+            )()
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("panel_forward_fast")
+
+            self.assertEqual(served, [(video.resolve(), "video/mp4")])
+            self.assertEqual(errors, [])
+
+    def test_send_run_video_rejects_video_outside_selected_run_log_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected_log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "selected_run"
+            other_log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "other_run"
+            video = other_log_dir / "videos" / "play" / "other.mp4"
+            selected_log_dir.mkdir(parents=True)
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+
+            class FakeHistory:
+                def get_run(self, run_id):
+                    return {
+                        "id": run_id,
+                        "log_dir": str(selected_log_dir),
+                        "latest_video": str(video),
+                    }
+
+            served = []
+            errors = []
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": FakeHistory(), "paths": self.make_paths(root)},
+            )()
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("selected_run")
+
+            self.assertEqual(served, [])
+            self.assertEqual(errors, [({"error": "Video path is outside the selected run log directory"}, 403)])
+
+    def test_send_run_video_rejects_run_log_dir_outside_rsl_rl_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "outside_run"
+            video = log_dir / "videos" / "play" / "outside.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+
+            class FakeHistory:
+                def get_run(self, run_id):
+                    return {"id": run_id, "log_dir": str(log_dir), "latest_video": str(video)}
+
+            served = []
+            errors = []
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": FakeHistory(), "paths": self.make_paths(root)},
+            )()
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("outside_run")
+
+            self.assertEqual(served, [])
+            self.assertEqual(errors, [({"error": "Run log directory is outside the RSL-RL log root"}, 403)])
 
     def test_delete_run_requires_confirmation_and_removes_repo_logs(self):
         with tempfile.TemporaryDirectory() as tmp:

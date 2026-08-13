@@ -6,7 +6,7 @@ audience: developer
 type: explanation
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="components"></a>
@@ -23,6 +23,11 @@ last_reviewed: 2026-08-07
 ## Remote contract
 
 Remote role 與 job type 集中定義於 `remote_config.py`。Heartbeat 回報 panel version、machine ID、path、active job、queue depth、GPU lock、acceptance state、tunnel 與時間。Worker claim 已授權 job，透過同一 process registry 執行，並同步 run、artifact、metadata、folder、tombstone 與 notification。
+
+<a id="spring-contract"></a>
+## Spring-backend 契約
+
+建立 run 時只接受 `explicit` 或 `native`，並把選擇記錄在 parameters 與 history。Training、Play、automatic video、export、deployment validation 與 remote synchronization 都重用儲存的 backend；spring metadata 缺失或無效時 fail closed。只有 ForwardFast automatic recording 增加 `--initial_command forward`；interactive Play 與完整 Direct recording 不增加。
 
 <a id="security"></a>
 ## 安全邊界

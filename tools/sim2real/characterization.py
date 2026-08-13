@@ -130,7 +130,11 @@ def characterization_channel_metadata(
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Return explicit physical units and frames for simulator trace channels."""
 
-    command_unit = "rad" if scenario.experiment_kind == "abad_static" else "rad/s"
+    command_unit = (
+        "rad"
+        if scenario.experiment_kind in {"abad_static", "spring_release"}
+        else "rad/s"
+    )
     known_units = {
         "requested_command": command_unit,
         "applied_command": command_unit,
@@ -150,6 +154,18 @@ def characterization_channel_metadata(
         "settled": "1",
         "body_contact_force_w": "N",
         "body_contact_force_n": "N",
+        "spring_deflection": "rad",
+        "spring_model_torque": "N*m",
+        "spring_applied_torque_estimate": "N*m",
+        "spring_potential_energy": "J",
+        "spring_mechanical_power": "W",
+        "spring_passivity_residual": "J",
+        "spring_release_start": "1",
+        "spring_fixture_position_error": "rad",
+        "spring_fixture_velocity": "rad/s",
+        "spring_unwrap_ambiguous": "1",
+        "spring_pre_step_time_s": "s",
+        "sim_time_s": "s",
     }
     units = {name: known_units.get(name, "unspecified") for name in channels}
     frames = {name: "joint_order" for name in channels}
@@ -163,6 +179,24 @@ def characterization_channel_metadata(
             frames[name] = "scalar"
     if "audit_value" in frames:
         frames["audit_value"] = "scalar"
+    for name in (
+        "spring_deflection",
+        "spring_model_torque",
+        "spring_applied_torque_estimate",
+        "spring_potential_energy",
+        "spring_mechanical_power",
+    ):
+        if name in frames:
+            frames[name] = "damper_order"
+    for name in (
+        "spring_passivity_residual",
+        "spring_release_start",
+        "spring_fixture_position_error",
+        "spring_fixture_velocity",
+        "spring_unwrap_ambiguous",
+    ):
+        if name in frames:
+            frames[name] = "scalar"
     return units, frames
 
 
@@ -745,7 +779,11 @@ def load_replay_schedule(
     resolve_scenario_steps(scenario, steps, physics_dt)
     if "command" not in scenario.time_bases:
         raise ContractError("replay scenario does not declare a command channel")
-    command_unit = "rad" if scenario.experiment_kind == "abad_static" else "rad/s"
+    command_unit = (
+        "rad"
+        if scenario.experiment_kind in {"abad_static", "spring_release"}
+        else "rad/s"
+    )
     loaded = load_trace(
         value,
         scenario=scenario,

@@ -127,6 +127,9 @@ def test_reviewed_scenario_catalog_is_complete_and_valid() -> None:
         "abad-static-holdout",
         "spring",
         "spring-holdout",
+        "torsion-spring",
+        "torsion-spring-holdout",
+        "spring-release",
         "friction",
         "contact-static-settle",
     }
@@ -146,6 +149,24 @@ def test_reviewed_scenario_catalog_is_complete_and_valid() -> None:
         expected_split = "holdout" if main_index == 5 else "calibration"
         assert scenario.joint == f"main_{main_index}"
         assert scenario.split == expected_split
+
+    release = load_scenario("spring-release")
+    for channel in (
+        "spring_deflection",
+        "spring_model_torque",
+        "spring_applied_torque_estimate",
+        "spring_potential_energy",
+        "spring_mechanical_power",
+        "spring_release_start",
+    ):
+        assert release.time_bases[channel] == "spring_pre_step_time_s"
+    for channel in (
+        "spring_passivity_residual",
+        "spring_fixture_position_error",
+        "spring_fixture_velocity",
+        "spring_unwrap_ambiguous",
+    ):
+        assert release.time_bases[channel] == "sim_time_s"
 
 
 def test_profile_rejects_unknown_or_physically_invalid_fields() -> None:
@@ -427,6 +448,124 @@ def test_profile_rejects_measurement_source_with_wrong_scenario_semantics() -> N
         )
 
 
+def test_profile_rejects_representative_aliases_on_non_spring_sources() -> None:
+    source = {
+        "trace_sha256": "a" * 64,
+        "metadata_sha256": "b" * 64,
+        "scenario_id": "abad-static",
+        "scenario_sha256": "c" * 64,
+        "source": "real",
+        "metric_kind": "abad_static_mapping",
+        "frame": "abad_0",
+        "repeat_count": 3,
+        "dataset_id": "bench-20260713",
+        "episode_id": "abad-with-spring-aliases",
+        "applies_to": [f"damper_{index}" for index in range(6)],
+    }
+
+    with pytest.raises(ContractError, match="applies_to"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "wrong-representative-source",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {},
+                "measurement_sources": {"abad_target:abad_0": source},
+            }
+        )
+
+
+def test_representative_spring_source_requires_validated_rest_position() -> None:
+    aliases = [f"damper_{index}" for index in range(6)]
+    source = {
+        "trace_sha256": "a" * 64,
+        "metadata_sha256": "b" * 64,
+        "scenario_id": "torsion-spring",
+        "scenario_sha256": "c" * 64,
+        "source": "real",
+        "metric_kind": "torsional_spring",
+        "frame": "damper_0",
+        "repeat_count": 3,
+        "dataset_id": "spring-bench",
+        "episode_id": "representative-spring",
+        "applies_to": aliases,
+        "episode_path": "/datasets/spring-calibration",
+    }
+
+    with pytest.raises(ContractError, match="rest_position_rad"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "missing-validated-rest",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {
+                    "passive_spring": {
+                        alias: {"stiffness": 200.0} for alias in aliases
+                    }
+                },
+                "measurement_sources": {"passive_spring:damper_0": source},
+            }
+        )
+
+
+def test_representative_spring_quality_evidence_must_bind_its_calibration_trace() -> None:
+    aliases = [f"damper_{index}" for index in range(6)]
+    source = {
+        "trace_sha256": "a" * 64,
+        "metadata_sha256": "b" * 64,
+        "scenario_id": "torsion-spring",
+        "scenario_sha256": "c" * 64,
+        "source": "real",
+        "metric_kind": "torsional_spring",
+        "frame": "damper_0",
+        "repeat_count": 3,
+        "dataset_id": "spring-bench",
+        "episode_id": "representative-spring",
+        "applies_to": aliases,
+        "rest_position_rad": 0.0,
+        "episode_path": "/datasets/spring-calibration",
+        "quality_validation": {
+            "accepted": True,
+            "gates": {
+                "r_squared": True,
+                "heldout_rmse": True,
+                "stiffness_cv": True,
+                "hysteresis": True,
+                "neutral_model_heldout_rmse": True,
+            },
+            "calibration_trace_sha256": "9" * 64,
+            "calibration_metadata_sha256": "b" * 64,
+            "holdout_trace_sha256": "d" * 64,
+            "holdout_metadata_sha256": "e" * 64,
+            "holdout_scenario_id": "torsion-spring-holdout",
+            "holdout_scenario_sha256": "f" * 64,
+            "source": "real",
+            "dataset_id": "spring-bench",
+            "episode_id": "representative-spring-holdout",
+            "episode_path": "/datasets/spring-holdout",
+        },
+    }
+
+    with pytest.raises(ContractError, match="calibration_trace_sha256"):
+        CalibrationProfileV1.from_dict(
+            {
+                "schema_version": 1,
+                "profile_id": "swapped-holdout-evaluator",
+                "hardware_mapping": {},
+                "sensor_timing": {},
+                "simulation_physics": {
+                    "passive_spring": {
+                        alias: {"stiffness": 200.0, "damping": 0.0}
+                        for alias in aliases
+                    }
+                },
+                "measurement_sources": {"passive_spring:damper_0": source},
+            }
+        )
+
+
 @pytest.mark.parametrize("pwm_cap", [1e-12, 0.5, 4.1667, 50.0])
 def test_profile_accepts_canonical_velocity_cap_rad_s(pwm_cap: float) -> None:
     profile = CalibrationProfileV1.from_dict(
@@ -574,6 +713,16 @@ def test_reviewed_scenarios_use_safe_commands_and_observable_channels() -> None:
         "angle",
         "repeat_index",
     }
+    assert set(load_scenario("torsion-spring").required_channels) == {
+        "load_force",
+        "lever_arm",
+        "angle",
+        "torque_direction",
+        "sweep_branch",
+        "repeat_index",
+    }
+    assert load_scenario("torsion-spring").split == "calibration"
+    assert load_scenario("torsion-spring-holdout").split == "holdout"
     assert load_scenario("mass-com").split == "calibration"
     assert load_scenario("mass-com-holdout").split == "holdout"
     assert load_scenario("spring").split == "calibration"

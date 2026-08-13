@@ -17,6 +17,12 @@ from .characterization import (
     scenario_step_count,
 )
 from .metrics import compute_subsystem_metrics
+from .profile_measurements import (
+    _spring_quality_validation_record,
+    evaluate_torsional_spring_quality,
+    representative_spring_aliases,
+    verify_representative_spring_source,
+)
 from .provenance import validate_real_trace_provenance
 from .scenarios import load_scenario
 from .sweep import candidate_cache_key, validate_sweep_candidates
@@ -61,6 +67,7 @@ _CANONICAL_JOINTS = tuple(
     + [*(f"damper_{index}" for index in range(6))]
 )
 _MAIN_JOINTS = tuple(f"main_{index}" for index in range(6))
+_TORSION_SPRING_ALIASES = tuple(f"damper_{index}" for index in range(6))
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -264,6 +271,10 @@ def _expected_condition_metadata(
             "angle": "rad",
             "repeat_index": "1",
         }
+        if "torque_direction" in scenario.required_channels:
+            units["torque_direction"] = "1"
+        if "sweep_branch" in scenario.required_channels:
+            units["sweep_branch"] = "1"
         frames = {name: scenario.joint for name in units}
     elif kind == "manual_load":
         units = {
@@ -394,6 +405,15 @@ def _validate_identifiable_changes(
 
     old_springs = before.get("passive_spring", {})
     new_springs = after.get("passive_spring", {})
+    representative_source = candidate.measurement_sources.get(
+        "passive_spring:damper_0"
+    )
+    zero_damping_aliases = (
+        set(representative_source.get("applies_to", []))
+        if isinstance(representative_source, Mapping)
+        and representative_source.get("scenario_id") == "torsion-spring"
+        else set()
+    )
     if isinstance(old_springs, Mapping) and isinstance(new_springs, Mapping):
         for joint in set(old_springs) | set(new_springs):
             old = old_springs.get(joint, {})
@@ -404,6 +424,20 @@ def _validate_identifiable_changes(
                     and isinstance(new, Mapping)
                     and old.get(field) != new.get(field)
                 ):
+                    if (
+                        field == "damping"
+                        and joint in zero_damping_aliases
+                        and new.get(field) == 0.0
+                    ):
+                        continue
+                    if (
+                        field == "rest_position_rad"
+                        and joint == "damper_0"
+                        and joint in zero_damping_aliases
+                        and new.get(field)
+                        == representative_source.get("rest_position_rad")
+                    ):
+                        continue
                     unsupported.append(
                         f"simulation_physics.passive_spring.{joint}.{field}"
                     )
@@ -634,7 +668,12 @@ def _mandatory_holdout_metrics(
     elif subsystem == "rigid_body" and kind == "mass_com":
         return {"mass_kg": "kg", "com_x_m": "m", "com_y_m": "m"}
     elif subsystem == "spring" and kind == "spring":
-        return {"stiffness_nm_per_rad": "N*m/rad"}
+        metric = (
+            "neutral_stiffness_nm_per_rad"
+            if scenario.scenario_id.startswith("torsion-spring")
+            else "stiffness_nm_per_rad"
+        )
+        return {metric: "N*m/rad"}
     raise ContractError(
         f"no mandatory held-out metric contract for {subsystem}.{scenario.scenario_id}"
     )
@@ -668,7 +707,10 @@ def _direct_profile_value(
         spring = _mapping(
             springs.get(scenario.joint), f"candidate spring {scenario.joint}"
         )
-        if metric_path == "stiffness_nm_per_rad":
+        if metric_path in {
+            "stiffness_nm_per_rad",
+            "neutral_stiffness_nm_per_rad",
+        }:
             return _number(spring.get("stiffness"), "candidate spring stiffness")
     if subsystem == "main_drive" and scenario.experiment_kind == "manual_load":
         if metric_path in {"positive_torque_nm", "negative_torque_nm"}:
@@ -752,12 +794,25 @@ def _required_measurement_source_keys(
         for joint in set(before_springs) | set(after_springs):
             old = before_springs.get(joint, {})
             new = after_springs.get(joint, {})
-            if (
-                isinstance(old, Mapping)
-                and isinstance(new, Mapping)
-                and old.get("stiffness") != new.get("stiffness")
+            if isinstance(old, Mapping) and isinstance(new, Mapping) and (
+                old.get("stiffness") != new.get("stiffness")
+                or old.get("damping") != new.get("damping")
+                or old.get("rest_position_rad") != new.get("rest_position_rad")
             ):
-                required.add(f"passive_spring:{joint}")
+                covering_sources = [
+                    key
+                    for key, source in candidate.measurement_sources.items()
+                    if key.startswith("passive_spring:")
+                    and isinstance(source, Mapping)
+                    and joint
+                    in source.get(
+                        "applies_to", [key.removeprefix("passive_spring:")]
+                    )
+                ]
+                if len(covering_sources) == 1:
+                    required.add(covering_sources[0])
+                else:
+                    required.add(f"passive_spring:{joint}")
     after_main_drive = candidate.simulation_physics.get("main_drive", {})
     after_effort_limit = (
         after_main_drive.get("effort_limit")
@@ -795,6 +850,49 @@ def _require_calibration_value(actual: Any, expected: Any, field: str) -> None:
         raise ContractError(
             f"candidate {field} does not match its calibration measurement"
         )
+
+
+def _validate_verified_representative_spring_profile(
+    candidate: CalibrationProfileV1,
+    report: Mapping[str, Any],
+) -> None:
+    """Bind all effective static spring fields to a file-recomputed fit."""
+
+    quality = _mapping(report.get("quality"), "torsion-spring quality report")
+    if quality.get("accepted") is not True:
+        raise ContractError("representative torsion-spring quality gates did not pass")
+    calibration = _mapping(
+        report.get("calibration"), "torsion-spring calibration report"
+    )
+    springs = _mapping(
+        candidate.simulation_physics.get("passive_spring"),
+        "candidate passive_spring profile",
+    )
+    if set(springs) != set(_TORSION_SPRING_ALIASES):
+        raise ContractError(
+            "candidate passive_spring profile must contain exactly damper_0 through damper_5"
+        )
+    stiffness = calibration.get("neutral_stiffness_nm_per_rad")
+    for alias in _TORSION_SPRING_ALIASES:
+        spring = _mapping(springs.get(alias), f"candidate passive spring {alias}")
+        _require_calibration_value(
+            spring.get("stiffness"),
+            stiffness,
+            f"simulation_physics.passive_spring.{alias}.stiffness",
+        )
+        _require_calibration_value(
+            spring.get("damping"),
+            0.0,
+            f"simulation_physics.passive_spring.{alias}.damping",
+        )
+    representative = _mapping(
+        springs.get("damper_0"), "candidate representative passive spring damper_0"
+    )
+    _require_calibration_value(
+        representative.get("rest_position_rad"),
+        calibration.get("rest_position_rad"),
+        "simulation_physics.passive_spring.damper_0.rest_position_rad",
+    )
 
 
 def _validate_direct_measurement_value(
@@ -874,16 +972,38 @@ def _validate_direct_measurement_value(
         return
 
     if key.startswith("passive_spring:"):
-        joint = key.removeprefix("passive_spring:")
         springs = _mapping(
             physics.get("passive_spring"), "candidate passive_spring profile"
         )
-        spring = _mapping(springs.get(joint), f"candidate passive spring {joint}")
-        _require_calibration_value(
-            spring.get("stiffness"),
-            metrics.get("stiffness_nm_per_rad"),
-            f"simulation_physics.passive_spring.{joint}.stiffness",
+        scenario = load_scenario(trace.manifest.scenario_id)
+        measured_stiffness = metrics.get(
+            "neutral_stiffness_nm_per_rad"
+            if scenario.scenario_id == "torsion-spring"
+            else "stiffness_nm_per_rad"
         )
+        for joint in representative_spring_aliases(scenario, trace):
+            spring = _mapping(springs.get(joint), f"candidate passive spring {joint}")
+            _require_calibration_value(
+                spring.get("stiffness"),
+                measured_stiffness,
+                f"simulation_physics.passive_spring.{joint}.stiffness",
+            )
+            if scenario.scenario_id == "torsion-spring":
+                _require_calibration_value(
+                    spring.get("damping"),
+                    0.0,
+                    f"simulation_physics.passive_spring.{joint}.damping",
+                )
+        if scenario.scenario_id == "torsion-spring":
+            representative = _mapping(
+                springs.get("damper_0"),
+                "candidate representative passive spring damper_0",
+            )
+            _require_calibration_value(
+                representative.get("rest_position_rad"),
+                metrics.get("rest_position_rad"),
+                "simulation_physics.passive_spring.damper_0.rest_position_rad",
+            )
         return
 
     if key.startswith("main_drive_effort_limit:"):
@@ -915,7 +1035,26 @@ def _validate_measurement_sources(
             raise ContractError(
                 f"measurement source {key} is required for the fitted profile field"
             )
-        matches: list[tuple[str, LoadedTrace, Mapping[str, Any]]] = []
+        if (
+            key == "passive_spring:damper_0"
+            and raw_source.get("scenario_id") == "torsion-spring"
+            and (
+                not isinstance(raw_source.get("quality_validation"), Mapping)
+                or raw_source["quality_validation"].get("accepted") is not True
+            )
+        ):
+            raise ContractError(
+                "representative torsion-spring promotion requires accepted holdout evidence"
+            )
+        matches: list[
+            tuple[
+                str,
+                LoadedTrace,
+                Mapping[str, Any],
+                str | None,
+                LoadedTrace | None,
+            ]
+        ] = []
         for condition_id, internal in conditions.items():
             if internal["role"] != "calibration":
                 continue
@@ -938,22 +1077,118 @@ def _validate_measurement_sources(
                     "dataset_id": dataset.dataset_id,
                     "episode_id": dataset.episode_id,
                 }
-                if dict(raw_source) == expected:
-                    matches.append((condition_id, trace, metrics))
+                if scenario.scenario_id == "torsion-spring":
+                    expected["applies_to"] = list(
+                        representative_spring_aliases(scenario, trace)
+                    )
+                    expected["rest_position_rad"] = float(
+                        metrics["rest_position_rad"]
+                    )
+                    expected["episode_path"] = str(trace.directory.resolve())
+                expected_records: list[
+                    tuple[dict[str, Any], str | None, LoadedTrace | None]
+                ] = [(expected, None, None)]
+                if (
+                    scenario.scenario_id == "torsion-spring"
+                    and "quality_validation" in raw_source
+                ):
+                    expected_records = []
+                    for holdout_condition_id, holdout_internal in conditions.items():
+                        if (
+                            holdout_internal["role"] != "holdout"
+                            or holdout_internal["scenario"].scenario_id
+                            != "torsion-spring-holdout"
+                        ):
+                            continue
+                        for holdout_trace in holdout_internal["real_traces"]:
+                            try:
+                                quality_report = evaluate_torsional_spring_quality(
+                                    trace.directory, holdout_trace.directory
+                                )
+                            except ContractError:
+                                continue
+                            if not quality_report["quality"]["accepted"]:
+                                continue
+                            expected_with_quality = dict(expected)
+                            expected_with_quality["quality_validation"] = (
+                                _spring_quality_validation_record(
+                                    quality_report, trace, holdout_trace
+                                )
+                            )
+                            expected_records.append(
+                                (
+                                    expected_with_quality,
+                                    holdout_condition_id,
+                                    holdout_trace,
+                                )
+                            )
+                for expected_record, holdout_condition_id, holdout_trace in (
+                    expected_records
+                ):
+                    if dict(raw_source) == expected_record:
+                        matches.append(
+                            (
+                                condition_id,
+                                trace,
+                                metrics,
+                                holdout_condition_id,
+                                holdout_trace,
+                            )
+                        )
         if len(matches) != 1:
             raise ContractError(
                 f"measurement source {key} must bind exactly one calibration-role real episode"
             )
-        condition_id, trace, metrics = matches[0]
+        condition_id, trace, metrics, holdout_condition_id, holdout_trace = matches[0]
         _validate_direct_measurement_value(candidate, key, trace, metrics)
-        bindings[key] = {
+        binding = {
             "condition_id": condition_id,
             "dataset_id": trace.dataset.dataset_id,
             "episode_id": trace.dataset.episode_id,
             "trace_sha256": trace.manifest.provenance["trace_sha256"],
             "metadata_sha256": trace.metadata_sha256,
         }
-    return {"pass": True, "required": sorted(required), "bindings": bindings}
+        if holdout_trace is not None:
+            if holdout_trace.dataset is None:  # pragma: no cover - binding guards this
+                raise ContractError("spring holdout has no managed dataset identity")
+            binding["holdout_condition_id"] = holdout_condition_id
+            binding["holdout_dataset_id"] = holdout_trace.dataset.dataset_id
+            binding["holdout_episode_id"] = holdout_trace.dataset.episode_id
+            binding["holdout_trace_sha256"] = holdout_trace.manifest.provenance[
+                "trace_sha256"
+            ]
+            binding["holdout_metadata_sha256"] = holdout_trace.metadata_sha256
+        bindings[key] = binding
+    spring_status = "uncalibrated"
+    spring_verification_error: str | None = (
+        "representative torsion-spring measurement source is missing"
+    )
+    representative_source = candidate.measurement_sources.get(
+        "passive_spring:damper_0"
+    )
+    if (
+        isinstance(representative_source, Mapping)
+        and representative_source.get("scenario_id") == "torsion-spring"
+    ):
+        try:
+            spring_report = verify_representative_spring_source(
+                representative_source
+            )
+            _validate_verified_representative_spring_profile(
+                candidate, spring_report
+            )
+        except ContractError as exc:
+            spring_verification_error = str(exc)
+        else:
+            spring_status = "calibrated"
+            spring_verification_error = None
+    return {
+        "pass": True,
+        "required": sorted(required),
+        "bindings": bindings,
+        "spring_calibration_status": spring_status,
+        "spring_calibration_verification_error": spring_verification_error,
+    }
 
 
 def _condition_coordinates(trace: LoadedTrace, scenario: Any) -> dict[str, Any]:
@@ -1785,10 +2020,13 @@ def _verify_sweep_for_holdout(
         "headless",
         "seed",
         "device",
+        "spring_backend",
         "sweep_runner_schema_version",
     }
     if set(provenance) != required_provenance:
         raise ContractError("actuator sweep provenance has missing or unknown fields")
+    if provenance["spring_backend"] not in {"explicit", "native"}:
+        raise ContractError("actuator sweep provenance spring_backend is invalid")
     for field in (
         "asset_sha256",
         "config_sha256",
@@ -1941,10 +2179,13 @@ def _verify_sweep_for_holdout(
             "isaacsim_version",
             "characterization_runner_sha256",
             "runtime_bundle_sha256",
+            "spring_backend",
         ):
             if sim.manifest.metadata.get(field) != provenance[field]:
                 raise ContractError(f"candidate runtime provenance {field} mismatch")
         run_results = _json(run_output / "results.json", "candidate results")
+        if run_results.get("spring_backend") != provenance["spring_backend"]:
+            raise ContractError("candidate results spring_backend provenance mismatch")
         replay_constants = sim.manifest.metadata.get("calibration_constants", {})
         if not isinstance(replay_constants, Mapping):
             raise ContractError(
@@ -2462,6 +2703,12 @@ def evaluate_promotion(
             "calibration_conditions": calibration,
             "holdout_conditions": holdout,
         }
+
+    if measurement_source_report["spring_calibration_status"] != "calibrated":
+        all_failures.append(
+            "spring profile is uncalibrated: promotion requires authenticated "
+            "torsion-spring calibration and holdout evidence"
+        )
 
     return {
         "schema_version": 1,
