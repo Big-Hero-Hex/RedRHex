@@ -27,7 +27,7 @@ Mother 對本機 process/file operation 保持 authoritative；child 保持 stat
 <a id="version"></a>
 ## 版本與 release
 
-只有真實 release 才一起更新所有 3.4.10 version surface。加入 canonical 雙語 release document；不可事後虛構版本缺口。Contract 改變時，重新套用並測試 Supabase schema。
+一起更新屬於該 release contract 的所有 version surface。本機 Mother/UI 與 remote Child/worker protocol 是獨立部署 surface；local-only change 不可推進 remote version。加入 canonical 雙語 release document，不可事後虛構版本缺口；Supabase contract 改變時，重新套用並測試 schema。
 
 <a id="verify"></a>
 ## 驗證

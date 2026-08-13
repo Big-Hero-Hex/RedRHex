@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.4.10 Operator Guide
+title: Training Panel 3.6.0 Operator Guide
 lang: en
 audience: operator
 type: how-to
@@ -30,7 +30,19 @@ Panel-launched training uses a run-scoped override snapshot and passes `--panel_
 
 History combines panel requests and discovered RSL-RL runs. Select a run to inspect configuration, checkpoint, spring backend/calibration status, reward/terrain differences, notes, folder, event state, video, export, and readiness evidence. Play, recording, export, and deployment checks reuse the recorded backend and reject incompatible spring metadata. Available actions include TensorBoard, Play, Record Video, Export ONNX, Resume to Train, Compare, Compact Run, and Process Console.
 
+Running cards show iteration progress, throughput, and ETA parsed from the process log. Run details draw mean reward and episode-length curves from local TensorBoard scalars. The run record also captures the Git commit, branch, and dirty state used at launch. A blank seed makes the panel choose and record a seed, so panel-launched runs remain reproducible.
+
 Compaction keeps the highest top-level `model_*.pt` and preserves events, parameters, videos, exports, notes, and deployment reports. Deletion requires the exact run ID and is rejected while a related process is active.
+
+<a id="convergence"></a>
+## Monitor convergence
+
+The Convergence view configures divergence detection for non-finite scalar values and sustained reward collapse. Notifications are enabled by the configured channel. Automatic stopping is opt-in: keep the action on `notify` until the detector has been checked against the task's reward scale, then select `stop` only if that behavior is intended.
+
+<a id="navigation"></a>
+## Navigate and diagnose the UI
+
+The current view and selected run are stored in the URL, so refresh and shared links preserve context. The top bar reports backend freshness; a stale indicator means operators should stop issuing new actions until connectivity is understood. Initial loading uses skeletons instead of reporting empty data, and action failures from Rewards, Terrain, Convergence, Activity, and Control Center appear in their current view.
 
 <a id="console"></a>
 ## Use Process Console

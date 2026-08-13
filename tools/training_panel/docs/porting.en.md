@@ -27,7 +27,7 @@ Add the job type, role permission, Supabase schema/policy if needed, worker exec
 <a id="version"></a>
 ## Version and release
 
-Update all 3.4.10 version surfaces together only for a real release. Add a canonical bilingual release document; do not create version gaps after the fact. Reapply and test the Supabase schema when the contract changes.
+Update all version surfaces belonging to the released contract together. The local Mother/UI and remote Child/worker protocol are independently deployed surfaces; do not advance the remote version for a local-only change. Add a canonical bilingual release document, do not create version gaps after the fact, and reapply and test the Supabase schema when its contract changes.
 
 <a id="verify"></a>
 ## Verify

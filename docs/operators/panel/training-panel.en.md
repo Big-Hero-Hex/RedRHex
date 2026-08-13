@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="start"></a>
@@ -21,7 +21,9 @@ Open `http://127.0.0.1:8080`. For another trusted machine, keep the panel bound 
 <a id="launch-and-history"></a>
 ## Launch and manage runs
 
-Use Train to select task, environments, iterations, reward and terrain presets, and resume options. The panel passes `--panel_overrides` to bind each launched run to its saved override files. History discovers checkpoints, events, exports, videos, notes, folders, and deployment reports.
+Use Train to select task, environments, iterations, reward and terrain presets, spring backend, and resume options. The panel passes `--panel_overrides` to bind each launched run to its saved override files. History discovers checkpoints, events, exports, videos, notes, folders, and deployment reports. Running cards expose iteration progress, throughput, and ETA; details include reward and episode-length curves plus launch-time Git provenance.
+
+A blank seed makes the panel select and record one. Keep divergence handling on notification-only until its behavior is verified against the task's reward scale; automatic stop must be explicitly selected. The current view/run survives refresh through the URL, while the topbar freshness indicator shows whether the backend is still responding.
 
 Only one Isaac GPU job should run at a time. The queue inserts a settle window between jobs. Stop a selected process from Process Console and wait for termination before launching another.
 
