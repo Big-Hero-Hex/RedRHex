@@ -35,7 +35,7 @@ Machine-readable `docs/governance/branch-preservation-manifest.csv` 記錄切換
 <a id="pending-contraction"></a>
 ## 待完成 contraction
 
-使用 repository-owner authority 驗證 `main` protection 前，不得刪除 obsolete remote ref。Feature PR 在 physical torsion 或 Windows acceptance gate 通過前維持 draft。Snapshot 後新增的 `docs/reports/` path 已完成分類：exact generated bundle 保存在 local recovery commit `02ebb53b32ff385fc0e8c36ef75e88ba8d944f70`，durable finding 已透過 documentation commit `2dff78e2410350defcf1603b9ca67f09bec030d3`（PR #8）遷移。Owner 已於 2026-08-13 選擇 local-only retention；raw PDF、HTML、preview、script 與 SQL 不得推送到 public remote。Local worktree/ref contraction 仍受 `main` protection gate 限制。
+使用 repository-owner authority 驗證 `main` protection 前，不得刪除 obsolete remote ref。Torsion 與 stacked Training Panel feature PR 在 physical acceptance gate 通過前維持 draft。Owner 明確接受尚未執行的 Windows-only smoke risk 後，Windows launcher PR #5 已以 `8d17dbf7976a88d2978a0e9b41245d80bec40fd7` merge；其 design 維持 approved、plan 維持 active，且未宣稱 release evidence。Snapshot 後新增的 `docs/reports/` path 已完成分類：exact generated bundle 保存在 local recovery commit `02ebb53b32ff385fc0e8c36ef75e88ba8d944f70`，durable finding 已透過 documentation commit `2dff78e2410350defcf1603b9ca67f09bec030d3`（PR #8）遷移。Owner 已於 2026-08-13 選擇 local-only retention；raw PDF、HTML、preview、script 與 SQL 不得推送到 public remote。Local worktree/ref contraction 仍受 `main` protection gate 限制。
 
 <a id="recovery"></a>
 ## 復原

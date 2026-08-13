@@ -11,6 +11,7 @@ remote-ref,refs/heads/feature/direction-tracking,bd86441e8533364e36e61cbb9bc5cbf
 remote-ref,refs/heads/feature/training-panel-v3-notifications,83f4ec3ce46bc04abda66559bafa50cd58d47ab9,redundant,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/feature/training-panel,dad9852d32ee365d4c11c3155d6faca70b1a52da,redundant,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/feature/velocity-tracking-visualization,795e1ee339b95fadd750b27b5f39f82fbb868704,redundant,refs/heads/main,ancestor,delete-after-protection
+remote-ref,refs/heads/feature/windows-remote-launcher,82d801f9ab91c1d6fdef52ede402847781ae959b,merged,refs/heads/main@8d17dbf7976a88d2978a0e9b41245d80bec40fd7,ancestor,remote-topic-deleted
 remote-ref,refs/heads/fix-pyramid-terrain,288ac7a23fe090364e939601d4b4b3fb50830e38,significant-unmatched,refs/heads/archive/legacy/fix-pyramid-terrain,exact-sha,delete-source-retain-archive
 remote-ref,refs/heads/fix/review-2026-07,38065c307a9a321f537ddb02be09dd128ba7e54c,merged,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/improve-structure-comments,2be745df9d1b95156bafe32696511f4600b7029b,significant-unmatched,refs/heads/archive/legacy/improve-structure-comments,exact-sha,delete-source-retain-archive
@@ -21,7 +22,7 @@ remote-ref,refs/heads/popcorn-test,28b04f3e4eb46e31d5149d8db37bdda08aaa8763,redu
 remote-ref,refs/heads/single-direction-training,0d644840b96bafa79de27fe4359707261b817bfd,redundant,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/ultra-optimized-version,4751e6c0ebe0d8c6321047f919d4eaf4b95976f8,duplicate,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/wasd-control,f0e12763c47a88fcd1cb824e84b726997cc2ce7e,redundant,refs/heads/main,ancestor,delete-after-protection
-local-ref,refs/heads/main,451de2ad835051985dd36e46513669380eb11941,stale-pointer,refs/remotes/origin/main,ancestor,replace-after-root-preservation
+local-ref,refs/heads/main,451de2ad835051985dd36e46513669380eb11941,stale-pointer,refs/remotes/origin/main,fast-forward,replaced-with-origin-main
 local-ref,refs/heads/Fast-forward,af77272a23d04e0d1b24305e38b688e07a3b1dea,redundant,refs/heads/main,ancestor,delete-after-contraction
 local-ref,refs/heads/codex/deploy-readiness-panel,277df2fa71c63045ed0cb84c02d59941798f29a9,redundant,refs/heads/main,ancestor,delete-after-contraction
 local-ref,refs/heads/docs/documentation-system-v1,c0bc9d8da17c552b59fb86740f9a50c0255fb540,merged,refs/heads/main,ancestor,delete-after-worktree-removal
@@ -32,6 +33,7 @@ local-ref,refs/heads/feat/torsion-spring,5de7b6da70a21f69e46bf2d077ff24ff5a22a62
 local-ref,refs/heads/feature/sim2real-calibration-mvp,bb3aad7952646755c6ad5fb7447945cfd60baf5f,source,refs/heads/archive/source/sim2real-calibration-mvp-2026-08-13,exact-sha,delete-after-worktree-removal
 local-ref,refs/heads/feature/training-panel-v3-notifications,83f4ec3ce46bc04abda66559bafa50cd58d47ab9,redundant,refs/heads/main,ancestor,delete-after-contraction
 local-ref,refs/heads/feature/training-panel,dad9852d32ee365d4c11c3155d6faca70b1a52da,redundant,refs/heads/main,ancestor,delete-after-contraction
+local-ref,refs/heads/feature/windows-remote-launcher,82d801f9ab91c1d6fdef52ede402847781ae959b,merged,refs/heads/main@8d17dbf7976a88d2978a0e9b41245d80bec40fd7,ancestor,delete-after-worktree-removal
 local-ref,refs/heads/fix/documentation-site-count,5ba5fd1008261a2d74aeab2fb833c30696ff6931,merged,refs/heads/main,ancestor,delete-after-worktree-removal
 local-ref,refs/heads/fix/review-2026-07,5de992d7afac77e566b6deebb99dc813eb87b612,redundant,refs/heads/main,ancestor,delete-after-contraction
 local-ref,refs/heads/reboot/core-sim-first,f40d3c26ce5b792d02117480a510d6fe7cecb86d,proposal-source,refs/heads/proposal/core-sim-first,exact-sha,rename-local-after-worktree-move
