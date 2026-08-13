@@ -6,13 +6,14 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="accepted-decisions"></a>
 ## 已接受決策
 
 - [ADR-0001：五階段訓練課程](adr-0001-five-stage-curriculum.zh-TW.md)
+- [ADR-0002：單一受保護的 main 分支](adr-0002-single-protected-main.zh-TW.md)
 
 <a id="decision-policy"></a>
 ## 決策政策

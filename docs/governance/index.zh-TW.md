@@ -6,7 +6,7 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-13
 ---
 
 <a id="purpose"></a>
@@ -33,6 +33,7 @@ last_reviewed: 2026-08-01
 - [遷移清單](migration-manifest.zh-TW.md)定義標題層級來源可追溯性與移除關卡。
 - [文件影響](documentation-impact.zh-TW.md)把儲存庫變更對應至文件工作與 PR 宣告。
 - [README 路由慣例](readme-router-convention.zh-TW.md)定義簡短雙語 README 例外。
+- [分支與 Worktree 管理](branch-management.zh-TW.md)定義分支角色、PR 流程、archive、worktree 與復原方式。
 
 <a id="consumers-and-enforcement"></a>
 ## 使用者與強制執行
