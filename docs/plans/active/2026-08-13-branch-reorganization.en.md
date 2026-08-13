@@ -27,22 +27,22 @@ The reviewed integration tip is `fix/review-2026-07` after Documentation System 
 
 - [x] Inventory local and remote refs, worktrees, dirty files, and stash parents.
 - [x] Commit exact dirty and stash snapshots to recovery refs and create a verified all-ref Git bundle.
-- [ ] Publish source, recovery, legacy, proposal, and old-main archive refs before moving `main`.
+- [x] Publish source, recovery, legacy, proposal, and old-main archive refs before moving `main`.
 
 <a id="reconstruct"></a>
 ### Reconstruct
 
-- [ ] Merge the original torsion source tip onto the reviewed main and migrate unique temporary documentation into canonical bilingual files.
-- [ ] Stack the original Training Panel V3.6 tip on torsion, then port both recovery snapshots hunk by hunk without overwriting later fixes.
-- [ ] Rebuild the Windows launcher independently from main, including its PowerShell test and canonical bilingual operator/developer documentation.
-- [ ] Record every source commit, dirty path, stash hunk, duplicate, generated exception, and destination in the preservation manifest.
+- [x] Merge the original torsion source tip onto the reviewed main and migrate unique temporary documentation into canonical bilingual files.
+- [x] Stack the original Training Panel V3.6 tip on torsion, then port both recovery snapshots hunk by hunk without overwriting later fixes.
+- [x] Rebuild the Windows launcher independently from main, including its PowerShell test and canonical bilingual operator/developer documentation.
+- [x] Record every source commit, dirty path, stash hunk, duplicate, generated exception, and destination in the preservation manifest.
 
 <a id="cutover"></a>
 ### Cut over
 
-- [ ] Verify archive refs and reconstructed branches from a fresh clone or bundle restore.
+- [x] Verify archive refs and reconstructed branches from a fresh clone or bundle restore.
 - [ ] Force-update remote `main` from the reviewed integration SHA, then immediately enable protected PR-only rules.
-- [ ] Publish draft feature PRs with torsion first, Training Panel stacked on torsion, and Windows parallel from main.
+- [x] Publish draft feature PRs with torsion first, Training Panel stacked on torsion, and Windows parallel from main.
 
 <a id="contract"></a>
 ### Contract
@@ -55,6 +55,14 @@ The reviewed integration tip is `fix/review-2026-07` after Documentation System 
 ## Verification
 
 Verification includes exact SHA/ref comparison, `git fsck`, bundle verification, reachability and patch-equivalence reports, tree and `range-diff` checks for reconstructed features, per-hunk recovery disposition, documentation validation, affected Python and Node test suites, PowerShell tests on Windows, fresh-clone branch visibility, pull-request CI, and GitHub branch-protection inspection.
+
+<a id="open-gates"></a>
+## Open gates
+
+- Remote `main` now points to the reviewed line, but repository-owner authentication is still required to enable and inspect branch protection; the combined cutover checkbox therefore remains open.
+- Torsion and the stacked Panel PR remain draft until physical spring calibration, backend selection, and required retraining evidence are complete.
+- The Windows launcher PR remains draft until its PowerShell 5.1 and Tailscale/SSH smoke checklist passes on Windows.
+- Remote and local obsolete-ref contraction remains pending until protection is enabled. Root worktree contraction also waits for user disposition of the post-snapshot untracked `docs/reports/` path.
 
 <a id="completion-summary"></a>
 ## Completion summary

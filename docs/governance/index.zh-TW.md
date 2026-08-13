@@ -34,6 +34,7 @@ last_reviewed: 2026-08-13
 - [文件影響](documentation-impact.zh-TW.md)把儲存庫變更對應至文件工作與 PR 宣告。
 - [README 路由慣例](readme-router-convention.zh-TW.md)定義簡短雙語 README 例外。
 - [分支與 Worktree 管理](branch-management.zh-TW.md)定義分支角色、PR 流程、archive、worktree 與復原方式。
+- [分支保存清單](branch-preservation-manifest.zh-TW.md)記錄確切 ref、dirty path、stash hunk 與 recovery bundle disposition。
 
 <a id="consumers-and-enforcement"></a>
 ## 使用者與強制執行

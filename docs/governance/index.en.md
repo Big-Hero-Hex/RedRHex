@@ -34,6 +34,7 @@ These governance documents are the single source of truth for RedRHex documentat
 - [Documentation impact](documentation-impact.en.md) maps repository changes to documentation work and PR declarations.
 - [README router convention](readme-router-convention.en.md) defines the concise bilingual README exception.
 - [Branch and worktree management](branch-management.en.md) defines branch roles, PR flow, archives, worktrees, and recovery.
+- [Branch preservation manifest](branch-preservation-manifest.en.md) records exact ref, dirty-path, stash-hunk, and recovery-bundle dispositions.
 
 <a id="consumers-and-enforcement"></a>
 ## Consumers and enforcement

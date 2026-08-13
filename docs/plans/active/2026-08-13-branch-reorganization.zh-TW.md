@@ -27,22 +27,22 @@ last_reviewed: 2026-08-13
 
 - [x] 盤點本機與遠端 refs、worktrees、dirty files 與 stash parents。
 - [x] 將精確 dirty 與 stash snapshots 提交到 recovery refs，並建立已驗證的全 ref Git bundle。
-- [ ] 在移動 `main` 前發布 source、recovery、legacy、proposal 與 old-main archive refs。
+- [x] 在移動 `main` 前發布 source、recovery、legacy、proposal 與 old-main archive refs。
 
 <a id="reconstruct"></a>
 ### 重建
 
-- [ ] 將原始 torsion source tip merge 到已審查的 main，並把暫時文件的獨特內容遷移到 canonical bilingual files。
-- [ ] 將原始 Training Panel V3.6 tip 疊在 torsion 上，再逐 hunk 移植兩個 recovery snapshots，不得覆寫較新的修正。
-- [ ] 從 main 獨立重建 Windows launcher，包括 PowerShell test 與 canonical bilingual operator/developer documentation。
-- [ ] 在 preservation manifest 記錄每個 source commit、dirty path、stash hunk、duplicate、generated exception 與 destination。
+- [x] 將原始 torsion source tip merge 到已審查的 main，並把暫時文件的獨特內容遷移到 canonical bilingual files。
+- [x] 將原始 Training Panel V3.6 tip 疊在 torsion 上，再逐 hunk 移植兩個 recovery snapshots，不得覆寫較新的修正。
+- [x] 從 main 獨立重建 Windows launcher，包括 PowerShell test 與 canonical bilingual operator/developer documentation。
+- [x] 在 preservation manifest 記錄每個 source commit、dirty path、stash hunk、duplicate、generated exception 與 destination。
 
 <a id="cutover"></a>
 ### 切換
 
-- [ ] 從 fresh clone 或 bundle restore 驗證 archive refs 與重建分支。
+- [x] 從 fresh clone 或 bundle restore 驗證 archive refs 與重建分支。
 - [ ] 由已審查的整合 SHA force-update 遠端 `main`，隨即啟用受保護的 PR-only 規則。
-- [ ] 發布 draft feature PR：torsion 優先、Training Panel 疊在 torsion 上、Windows 則平行從 main 開始。
+- [x] 發布 draft feature PR：torsion 優先、Training Panel 疊在 torsion 上、Windows 則平行從 main 開始。
 
 <a id="contract"></a>
 ### 收斂
@@ -55,6 +55,14 @@ last_reviewed: 2026-08-13
 ## 驗證
 
 驗證包含精確 SHA/ref 比對、`git fsck`、bundle verification、reachability 與 patch-equivalence reports、重建功能的 tree 與 `range-diff` 檢查、逐 hunk recovery disposition、documentation validation、受影響的 Python 與 Node 測試、Windows 上的 PowerShell tests、fresh-clone branch visibility、pull-request CI，以及 GitHub branch-protection inspection。
+
+<a id="open-gates"></a>
+## 未完成 gate
+
+- 遠端 `main` 現已指向 reviewed line，但仍需 repository-owner authentication 才能啟用並檢查 branch protection；因此 combined cutover checkbox 維持未完成。
+- Torsion 與 stacked Panel PR 在 physical spring calibration、backend selection 與必要 retraining evidence 完成前維持 draft。
+- Windows launcher PR 在 Windows 通過 PowerShell 5.1 與 Tailscale/SSH smoke checklist 前維持 draft。
+- Protection 啟用前，remote/local obsolete-ref contraction 維持 pending。Root worktree contraction 也會等待使用者決定 snapshot 後新增的 untracked `docs/reports/` path 如何處理。
 
 <a id="completion-summary"></a>
 ## 完成摘要
