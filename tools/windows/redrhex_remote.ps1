@@ -11,7 +11,7 @@ $script:RedRHexConfig = [pscustomobject]@{
     SshUser          = "lab_user1"
     PanelPort        = 8080
     TensorBoardPort  = 6006
-    PanelUrl         = "http://localhost:8080"
+    PanelUrl         = "http://localhost:8080/?remote_client=windows"
     TensorBoardUrl   = "http://localhost:6006"
     PanelRoot        = "/home/lab_user1/Py/RedRHex"
     CondaInit        = "/home/lab_user1/miniconda3/etc/profile.d/conda.sh"

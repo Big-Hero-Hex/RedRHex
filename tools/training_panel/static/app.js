@@ -1,6 +1,12 @@
 const DEBUG_POLL_MS = 1500;
 const RUNS_POLL_ACTIVE_MS = 10000;
 const RUNS_POLL_IDLE_MS = 30000;
+const REMOTE_DESKTOP_CLIENT = new URLSearchParams(window.location.search).get("remote_client") || "";
+const IS_REMOTE_DESKTOP = ["windows", "macos"].includes(REMOTE_DESKTOP_CLIENT);
+const REMOTE_FOLDER_REASON = "Unavailable in Windows/macOS remote mode: folders open on the training PC. Use browser artifacts or the available Copy Path controls instead.";
+const REMOTE_PLAY_REASON = "Unavailable in Windows/macOS remote mode: the live Isaac viewer opens on the training PC. Use Record Video instead.";
+const REMOTE_MUJOCO_REASON = "Unavailable in Windows/macOS remote mode: the live MuJoCo viewer opens on the training PC. Use Record MuJoCo MP4 instead.";
+const REMOTE_HEADLESS_REASON = "Windows/macOS remote mode requires headless training because the Isaac window opens on the training PC.";
 
 const state = {
   applyingRoute: false,
@@ -99,6 +105,12 @@ function endLoading(key) {
 
 function isLoading(key) {
   return state.loading.has(key);
+}
+
+function setLocalOnlyButtonState(button, disabled, localTooltip, remoteTooltip = REMOTE_FOLDER_REASON) {
+  if (!button) return;
+  button.disabled = Boolean(disabled) || IS_REMOTE_DESKTOP;
+  button.dataset.tooltip = IS_REMOTE_DESKTOP ? remoteTooltip : localTooltip;
 }
 
 function skeletonHtml(rows = 3) {
@@ -602,14 +614,22 @@ function updateTrainingPresetIndicators() {
 
 function formData(form) {
   const data = Object.fromEntries(new FormData(form).entries());
+  const route = data.training_route || "standard";
   data.display_name = String(data.display_name || "").trim();
-  data.headless = form.elements.headless.checked;
+  data.headless = IS_REMOTE_DESKTOP || form.elements.headless.checked;
   data.resume = Boolean(data.checkpoint);
   data.num_envs = Number(data.num_envs);
-  data.max_iterations = Number(data.max_iterations);
-  data.teacher_iterations = Number(data.teacher_iterations || 1500);
-  data.distillation_iterations = Number(data.distillation_iterations || 800);
-  data.ppo_iterations = Number(data.ppo_iterations || 1500);
+  if (route === "sensor_v2_full") {
+    delete data.max_iterations;
+    data.teacher_iterations = Number(data.teacher_iterations);
+    data.distillation_iterations = Number(data.distillation_iterations);
+    data.ppo_iterations = Number(data.ppo_iterations);
+  } else {
+    data.max_iterations = Number(data.max_iterations);
+    delete data.teacher_iterations;
+    delete data.distillation_iterations;
+    delete data.ppo_iterations;
+  }
   data.reward_preset_id = rewardPresetIdForTraining();
   data.reward_overrides = rewardOverridesForTraining();
   data.terrain_preset_id = terrainPresetIdForTraining();
@@ -961,19 +981,18 @@ function statusLabel(kind, status, context) {
 
 function runParamSummary(run) {
   const parts = [];
-  if (run.params?.task) parts.push(`task: ${run.params.task}`);
-  if (run.params?.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params.training_route && run.params.training_route !== "standard") {
-    parts.push(`route: ${run.params.training_route}`);
+  const params = run.params || {};
+  if (params.training_route && params.training_route !== "standard") {
+    parts.push(`route: ${params.training_route}`);
   }
-  if (run.params.task) parts.push(`task: ${run.params.task}`);
-  if (run.params.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params.training_route === "sensor_v2_full") {
+  if (params.task) parts.push(`task: ${params.task}`);
+  if (params.num_envs !== undefined) parts.push(`envs: ${params.num_envs}`);
+  if (params.training_route === "sensor_v2_full") {
     parts.push(
-      `iters: ${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}`
+      `iters: ${params.teacher_iterations}/${params.distillation_iterations}/${params.ppo_iterations}`
     );
-  } else if (run.params.max_iterations !== undefined) {
-    parts.push(`iters: ${run.params.max_iterations}`);
+  } else if (params.max_iterations !== undefined) {
+    parts.push(`iters: ${params.max_iterations}`);
   }
   parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
@@ -1402,7 +1421,12 @@ function renderRuns() {
       const playAction = playProcessId ? "stop-play" : "play";
       const playLabel = playProcessId ? "Stop Play" : "Play";
       const playProcessAttr = playProcessId ? `data-process-id="${escapeHtml(playProcessId)}"` : "";
-      const playDisabled = queued || (!canCheckpoint && !playProcessId) || Boolean(gpuProcess && !playProcessId);
+      const playDisabled = queued || (!canCheckpoint && !playProcessId) || Boolean(gpuProcess && !playProcessId) || Boolean(IS_REMOTE_DESKTOP && !playProcessId);
+      const playTooltip = playProcessId
+        ? "Stop Isaac playback"
+        : IS_REMOTE_DESKTOP
+          ? REMOTE_PLAY_REASON
+          : "Play checkpoint";
       const canTweak = !["running", "stopping"].includes(String(run.status || "").toLowerCase());
       const unread = state.notifications.unreadRunIds.has(run.id);
       return `
@@ -1441,7 +1465,7 @@ function renderRuns() {
           <small>${escapeHtml(checkpointSummary(run))}${videoText ? ` · ${escapeHtml(videoText)}` : ""}${onnxText ? ` · ${escapeHtml(onnxText)}` : ""}${escapeHtml(runStatusDetail(run))}${run.has_notes ? " <strong>+ notes</strong>" : ""}</small>
           <div class="run-actions">
             <button type="button" data-action="tensorboard" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(busy || !canTensorboard)} data-tooltip="Open metrics">TensorBoard</button>
-            <button type="button" data-action="${playAction}" data-run-id="${escapeHtml(run.id)}" ${playProcessAttr} ${runButtonDisabled(busy || playDisabled)} data-tooltip="${playProcessId ? "Stop Isaac playback" : "Play checkpoint"}">${escapeHtml(playLabel)}</button>
+            <button type="button" data-action="${playAction}" data-run-id="${escapeHtml(run.id)}" ${playProcessAttr} ${runButtonDisabled(busy || playDisabled)} data-tooltip="${escapeHtml(playTooltip)}">${escapeHtml(playLabel)}</button>
             <button type="button" data-action="console" data-run-id="${escapeHtml(run.id)}" ${runButtonDisabled(deleting)} data-tooltip="Show Process Console">Console</button>
             ${queued
               ? `<button type="button" data-action="cancel-queue" data-run-id="${escapeHtml(run.id)}" class="danger-button" ${runButtonDisabled(busy)} data-tooltip="Cancel this queued training run">Cancel Queue</button>`
@@ -1552,6 +1576,11 @@ function renderVideoPanel(run) {
   $("#record-video").disabled = !hasCheckpoint || Boolean(gpuProcess);
   $("#stop-recording").hidden = !videoProcessId;
   $("#open-video-folder").hidden = !run.latest_video;
+  setLocalOnlyButtonState(
+    $("#open-video-folder"),
+    !run.latest_video,
+    "Open the folder containing recorded videos (local only)"
+  );
   $("#copy-video-path").hidden = !run.latest_video;
   if (videoProcessId || run.video_status === "recording") {
     if (run.latest_video) {
@@ -1702,16 +1731,30 @@ function renderRunDetails() {
   $("#delete-run").textContent = deleting ? "Deleting..." : "Delete Run";
   $("#compact-run").disabled = !run || runBusy || !run.log_dir || Boolean(run && activeProcessForRun(run.id));
   $("#compact-run").textContent = compacting ? "Compacting..." : "Compact Run";
-  $("#open-run-folder").disabled = !run || runBusy || !run.log_dir;
+  setLocalOnlyButtonState(
+    $("#open-run-folder"),
+    !run || runBusy || !run.log_dir,
+    "Open the training log folder in the file manager (local only)"
+  );
   $("#tensorboard-run").disabled = !run || runBusy || !run.log_dir;
-  $("#play-run").disabled = !run || runBusy || queued || (!run.latest_checkpoint && !playProcessId) || Boolean(gpuProcess && !playProcessId);
-  $("#play-run").textContent = playProcessId ? "Stop Play" : "Play";
+  const playButton = $("#play-run");
+  playButton.disabled = !run || runBusy || queued || (!run.latest_checkpoint && !playProcessId) || Boolean(gpuProcess && !playProcessId) || Boolean(IS_REMOTE_DESKTOP && !playProcessId);
+  playButton.textContent = playProcessId ? "Stop Play" : "Play";
+  playButton.dataset.tooltip = playProcessId
+    ? "Stop Isaac playback"
+    : IS_REMOTE_DESKTOP
+      ? REMOTE_PLAY_REASON
+      : "Run the checkpoint in Isaac Sim for visualization (no training)";
   $("#export-onnx").disabled = !run || runBusy || queued || !run.latest_checkpoint || Boolean(gpuProcess);
   $("#export-onnx").textContent = onnxProcessId ? "Exporting ONNX" : "Export ONNX";
   $("#copy-onnx-path").hidden = !run || !run.onnx_path;
   $("#copy-onnx-path").disabled = !run || runBusy || !run.onnx_path;
   $("#open-onnx-folder").hidden = !run || !run.onnx_path;
-  $("#open-onnx-folder").disabled = !run || runBusy || !run.onnx_path;
+  setLocalOnlyButtonState(
+    $("#open-onnx-folder"),
+    !run || runBusy || !run.onnx_path,
+    "Open the exported policy folder (local only)"
+  );
   $("#resume-run").disabled = !run || runBusy || !run.latest_checkpoint;
   $("#tweak-run").disabled = !run || runBusy || ["running", "stopping"].includes(String(run.status || "").toLowerCase());
   $("#stop-process").disabled = !state.debugTarget && !run;
@@ -1723,7 +1766,11 @@ function renderRunDetails() {
   const hasCommand = Boolean(state.lastDebug && state.lastDebug.command);
   $("#copy-command").hidden = !hasCommand;
   $("#copy-command").disabled = !hasCommand;
-  $("#open-process-log-folder").disabled = !state.lastDebug || !(state.lastDebug.process_log || state.lastDebug.log_file);
+  setLocalOnlyButtonState(
+    $("#open-process-log-folder"),
+    !state.lastDebug || !(state.lastDebug.process_log || state.lastDebug.log_file),
+    "Open the folder containing process log files (local only)"
+  );
 
   // Curves are fetched by syncRunCurves() on selection change and on their own
   // timer. renderRunDetails() stays synchronous and side-effect-free — it is
@@ -1863,7 +1910,12 @@ function renderMujocoPlayback(run, defaults) {
   const canRun = Boolean(run && run.onnx_path && defaults.mujoco_installed && defaults.onnxruntime_installed);
   const viewerReady = canRun && Boolean(defaults.mujoco_viewer_available);
   const recordReady = canRun && Boolean(defaults.mujoco_renderer_available && defaults.mujoco_encoder_available);
-  if (viewerButton) viewerButton.disabled = !viewerReady || Boolean(active);
+  setLocalOnlyButtonState(
+    viewerButton,
+    !viewerReady || Boolean(active),
+    "Open the live MuJoCo viewer",
+    REMOTE_MUJOCO_REASON
+  );
   if (recordButton) recordButton.disabled = !recordReady || Boolean(active);
   if (stopButton) {
     stopButton.hidden = !active;
@@ -1885,7 +1937,10 @@ function renderMujocoPlayback(run, defaults) {
       video.load();
     }
   }
-  if (openButton) openButton.hidden = !run?.latest_mujoco_video;
+  if (openButton) {
+    openButton.hidden = !run?.latest_mujoco_video;
+    setLocalOnlyButtonState(openButton, !run?.latest_mujoco_video, "Open the MuJoCo video folder (local only)");
+  }
   if (copyButton) copyButton.hidden = !run?.latest_mujoco_video;
   if (status) {
     if (!run) status.textContent = "Select a run to open or record MuJoCo playback.";
@@ -2060,6 +2115,10 @@ function mujocoPlaybackPayload() {
 }
 
 async function startMujocoPlayback(mode) {
+  if (mode === "viewer" && IS_REMOTE_DESKTOP) {
+    setDeployStatus(REMOTE_MUJOCO_REASON);
+    return;
+  }
   syncDeploySelection();
   const runId = state.deploySelectedRunId;
   if (!runId) {
@@ -2087,6 +2146,10 @@ async function stopMujocoPlayback() {
 }
 
 async function openMujocoVideoFolder() {
+  if (IS_REMOTE_DESKTOP) {
+    setDeployStatus(REMOTE_FOLDER_REASON);
+    return;
+  }
   const run = findRun(state.deploySelectedRunId);
   const folder = mujocoVideoFolder(run);
   if (!folder) {
@@ -2394,6 +2457,10 @@ async function copyLaunchCommand() {
 }
 
 async function openLocation(path, label = "location") {
+  if (IS_REMOTE_DESKTOP) {
+    setStatus(REMOTE_FOLDER_REASON);
+    return;
+  }
   if (!path) {
     setStatus(`No ${label} path is available.`);
     return;
@@ -2690,6 +2757,7 @@ async function saveName() {
 }
 
 function tensorboardHost() {
+  if (IS_REMOTE_DESKTOP) return "127.0.0.1";
   return location.hostname === "127.0.0.1" || location.hostname === "localhost" ? "127.0.0.1" : "0.0.0.0";
 }
 
@@ -2723,9 +2791,11 @@ function showTensorBoardWindowError(win, error) {
 async function startTensorBoardForRun(runId, pendingWindow) {
   const host = tensorboardHost();
   const win = pendingWindow || openPendingTensorBoardWindow();
-  const data = await api(`/api/runs/${encodeURIComponent(runId)}/tensorboard`, {
+  const endpoint = IS_REMOTE_DESKTOP ? "/api/tensorboard/start" : `/api/runs/${encodeURIComponent(runId)}/tensorboard`;
+  const payload = IS_REMOTE_DESKTOP ? { host, port: 6006 } : { host };
+  const data = await api(endpoint, {
     method: "POST",
-    body: JSON.stringify({ host }),
+    body: JSON.stringify(payload),
   });
   const url = displayTensorboardUrl(data, host);
   if (win && !win.closed) {
@@ -2733,13 +2803,19 @@ async function startTensorBoardForRun(runId, pendingWindow) {
     win.location.href = url;
   }
   setStatus(
-    data.already_running ? `TensorBoard is already running on port ${data.port}.` : `Started TensorBoard on port ${data.port}.`,
+    data.already_running
+      ? `TensorBoard is already running on port ${data.port}.`
+      : `Started TensorBoard${IS_REMOTE_DESKTOP ? " for all runs" : ""} on port ${data.port}.`,
     url
   );
   setDebugTarget({ type: "process", id: data.id });
 }
 
 async function playRun(runId) {
+  if (IS_REMOTE_DESKTOP) {
+    setStatus(REMOTE_PLAY_REASON);
+    return;
+  }
   const gpuProcess = activeGpuProcess();
   if (gpuProcess) {
     setStatus(mediaLockMessage(gpuProcess));
@@ -3152,7 +3228,7 @@ function applyTrainingParamsToForm(params) {
   form.elements.spring_backend.value = params.spring_backend || "explicit";
   form.elements.seed.value = params.seed ?? "";
   form.elements.checkpoint.value = "";
-  form.elements.headless.checked = params.headless !== false;
+  form.elements.headless.checked = IS_REMOTE_DESKTOP || params.headless !== false;
   updateTrainingRouteForm();
 }
 
@@ -5179,6 +5255,12 @@ document.querySelectorAll(".nav-button").forEach((button) => {
 });
 
 applyTheme(preferredTheme());
+const headlessInput = $("#train-form input[name='headless']");
+if (headlessInput && IS_REMOTE_DESKTOP) {
+  headlessInput.checked = true;
+  headlessInput.disabled = true;
+  headlessInput.closest("label").dataset.tooltip = REMOTE_HEADLESS_REASON;
+}
 $("#theme-toggle").addEventListener("click", toggleTheme);
 $("#train-form").addEventListener("submit", startTraining);
 $("#smoke-button").addEventListener("click", () => applyPreset("smoke"));

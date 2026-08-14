@@ -390,7 +390,8 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
     page.locator("#train-form button[type=submit]").click()
     expect(page.locator("#train-status")).to_contain_text("Queued native_submit")
     assert submitted_payloads == [{
-        "task": "Template-Redrhex-Direct-v0",
+        "training_route": "standard",
+        "task": "Template-Redrhex-ForwardFast-Direct-v0",
         "display_name": "",
         "num_envs": 4,
         "max_iterations": 1,
@@ -400,10 +401,21 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
         "checkpoint": "",
         "headless": True,
         "resume": False,
-        "reward_preset_id": "baseline",
-        "reward_overrides": {},
+        "reward_preset_id": "speed-focus",
+        "reward_overrides": {
+            "v2_reward_scales.forward_progress": 3,
+            "v2_reward_scales.velocity_tracking": 6,
+            "v2_reward_scales.axis_suppression": 2,
+            "v2_reward_scales.height_maintain": 1,
+            "v2_reward_scales.height_low_penalty": 1.5,
+            "v2_reward_scales.leg_moving": 0.25,
+            "v2_reward_scales.stall_penalty": -3,
+            "v2_reward_scales.energy_per_distance": 0.0005,
+        },
         "terrain_preset_id": "baseline",
         "terrain_overrides": {},
+        "physics_preset_id": "baseline",
+        "physics_overrides": {},
     }]
 
     open_history(page, panel["url"])
@@ -459,6 +471,64 @@ def test_status_toast_appears_for_actions_outside_history(panel, page):
     page.wait_for_selector("#train-form")
     page.evaluate("setStatus('Fixture status message.')")
     expect(page.locator("#panel-status .toast")).to_contain_text("Fixture status message.")
+
+
+@pytest.mark.parametrize("remote_client", ["windows", "macos"])
+def test_desktop_remote_mode_disables_host_only_controls(panel, page, remote_client):
+    page.goto(f"{panel['url']}/?remote_client={remote_client}#/history/panel_run_beta")
+    expect(page.locator("#details-title")).to_contain_text("Beta Foldered")
+
+    for selector in (
+        "#play-run",
+        "#open-run-folder",
+        "#open-onnx-folder",
+        "#open-video-folder",
+        "#open-process-log-folder",
+        "#deploy-mujoco-viewer",
+    ):
+        expect(page.locator(selector)).to_be_disabled()
+
+    expect(page.locator("#play-run")).to_have_attribute("data-tooltip", re.compile("opens on the training PC"))
+    expect(page.locator("#open-run-folder")).to_have_attribute("data-tooltip", re.compile("folders open on the training PC"))
+    expect(page.locator("#tensorboard-run")).to_be_enabled()
+    expect(page.locator("#record-video")).to_be_enabled()
+    expect(page.locator("#copy-video-path")).to_be_enabled()
+    expect(page.locator("#copy-onnx-path")).to_be_enabled()
+
+    headless = page.locator('#train-form input[name="headless"]')
+    expect(headless).to_be_checked()
+    expect(headless).to_be_disabled()
+
+
+def test_desktop_remote_tensorboard_uses_fixed_forward_for_all_runs(panel, page):
+    requests = []
+
+    def start_tensorboard(route, request):
+        requests.append(json.loads(request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "id": "tensorboard_6006",
+                    "already_running": False,
+                    "url": panel["url"],
+                    "host": "127.0.0.1",
+                    "port": 6006,
+                }
+            ),
+        )
+
+    page.route("**/api/tensorboard/start", start_tensorboard)
+    page.goto(f"{panel['url']}/?remote_client=windows#/history/panel_run_beta")
+    expect(page.locator("#tensorboard-run")).to_be_enabled()
+
+    with page.expect_popup() as popup_info:
+        page.locator("#tensorboard-run").click()
+    popup = popup_info.value
+    expect(page.locator("#panel-status")).to_contain_text("Started TensorBoard for all runs on port 6006.")
+    assert requests == [{"host": "127.0.0.1", "port": 6006}]
+    popup.close()
 
 
 def test_error_toast_persists_and_closes_on_click(panel, page):
