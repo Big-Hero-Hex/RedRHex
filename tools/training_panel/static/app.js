@@ -1498,6 +1498,22 @@ function closeRunMenu({ restoreFocus = false } = {}) {
   }
 }
 
+// The run list scrolls, so a menu is clipped at the container edge rather than
+// overflowing the page. A menu taller than its own card cannot open upward from
+// the first card, nor downward from the last, so pick the side that fits.
+function positionRunMenu(menu) {
+  const list = $("#runs");
+  const trigger = menu.parentElement?.querySelector(".run-menu-trigger");
+  if (!list || !trigger) return;
+  const listRect = list.getBoundingClientRect();
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuHeight = menu.offsetHeight;
+  const spaceBelow = listRect.bottom - triggerRect.bottom - 8;
+  const spaceAbove = triggerRect.top - listRect.top - 8;
+  const openDown = spaceBelow >= menuHeight || spaceBelow >= spaceAbove;
+  menu.dataset.direction = openDown ? "down" : "up";
+}
+
 function toggleRunMenu(runId) {
   const alreadyOpen = state.openMenuRunId === runId;
   closeRunMenu();
@@ -1505,6 +1521,10 @@ function toggleRunMenu(runId) {
   state.openMenuRunId = runId;
   syncRunMenuState();
   const menu = document.querySelector(`.run-menu[data-run-id="${CSS.escape(runId)}"]`);
+  if (menu) {
+    positionRunMenu(menu);
+    menu.scrollIntoView({ block: "nearest" });
+  }
   const firstItem = menu?.querySelector("button[role='menuitem']:not([disabled])");
   if (firstItem) firstItem.focus();
 }

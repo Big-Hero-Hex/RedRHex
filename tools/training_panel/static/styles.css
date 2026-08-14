@@ -1474,6 +1474,19 @@ html[data-theme="dark"] .comparison-diff {
   opacity: 1;
 }
 
+/* The run list is its own scroll container, so anything drawn outside a card is
+   clipped at the container edge. Popups anchored near a card's top edge open
+   downward instead, which keeps them inside the card's own footprint. */
+.run-list .run-select-checkbox[data-tooltip]::after {
+  top: calc(100% + 6px);
+  bottom: auto;
+  left: 0;
+  transform: none;
+  /* A hidden tooltip still occupies layout, so left-anchoring it needs a width
+     that cannot reach past the viewport on a narrow screen. */
+  max-width: min(260px, calc(100vw - 72px));
+}
+
 /* ==============================
    Details Panel Section Headers
    ============================== */
@@ -2257,6 +2270,16 @@ pre {
 
 .run-card.dragging {
   opacity: 0.5;
+}
+
+.run-menu[data-direction="up"] {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.run-card:has(.run-menu[data-open="true"]) {
+  position: relative;
+  z-index: 5;
 }
 
 /* While a drag is in flight, show every legal destination rather than only the
@@ -3183,6 +3206,8 @@ body.dragging-runs .folder-item[data-drop-folder] {
   font-size: 1rem;
 }
 
+/* Direction is chosen at open time against the scrolling list's bounds, because
+   neither direction fits every card: see positionRunMenu(). */
 .run-menu {
   position: absolute;
   right: 0;

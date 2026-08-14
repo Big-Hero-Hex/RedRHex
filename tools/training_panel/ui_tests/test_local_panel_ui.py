@@ -1228,3 +1228,26 @@ def test_folder_creation_uses_the_in_app_dialog(panel, page):
     page.locator("#confirm-dialog-confirm").click()
     expect(page.locator("#folder-sidebar")).to_contain_text("Sweep A")
     assert page.locator('.folder-select[data-folder="Sweep A"]').count() == 1
+
+
+def test_run_list_popups_stay_inside_the_scrolling_list(panel, page):
+    # The run list is its own scroll container, so a popup drawn past a card's
+    # edge is clipped at the container boundary rather than overlaying the page.
+    open_history(page, panel["url"])
+    list_box = page.locator("#runs").bounding_box()
+
+    checkbox = page.locator(".run-card").first.locator(".run-select-checkbox")
+    checkbox.hover()
+    tip_top = page.evaluate(
+        """() => {
+          const box = document.querySelector('.run-card .run-select-checkbox');
+          const style = getComputedStyle(box, '::after');
+          return box.getBoundingClientRect().bottom + parseFloat(style.marginTop || 0);
+        }"""
+    )
+    assert tip_top >= list_box["y"]
+
+    page.locator(".run-card").first.locator(".run-menu-trigger").click()
+    menu = page.locator(".run-menu[data-open='true']").bounding_box()
+    assert menu["y"] >= list_box["y"]
+    assert menu["y"] + menu["height"] <= list_box["y"] + list_box["height"] + 1
