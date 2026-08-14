@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="active-plans"></a>
 ## Active plans
 
+- [AI-Guided Autopilot Campaign implementation](active/2026-08-14-ai-guided-autopilot-campaigns.en.md)
 - [Child Panel 3.7 remote parity implementation](active/2026-08-14-child-panel-remote-parity.en.md)
 - [Sensor-only student distillation V2 implementation](active/2026-08-13-student-distillation-v2.en.md)
 - [macOS remote launcher implementation](active/2026-08-13-macos-remote-launcher.en.md)

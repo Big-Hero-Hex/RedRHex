@@ -82,6 +82,18 @@ class PanelPaths:
         return self.panel_log_root / "physics_presets.json"
 
     @property
+    def autopilot_db_file(self) -> Path:
+        return self.panel_log_root / "autopilot.sqlite3"
+
+    @property
+    def autopilot_artifact_dir(self) -> Path:
+        return self.panel_log_root / "autopilot_artifacts"
+
+    @property
+    def evaluation_dir(self) -> Path:
+        return self.panel_log_root / "evaluations"
+
+    @property
     def rsl_rl_log_root(self) -> Path:
         return self.repo_root / "logs" / "rsl_rl" / "redrhex_wheg"
 
@@ -96,8 +108,16 @@ class PanelPaths:
     def physics_profile_file(self, process_id: str) -> Path:
         return self.process_override_dir / f"{process_id}_physics.json"
 
+    def reward_profile_file(self, process_id: str) -> Path:
+        return self.process_override_dir / f"{process_id}_reward.json"
+
+    def terrain_profile_file(self, process_id: str) -> Path:
+        return self.process_override_dir / f"{process_id}_terrain.json"
+
     def ensure_dirs(self) -> None:
         self.panel_log_root.mkdir(parents=True, exist_ok=True)
         self.process_log_dir.mkdir(parents=True, exist_ok=True)
         self.process_override_dir.mkdir(parents=True, exist_ok=True)
+        self.autopilot_artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.evaluation_dir.mkdir(parents=True, exist_ok=True)
         self.notes_dir.mkdir(parents=True, exist_ok=True)

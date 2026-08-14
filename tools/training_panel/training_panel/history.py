@@ -906,7 +906,6 @@ class HistoryStore:
                 continue
             merged.append(discovered)
         merged = self._collapse_duplicate_runs(merged)
-        defaults = reward_defaults(self.paths.repo_root)
         terrain_current_defaults = terrain_defaults(self.paths.repo_root)
         for record in merged:
             run_id = record.get("id", "")
@@ -927,6 +926,8 @@ class HistoryStore:
                 record["has_onnx"] = bool(record["onnx_path"])
                 record["has_tensorboard"] = any(log_dir.glob("events.out.tfevents.*"))
                 env_yaml = log_dir / "params" / "env.yaml"
+                params = record.get("params") if isinstance(record.get("params"), dict) else {}
+                defaults = reward_defaults(self.paths.repo_root, task=params.get("task"))
                 if env_yaml.exists() and defaults:
                     yaml_scales = read_reward_scales_from_yaml(env_yaml)
                     diff = reward_diff(yaml_scales, defaults)
@@ -1108,7 +1109,8 @@ class HistoryStore:
                 **diff,
             }
 
-        defaults = reward_defaults(self.paths.repo_root)
+        params = run.get("params") if isinstance(run.get("params"), dict) else {}
+        defaults = reward_defaults(self.paths.repo_root, task=params.get("task"))
         diff = reward_diff(yaml_scales, defaults)
         return {
             "run_id": run_id,

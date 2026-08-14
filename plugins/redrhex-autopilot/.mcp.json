@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "redrhex-autopilot": {
+      "command": "python3",
+      "args": [
+        "${PLUGIN_ROOT}/scripts/redrhex_autopilot_mcp.py"
+      ]
+    }
+  }
+}

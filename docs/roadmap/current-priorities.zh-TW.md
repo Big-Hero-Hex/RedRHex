@@ -6,7 +6,7 @@ audience: shared
 type: roadmap
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="validation"></a>
@@ -40,8 +40,16 @@ Evidence gate 與解讀記錄於 [2026-08-13 研究就緒度稽核](../research/
 <a id="reward-agent"></a>
 ## Reward Agent
 
-- 保留有界 candidate planning、dry-run inspection、明確 launch、trial persistence 與 metric-based report。
-- Proposal UI 與更深入 Training Panel integration 需另行 design；不可靜默修改 reward source，也不可讓 LLM 在沒有 metric 時宣告成功。
+- 保留有界 candidate planning、dry-run inspection、explicit legacy launch、trial persistence 與 metric-based report，作為 armed Autopilot campaign 之外的 manual workflow。
+- Legacy session import 必須維持不可 arm 並保留 source JSON；不可把 legacy score 重新解讀成 deterministic campaign evidence。
+
+<a id="autopilot-rollout"></a>
+## Autopilot rollout
+
+- 在 target training host 通過 fake-advisor loop、restart recovery、idempotency 與 single-GPU host serialization 前，保持 `REDRHEX_AUTOPILOT_ENABLED` 預設關閉。
+- 在 repository 之外 provision ChatGPT Scheduled 與 OpenAI Secure MCP Tunnel 並保存 runtime credential；任何 unattended launch 前，先驗證 shadow proposal 與 tunnel-loss waiting。
+- 從四個 trial 的 ForwardFast pilot、restart recovery，逐步進入 opt-in 24-trial qualification campaign。上述 gate 通過後才能啟用 Direct stage 2–5。
+- Sensor V2、remote-child campaign control、automatic source application、policy export/deployment、hardware promotion 與 cross-campaign learning 都不納入 V1。變更 `3.7.0-remote-parity` protocol 前必須另做 compatibility design。
 
 <a id="documentation"></a>
 ## 文件

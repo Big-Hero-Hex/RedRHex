@@ -6,7 +6,7 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="accepted-decisions"></a>
@@ -14,6 +14,7 @@ last_reviewed: 2026-08-13
 
 - [ADR-0001: Five-stage training curriculum](adr-0001-five-stage-curriculum.en.md)
 - [ADR-0002: Single protected main branch](adr-0002-single-protected-main.en.md)
+- [ADR-0003: AI advisor and deterministic authority boundary](adr-0003-ai-advisor-deterministic-authority.en.md)
 
 <a id="decision-policy"></a>
 ## Decision policy

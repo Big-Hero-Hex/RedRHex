@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -12,6 +15,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,10 +27,12 @@ from .commands import (
     DEFAULT_FOLLOW_CAMERA_EYE,
     DEFAULT_FOLLOW_CAMERA_LOOKAT,
     FORWARD_FAST_TASK,
+    EvaluationParams,
     TrainingParams,
     VideoParams,
     agent_for_training_route,
     display_isaaclab_command,
+    evaluation_argv,
     export_onnx_argv,
     play_argv,
     resolve_spring_backend,
@@ -56,8 +63,9 @@ EXTERNAL_ID_PREFIXES = (
     EXTERNAL_TENSORBOARD_ID_PREFIX,
     EXTERNAL_GPU_ID_PREFIX,
 )
-GPU_PROCESS_KINDS = {"training", "play", "video", "onnx", "deploy", "gpu"}
+GPU_PROCESS_KINDS = {"training", "evaluation", "play", "video", "onnx", "deploy", "gpu"}
 DEFAULT_ISAAC_SETTLE_SECONDS = 5.0
+DEFAULT_PROCESS_LAUNCH_GRACE_SECONDS = 5.0
 
 
 def _isaac_settle_seconds_from_env() -> float:
@@ -97,6 +105,10 @@ class ProcessStartError(RuntimeError):
         self.payload = {"error": message, **payload}
 
 
+class GpuHostLeaseBusy(ProcessStartError):
+    """Raised when another process owns the host-wide Isaac/GPU launch slot."""
+
+
 class CudaPreflightError(RuntimeError):
     def __init__(self, health: dict):
         message = str(health.get("error") or "CUDA driver preflight failed")
@@ -113,6 +125,7 @@ class ProcessRegistry:
         isaac_settle_seconds: float | None = None,
         *,
         cuda_preflight: bool = False,
+        launch_grace_seconds: float = DEFAULT_PROCESS_LAUNCH_GRACE_SECONDS,
     ):
         self.paths = paths
         self.history = history
@@ -121,6 +134,7 @@ class ProcessRegistry:
         self._queue_lock = threading.Lock()
         self._processes: dict[str, subprocess.Popen] = {}
         self._infos: dict[str, ProcessInfo] = {}
+        self._gpu_lease_fds: dict[str, int] = {}
         self._tensorboards_by_logdir: dict[str, str] = {}
         self.isaac_settle_seconds = (
             _isaac_settle_seconds_from_env()
@@ -129,6 +143,180 @@ class ProcessRegistry:
         )
         self._last_isaac_exit_at = 0.0
         self._queued_training_timer: threading.Timer | None = None
+        self.launch_grace_seconds = max(0.0, float(launch_grace_seconds))
+
+    @property
+    def _gpu_lease_file(self) -> Path:
+        return self.paths.panel_log_root / "gpu_process.lock"
+
+    def _acquire_gpu_lease(
+        self,
+        process_id: str,
+        kind: str,
+        *,
+        launch_owner_token: str | None = None,
+    ) -> int:
+        """Atomically claim the one host GPU slot until ``process_id`` exits."""
+
+        self._release_finished_gpu_leases()
+        self.paths.panel_log_root.mkdir(parents=True, exist_ok=True)
+        lease_file = self._gpu_lease_file
+        fd = os.open(lease_file, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            owner = self._read_gpu_lease_owner()
+            raise GpuHostLeaseBusy(
+                "Another Isaac/GPU process owns the host lease.",
+                {"code": "gpu_host_lease_busy", "lease": owner},
+            ) from None
+
+        owner = {
+            "process_id": process_id,
+            "kind": kind,
+            "owner_pid": os.getpid(),
+            "acquired_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if launch_owner_token:
+            owner["launch_owner_token"] = launch_owner_token
+        try:
+            encoded = (json.dumps(owner, sort_keys=True) + "\n").encode("utf-8")
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, encoded)
+            os.fsync(fd)
+            with self._lock:
+                self._gpu_lease_fds[process_id] = fd
+        except Exception:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+            raise
+        return fd
+
+    def _release_gpu_lease(self, process_id: str) -> None:
+        with self._lock:
+            fd = self._gpu_lease_fds.pop(process_id, None)
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    def _drop_gpu_lease_reference(self, process_id: str) -> None:
+        """Drop panel ownership after a post-spawn error; the child keeps the lock."""
+
+        with self._lock:
+            fd = self._gpu_lease_fds.pop(process_id, None)
+        if fd is not None:
+            os.close(fd)
+
+    def _release_finished_gpu_leases(self) -> None:
+        with self._lock:
+            candidates = [
+                (process_id, self._processes.get(process_id))
+                for process_id in self._gpu_lease_fds
+            ]
+        for process_id, proc in candidates:
+            if proc is not None and proc.poll() is not None:
+                self._release_gpu_lease(process_id)
+
+    def _read_gpu_lease_owner(self) -> dict:
+        try:
+            payload = json.loads(self._gpu_lease_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @property
+    def _training_client_request_lock_file(self) -> Path:
+        return self.paths.panel_log_root / "training_client_requests.lock"
+
+    @contextmanager
+    def _training_client_request_guard(self, client_request_id: str | None):
+        """Serialize durable request lookup and launch-record creation per host."""
+
+        if not client_request_id:
+            yield
+            return
+        self.paths.panel_log_root.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._training_client_request_lock_file, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    @staticmethod
+    def _training_request_fingerprint(params: TrainingParams | dict) -> str:
+        values = params.to_dict() if isinstance(params, TrainingParams) else dict(params)
+        for key in (
+            "client_request_id",
+            "reward_profile_file",
+            "reward_profile_sha256",
+            "terrain_profile_file",
+            "terrain_profile_sha256",
+        ):
+            values.pop(key, None)
+        encoded = json.dumps(
+            values,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _training_run_for_client_request(self, params: TrainingParams) -> dict | None:
+        request_id = params.client_request_id
+        if not request_id:
+            return None
+        requested_fingerprint = self._training_request_fingerprint(params)
+        matches = []
+        for run in self.history.list_runs():
+            stored_params = run.get("params") if isinstance(run.get("params"), dict) else {}
+            stored_request_id = run.get("client_request_id") or stored_params.get("client_request_id")
+            if stored_request_id == request_id:
+                matches.append((run, stored_params))
+        for run, stored_params in matches:
+            existing_fingerprint = run.get("client_request_fingerprint")
+            if not existing_fingerprint:
+                existing_fingerprint = self._training_request_fingerprint(stored_params)
+            if existing_fingerprint != requested_fingerprint:
+                raise ProcessStartError(
+                    "client_request_id was already used with different training inputs.",
+                    {
+                        "code": "client_request_id_conflict",
+                        "client_request_id": request_id,
+                        "existing_run_id": run.get("id"),
+                    },
+                )
+        return matches[0][0] if matches else None
+
+    def _gpu_monitor_entry(self, process_id: str, proc: subprocess.Popen, monitor, *args) -> None:
+        """Keep the lease through all monitor failures, then release after child exit."""
+
+        try:
+            monitor(*args)
+        finally:
+            try:
+                if proc.poll() is None:
+                    proc.wait()
+            finally:
+                self._release_gpu_lease(process_id)
+
+    def _start_gpu_monitor(self, process_id: str, proc: subprocess.Popen, monitor, *args) -> None:
+        threading.Thread(
+            target=self._gpu_monitor_entry,
+            args=(process_id, proc, monitor, *args),
+            daemon=True,
+        ).start()
 
     def list_processes(self) -> list[dict]:
         with self._lock:
@@ -165,27 +353,175 @@ class ProcessRegistry:
     def queue_training(self, params: TrainingParams) -> dict:
         params.validate()
         validate_panel_training_spring_backend(params.spring_backend)
-        self._assert_cuda_ready(params.device)
-        with self._queue_lock:
-            settle_delay = self._isaac_settle_delay()
-            if self._queued_training_runs() or self.running_isaac_processes() or settle_delay > 0:
-                run = self._create_queued_training_run(params)
-                if settle_delay > 0:
-                    self._schedule_queued_training_start_locked(settle_delay)
-                return run
-            return self._start_training_run(params)
+        with self._training_client_request_guard(params.client_request_id):
+            existing = self._training_run_for_client_request(params)
+            if existing is not None:
+                return existing
+            self._assert_cuda_ready(params.device)
+            with self._queue_lock:
+                settle_delay = self._isaac_settle_delay()
+                if self._queued_training_runs() or self.running_isaac_processes() or settle_delay > 0:
+                    run = self._create_queued_training_run(params)
+                    if settle_delay > 0:
+                        self._schedule_queued_training_start_locked(settle_delay)
+                    return run
+                try:
+                    return self._start_training_run(params)
+                except GpuHostLeaseBusy:
+                    run = self._create_queued_training_run(params)
+                    self._schedule_queued_training_start_locked(1.0)
+                    return run
 
     def start_training(self, params: TrainingParams) -> dict:
         params.validate()
         validate_panel_training_spring_backend(params.spring_backend)
-        return self._start_training_run(params)
+        with self._training_client_request_guard(params.client_request_id):
+            existing = self._training_run_for_client_request(params)
+            if existing is not None:
+                return existing
+            return self._start_training_run(params)
+
+    def start_evaluation(self, params: EvaluationParams) -> dict:
+        """Launch one exact-checkpoint command sweep as a serialized panel process."""
+
+        params.validate()
+        actual_checkpoint_sha = hashlib.sha256(Path(params.checkpoint).read_bytes()).hexdigest()
+        if actual_checkpoint_sha != params.checkpoint_sha256:
+            raise ValueError(
+                "checkpoint SHA-256 mismatch: "
+                f"expected {params.checkpoint_sha256}, got {actual_checkpoint_sha}"
+            )
+        self._assert_cuda_ready(params.device)
+        running = self.running_isaac_processes()
+        if running:
+            raise ProcessStartError(
+                "An Isaac GPU process is already running; evaluation remains serialized.",
+                {"running_processes": running},
+            )
+        self.paths.ensure_dirs()
+        evaluation_id = f"evaluation_{timestamp_id()}"
+        launch_owner_token = uuid.uuid4().hex
+        launch_receipt_file = self._launch_receipt_file_for_process(evaluation_id)
+        lease_fd = self._acquire_gpu_lease(
+            evaluation_id,
+            "evaluation",
+            launch_owner_token=launch_owner_token,
+        )
+        artifact_dir = self.paths.evaluation_dir / evaluation_id
+        try:
+            artifact_dir.mkdir(parents=True, exist_ok=False)
+            command_csv = artifact_dir / "commands.csv"
+            episode_csv = artifact_dir / "commands_episodes.csv"
+            summary_csv = artifact_dir / "commands_summary.csv"
+            argv = evaluation_argv(params, csv_file=str(command_csv))
+            shell = shell_for_isaaclab(self.paths, argv)
+            log_file = self.paths.process_log_dir / f"{evaluation_id}.log"
+            started_at = datetime.now().isoformat(timespec="seconds")
+            record = {
+                "id": evaluation_id,
+                "source": "autopilot_evaluation",
+                "status": "running",
+                "created_at": started_at,
+                "updated_at": started_at,
+                "started_at": started_at,
+                "source_run_id": params.source_run_id,
+                "campaign_id": params.campaign_id,
+                "campaign_trial_id": params.campaign_trial_id,
+                "params": params.to_dict(),
+                "checkpoint": params.checkpoint,
+                "checkpoint_sha256": params.checkpoint_sha256,
+                "evaluation_profile": params.evaluation_profile,
+                "command_csv": str(command_csv),
+                "episode_csv": str(episode_csv),
+                "summary_csv": str(summary_csv),
+                "artifact_dir": str(artifact_dir),
+                "process_log": str(log_file),
+                "exit_file": str(self._exit_file_for_process(evaluation_id)),
+                "launch_phase": "prepared",
+                "launch_owner_token": launch_owner_token,
+                "launch_owner_pid": os.getpid(),
+                "launch_prepared_at": started_at,
+                "launch_receipt_file": str(launch_receipt_file),
+                "command": display_isaaclab_command(self.paths, argv),
+            }
+            self.history.add_run(record)
+            spawned = self._spawn_shell(
+                evaluation_id,
+                shell,
+                log_file,
+                inherited_fds=(lease_fd,),
+                launch_owner_token=launch_owner_token,
+                launch_receipt_file=launch_receipt_file,
+            )
+        except Exception as exc:
+            self._record_launch_failure(evaluation_id, exc)
+            self._release_gpu_lease(evaluation_id)
+            raise
+        try:
+            launch_spawned_at = datetime.now().isoformat(timespec="seconds")
+            self.history.update_run(
+                evaluation_id,
+                pid=spawned.proc.pid,
+                tmux_session=spawned.tmux_session,
+                attach_command=spawned.attach_command,
+                exit_file=spawned.exit_file or record["exit_file"],
+                launch_phase="spawned",
+                launch_spawned_at=launch_spawned_at,
+            )
+            self._register(
+                evaluation_id,
+                "evaluation",
+                spawned,
+                log_file,
+                started_at,
+                shell,
+                source_run_id=params.source_run_id,
+            )
+            self._start_gpu_monitor(
+                evaluation_id,
+                spawned.proc,
+                self._monitor_evaluation,
+                evaluation_id,
+                spawned.proc,
+                command_csv,
+                episode_csv,
+                summary_csv,
+            )
+        except Exception:
+            self._drop_gpu_lease_reference(evaluation_id)
+            raise
+        return {
+            **record,
+            "launch_phase": "spawned",
+            "launch_spawned_at": launch_spawned_at,
+            "pid": spawned.proc.pid,
+            "tmux_session": spawned.tmux_session,
+            "attach_command": spawned.attach_command,
+        }
 
     def _create_queued_training_run(self, params: TrainingParams) -> dict:
         self.paths.ensure_dirs()
         run_id = f"panel_{timestamp_id()}"
         queued_at = datetime.now().isoformat(timespec="seconds")
         physics_profile_file = self._write_training_physics_profile(run_id, params)
-        script_argv = training_argv(params, physics_profile_file=physics_profile_file)
+        reward_profile_file, reward_profile_sha256 = self._write_training_json_profile(
+            self.paths.reward_profile_file(run_id), params.reward_overrides
+        )
+        terrain_profile_file, terrain_profile_sha256 = self._write_training_json_profile(
+            self.paths.terrain_profile_file(run_id), params.terrain_overrides
+        )
+        params.reward_profile_file = reward_profile_file
+        params.reward_profile_sha256 = reward_profile_sha256
+        params.terrain_profile_file = terrain_profile_file
+        params.terrain_profile_sha256 = terrain_profile_sha256
+        script_argv = training_argv(
+            params,
+            physics_profile_file=physics_profile_file,
+            reward_profile_file=reward_profile_file,
+            reward_profile_sha256=reward_profile_sha256,
+            terrain_profile_file=terrain_profile_file,
+            terrain_profile_sha256=terrain_profile_sha256,
+        )
         log_file = self.paths.process_log_dir / f"{run_id}.log"
         record = {
             "id": run_id,
@@ -198,6 +534,7 @@ class ProcessRegistry:
             "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
+            "exit_file": str(self._exit_file_for_process(run_id)),
             "log_dir": None,
             "reward_preset_id": params.reward_preset_id,
             "reward_overrides": params.reward_overrides,
@@ -206,11 +543,18 @@ class ProcessRegistry:
             "physics_preset_id": params.physics_preset_id,
             "physics_overrides": params.physics_overrides,
             "physics_profile_file": physics_profile_file,
+            "reward_profile_file": reward_profile_file,
+            "reward_profile_sha256": reward_profile_sha256,
+            "terrain_profile_file": terrain_profile_file,
+            "terrain_profile_sha256": terrain_profile_sha256,
             "created_by": params.requester_id,
             "requester_label": params.requester_label,
             "display_name": params.display_name,
             "folder": params.folder,
             "client_request_id": params.client_request_id,
+            "client_request_fingerprint": self._training_request_fingerprint(params),
+            "campaign_id": params.campaign_id,
+            "campaign_trial_id": params.campaign_trial_id,
         }
         self.history.add_run(record)
         return record
@@ -228,13 +572,29 @@ class ProcessRegistry:
         run_id = run_id or f"panel_{timestamp_id()}"
         started_at_epoch = time.time()
         started_at = datetime.now().isoformat(timespec="seconds")
+        launch_owner_token = uuid.uuid4().hex
+        launch_receipt_file = self._launch_receipt_file_for_process(run_id)
         physics_profile_file = self._write_training_physics_profile(run_id, params)
-        script_argv = training_argv(params, physics_profile_file=physics_profile_file)
+        reward_profile_file, reward_profile_sha256 = self._write_training_json_profile(
+            self.paths.reward_profile_file(run_id), params.reward_overrides
+        )
+        terrain_profile_file, terrain_profile_sha256 = self._write_training_json_profile(
+            self.paths.terrain_profile_file(run_id), params.terrain_overrides
+        )
+        params.reward_profile_file = reward_profile_file
+        params.reward_profile_sha256 = reward_profile_sha256
+        params.terrain_profile_file = terrain_profile_file
+        params.terrain_profile_sha256 = terrain_profile_sha256
+        script_argv = training_argv(
+            params,
+            physics_profile_file=physics_profile_file,
+            reward_profile_file=reward_profile_file,
+            reward_profile_sha256=reward_profile_sha256,
+            terrain_profile_file=terrain_profile_file,
+            terrain_profile_sha256=terrain_profile_sha256,
+        )
         shell = shell_for_isaaclab(self.paths, script_argv)
         log_file = self.paths.process_log_dir / f"{run_id}.log"
-        # Write panel overrides immediately before spawning so train.py reads the right queued run settings.
-        self._write_reward_override(params.reward_overrides)
-        self._write_terrain_override(params.terrain_overrides)
         record = {
             "id": run_id,
             "source": "training_panel",
@@ -247,6 +607,12 @@ class ProcessRegistry:
             "git": git_provenance(self.paths.repo_root),
             "command": display_isaaclab_command(self.paths, script_argv),
             "process_log": str(log_file),
+            "exit_file": str(self._exit_file_for_process(run_id)),
+            "launch_phase": "prepared",
+            "launch_owner_token": launch_owner_token,
+            "launch_owner_pid": os.getpid(),
+            "launch_prepared_at": started_at,
+            "launch_receipt_file": str(launch_receipt_file),
             "log_dir": None,
             "reward_preset_id": params.reward_preset_id,
             "reward_overrides": params.reward_overrides,
@@ -255,34 +621,67 @@ class ProcessRegistry:
             "physics_preset_id": params.physics_preset_id,
             "physics_overrides": params.physics_overrides,
             "physics_profile_file": physics_profile_file,
+            "reward_profile_file": reward_profile_file,
+            "reward_profile_sha256": reward_profile_sha256,
+            "terrain_profile_file": terrain_profile_file,
+            "terrain_profile_sha256": terrain_profile_sha256,
             "created_by": params.requester_id,
             "requester_label": params.requester_label,
             "display_name": params.display_name,
             "folder": params.folder,
             "client_request_id": params.client_request_id,
+            "client_request_fingerprint": self._training_request_fingerprint(params),
+            "campaign_id": params.campaign_id,
+            "campaign_trial_id": params.campaign_trial_id,
         }
-        if existing_record:
-            self.history.update_run(run_id, **record)
-        else:
-            self.history.add_run(record)
-        spawned = self._spawn_shell(run_id, shell, log_file)
-        proc = spawned.proc
-        self.history.update_run(run_id, pid=proc.pid)
-        self.history.update_run(
+        lease_fd = self._acquire_gpu_lease(
             run_id,
-            tmux_session=spawned.tmux_session,
-            attach_command=spawned.attach_command,
-            exit_file=spawned.exit_file,
+            "training",
+            launch_owner_token=launch_owner_token,
         )
-        self._register(run_id, "training", spawned, log_file, started_at, shell)
-        thread = threading.Thread(
-            target=self._monitor_training,
-            args=(run_id, proc, started_at_epoch),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            if existing_record:
+                self.history.update_run(run_id, **record)
+            else:
+                self.history.add_run(record)
+            spawned = self._spawn_shell(
+                run_id,
+                shell,
+                log_file,
+                inherited_fds=(lease_fd,),
+                launch_owner_token=launch_owner_token,
+                launch_receipt_file=launch_receipt_file,
+            )
+        except Exception as exc:
+            self._record_launch_failure(run_id, exc)
+            self._release_gpu_lease(run_id)
+            raise
+        proc = spawned.proc
+        try:
+            launch_spawned_at = datetime.now().isoformat(timespec="seconds")
+            self.history.update_run(
+                run_id,
+                pid=proc.pid,
+                launch_phase="spawned",
+                launch_spawned_at=launch_spawned_at,
+            )
+            self.history.update_run(
+                run_id,
+                tmux_session=spawned.tmux_session,
+                attach_command=spawned.attach_command,
+                exit_file=spawned.exit_file or record["exit_file"],
+            )
+            self._register(run_id, "training", spawned, log_file, started_at, shell)
+            self._start_gpu_monitor(
+                run_id, proc, self._monitor_training, run_id, proc, started_at_epoch
+            )
+        except Exception:
+            self._drop_gpu_lease_reference(run_id)
+            raise
         return {
             **record,
+            "launch_phase": "spawned",
+            "launch_spawned_at": launch_spawned_at,
             "pid": proc.pid,
             "tmux_session": spawned.tmux_session,
             "attach_command": spawned.attach_command,
@@ -298,6 +697,8 @@ class ProcessRegistry:
 
     def start_next_queued_training(self) -> dict | None:
         with self._queue_lock:
+            if self._queued_training_timer is threading.current_thread():
+                self._queued_training_timer = None
             if self.running_isaac_processes():
                 return None
             queued = self._queued_training_runs()
@@ -314,6 +715,9 @@ class ProcessRegistry:
                     stored_params["spring_backend"] = resolve_spring_backend(run)
                 params = TrainingParams.from_dict(stored_params)
                 return self._start_training_run(params, run_id=str(run["id"]), existing_record=run)
+            except GpuHostLeaseBusy:
+                self._schedule_queued_training_start_locked(1.0)
+                return None
             except CudaPreflightError as exc:
                 self.history.update_run(
                     str(run.get("id") or ""),
@@ -386,6 +790,23 @@ class ProcessRegistry:
         )
         return str(written) if written else None
 
+    def _write_training_json_profile(self, path: Path, values: dict) -> tuple[str, str]:
+        """Materialize one immutable, content-verified input snapshot for a run."""
+
+        payload = json.dumps(values or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+        encoded = payload.encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            existing_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if existing_digest != digest:
+                raise ValueError(f"Refusing to replace immutable training profile: {path}")
+            return str(path), digest
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(encoded)
+        os.replace(temporary, path)
+        return str(path), digest
+
     def _write_process_physics_profile(self, process_id: str, run_id: str) -> str | None:
         run = self.history.get_run(run_id) or {}
         raw_log_dir = run.get("log_dir")
@@ -445,14 +866,40 @@ class ProcessRegistry:
             info = self._infos.get(run_id)
         if not proc and run_id.startswith(EXTERNAL_ID_PREFIXES):
             return self._stop_external_group(run_id)
+        if not proc:
+            recovered = self._recovered_campaign_stop_target(run_id)
+            if recovered is None:
+                return False
+            process_group, tmux_session, launch_owner_token = recovered
+            try:
+                if not tmux_session or not self._send_tmux_interrupt(tmux_session):
+                    os.killpg(process_group, signal.SIGINT)
+            except ProcessLookupError:
+                return False
+            self.history.update_run(run_id, status="stopping")
+            threading.Thread(
+                target=self._force_stop_recovered_campaign_after_grace,
+                args=(run_id, process_group, tmux_session, launch_owner_token),
+                daemon=True,
+            ).start()
+            return True
         if not proc or proc.poll() is not None:
             return False
-        process_group = os.getpgid(proc.pid)
+        try:
+            process_group = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            return False
         if info and info.tmux_session:
             if not self._send_tmux_interrupt(info.tmux_session):
-                os.killpg(process_group, signal.SIGINT)
+                try:
+                    os.killpg(process_group, signal.SIGINT)
+                except ProcessLookupError:
+                    return False
         else:
-            os.killpg(process_group, signal.SIGINT)
+            try:
+                os.killpg(process_group, signal.SIGINT)
+            except ProcessLookupError:
+                return False
         if info and info.kind == "mujoco" and info.source_run_id:
             self.history.update_run(info.source_run_id, mujoco_playback_status="stopping")
         self.history.update_run(run_id, status="stopping")
@@ -462,6 +909,137 @@ class ProcessRegistry:
             daemon=True,
         ).start()
         return True
+
+    def _recovered_campaign_stop_target(
+        self,
+        run_id: str,
+    ) -> tuple[int, str | None, str] | None:
+        """Resolve an exact campaign child without trusting a reusable PID alone."""
+
+        run = self.history.get_run(run_id)
+        if not run:
+            return None
+        params = run.get("params") if isinstance(run.get("params"), dict) else {}
+        if not (run.get("campaign_id") or params.get("campaign_id")):
+            return None
+        source = str(run.get("source") or "")
+        if source not in {"training_panel", "autopilot_evaluation"}:
+            return None
+        if str(run.get("status") or "").lower() not in {"running", "stopping"}:
+            return None
+        run = self.reconcile_campaign_process(run_id) or run
+        if str(run.get("status") or "").lower() not in {"running", "stopping"}:
+            return None
+        if str(run.get("launch_phase") or "").lower() != "spawned":
+            return None
+        receipt = self._read_launch_receipt(run)
+        if receipt is None or receipt.get("process_group") is None:
+            return None
+        if not self._launch_lease_matches(run):
+            return None
+        if not self._launch_receipt_process_is_live(run, receipt):
+            return None
+
+        expected_log = self.paths.process_log_dir / f"{run_id}.log"
+        process_log = Path(str(run.get("process_log") or ""))
+        try:
+            if process_log != expected_log or process_log.resolve(strict=True) != expected_log.resolve(strict=True):
+                return None
+        except OSError:
+            return None
+        observed_command = self._command_from_process_log(process_log)
+        recorded_command = str(run.get("command") or "")
+        entry_point = (
+            "scripts/rsl_rl/eval_command_sweep.py"
+            if source == "autopilot_evaluation"
+            else "scripts/rsl_rl/train.py"
+        )
+        if params.get("training_route") == "sensor_v2_full":
+            entry_point = "scripts/rsl_rl/train_sensor_v2_pipeline.py"
+        if (
+            not observed_command
+            or entry_point not in recorded_command
+            or entry_point not in observed_command
+            or recorded_command not in observed_command
+        ):
+            return None
+
+        receipt_pid = int(receipt["pid"])
+        process_group = int(receipt["process_group"])
+        try:
+            if os.getpgid(receipt_pid) != process_group:
+                return None
+        except ProcessLookupError:
+            return None
+        recorded_launch_pid = run.get("launch_pid")
+        if recorded_launch_pid not in (None, ""):
+            try:
+                if int(recorded_launch_pid) != receipt_pid:
+                    return None
+            except (TypeError, ValueError):
+                return None
+        recorded_group = run.get("process_group")
+        if recorded_group not in (None, ""):
+            try:
+                if int(recorded_group) != process_group:
+                    return None
+            except (TypeError, ValueError):
+                return None
+
+        tmux_session = str(run.get("tmux_session") or "") or None
+        discovered_session = self._tmux_session_for_process_group(process_group)
+        if tmux_session or discovered_session:
+            expected_session = self._safe_tmux_session(run_id)
+            if tmux_session and tmux_session != expected_session:
+                return None
+            if discovered_session != expected_session:
+                return None
+            if self._tmux_process_group(expected_session) != process_group:
+                return None
+            tmux_session = expected_session
+        else:
+            try:
+                if int(run.get("pid")) != receipt_pid or process_group != receipt_pid:
+                    return None
+            except (TypeError, ValueError):
+                return None
+
+        self.history.update_run(
+            run_id,
+            process_group=process_group,
+            launch_pid=receipt_pid,
+            tmux_session=tmux_session,
+        )
+        return process_group, tmux_session, str(run["launch_owner_token"])
+
+    def _force_stop_recovered_campaign_after_grace(
+        self,
+        run_id: str,
+        process_group: int,
+        tmux_session: str | None,
+        launch_owner_token: str,
+    ) -> None:
+        """Escalate only while the same token-bound child still owns the group."""
+
+        time.sleep(5)
+        target = self._recovered_campaign_stop_target(run_id)
+        if target != (process_group, tmux_session, launch_owner_token):
+            return
+        if tmux_session:
+            self._kill_tmux_session(tmux_session)
+            time.sleep(2)
+            target = self._recovered_campaign_stop_target(run_id)
+            if target != (process_group, tmux_session, launch_owner_token):
+                return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process_group, sig)
+            except ProcessLookupError:
+                return
+            time.sleep(3)
+            target = self._recovered_campaign_stop_target(run_id)
+            if target != (process_group, tmux_session, launch_owner_token):
+                return
 
     def start_tensorboard(
         self,
@@ -544,18 +1122,28 @@ class ProcessRegistry:
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{play_id}.log"
-        spawned = self._spawn_shell(play_id, shell, log_file)
+        lease_fd = self._acquire_gpu_lease(play_id, "play")
+        try:
+            spawned = self._spawn_shell(play_id, shell, log_file, inherited_fds=(lease_fd,))
+        except Exception:
+            self._release_gpu_lease(play_id)
+            raise
         proc = spawned.proc
-        self._register(
-            play_id,
-            "play",
-            spawned,
-            log_file,
-            datetime.now().isoformat(timespec="seconds"),
-            shell,
-            source_run_id=run_id,
-        )
-        self._raise_if_immediate_exit(proc, play_id, "Play", wait_seconds=1.0)
+        try:
+            self._register(
+                play_id,
+                "play",
+                spawned,
+                log_file,
+                datetime.now().isoformat(timespec="seconds"),
+                shell,
+                source_run_id=run_id,
+            )
+            self._start_gpu_monitor(play_id, proc, self._monitor_play, play_id, proc)
+            self._raise_if_immediate_exit(proc, play_id, "Play", wait_seconds=1.0)
+        except Exception:
+            self._drop_gpu_lease_reference(play_id)
+            raise
         return {
             "id": play_id,
             "source_run_id": run_id,
@@ -607,39 +1195,45 @@ class ProcessRegistry:
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{video_id}.log"
-        spawned = self._spawn_shell(video_id, shell, log_file)
+        lease_fd = self._acquire_gpu_lease(video_id, "video")
+        try:
+            spawned = self._spawn_shell(video_id, shell, log_file, inherited_fds=(lease_fd,))
+        except Exception:
+            self._release_gpu_lease(video_id)
+            raise
         proc = spawned.proc
-        self._register(
-            video_id,
-            "video",
-            spawned,
-            log_file,
-            datetime.now().isoformat(timespec="seconds"),
-            shell,
-            source_run_id=run_id,
-        )
-        self.history.update_run(
-            run_id,
-            video_status="recording",
-            video_process_id=video_id,
-            video_pid=proc.pid,
-            video_process_log=str(log_file),
-            video_command=shell,
-            video_process_attach_command=spawned.attach_command,
-            video_tmux_session=spawned.tmux_session,
-            video_exit_file=spawned.exit_file,
-            video_preset=params.preset,
-            video_params=params.to_dict(),
-            video_length=params.length,
-            video_checkpoint=str(checkpoint),
-            video_checkpoint_iteration=self._checkpoint_iteration(checkpoint),
-        )
-        thread = threading.Thread(
-            target=self._monitor_video,
-            args=(run_id, video_id, proc),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self._register(
+                video_id,
+                "video",
+                spawned,
+                log_file,
+                datetime.now().isoformat(timespec="seconds"),
+                shell,
+                source_run_id=run_id,
+            )
+            self.history.update_run(
+                run_id,
+                video_status="recording",
+                video_process_id=video_id,
+                video_pid=proc.pid,
+                video_process_log=str(log_file),
+                video_command=shell,
+                video_process_attach_command=spawned.attach_command,
+                video_tmux_session=spawned.tmux_session,
+                video_exit_file=spawned.exit_file,
+                video_preset=params.preset,
+                video_params=params.to_dict(),
+                video_length=params.length,
+                video_checkpoint=str(checkpoint),
+                video_checkpoint_iteration=self._checkpoint_iteration(checkpoint),
+            )
+            self._start_gpu_monitor(
+                video_id, proc, self._monitor_video, run_id, video_id, proc
+            )
+        except Exception:
+            self._drop_gpu_lease_reference(video_id)
+            raise
         return {
             "id": video_id,
             "source_run_id": run_id,
@@ -671,35 +1265,41 @@ class ProcessRegistry:
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{onnx_id}.log"
-        spawned = self._spawn_shell(onnx_id, shell, log_file)
+        lease_fd = self._acquire_gpu_lease(onnx_id, "onnx")
+        try:
+            spawned = self._spawn_shell(onnx_id, shell, log_file, inherited_fds=(lease_fd,))
+        except Exception:
+            self._release_gpu_lease(onnx_id)
+            raise
         proc = spawned.proc
-        self._register(
-            onnx_id,
-            "onnx",
-            spawned,
-            log_file,
-            datetime.now().isoformat(timespec="seconds"),
-            shell,
-            source_run_id=run_id,
-        )
-        self.history.update_run(
-            run_id,
-            onnx_status="exporting",
-            onnx_process_id=onnx_id,
-            onnx_pid=proc.pid,
-            onnx_process_log=str(log_file),
-            onnx_command=shell,
-            onnx_process_attach_command=spawned.attach_command,
-            onnx_tmux_session=spawned.tmux_session,
-            onnx_exit_file=spawned.exit_file,
-            onnx_error=None,
-        )
-        thread = threading.Thread(
-            target=self._monitor_onnx,
-            args=(run_id, onnx_id, proc),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self._register(
+                onnx_id,
+                "onnx",
+                spawned,
+                log_file,
+                datetime.now().isoformat(timespec="seconds"),
+                shell,
+                source_run_id=run_id,
+            )
+            self.history.update_run(
+                run_id,
+                onnx_status="exporting",
+                onnx_process_id=onnx_id,
+                onnx_pid=proc.pid,
+                onnx_process_log=str(log_file),
+                onnx_command=shell,
+                onnx_process_attach_command=spawned.attach_command,
+                onnx_tmux_session=spawned.tmux_session,
+                onnx_exit_file=spawned.exit_file,
+                onnx_error=None,
+            )
+            self._start_gpu_monitor(
+                onnx_id, proc, self._monitor_onnx, run_id, onnx_id, proc
+            )
+        except Exception:
+            self._drop_gpu_lease_reference(onnx_id)
+            raise
         return {
             "id": onnx_id,
             "source_run_id": run_id,
@@ -757,45 +1357,51 @@ class ProcessRegistry:
             ]
         )
         log_file = self.paths.process_log_dir / f"{deploy_id}.log"
-        spawned = self._spawn_shell(deploy_id, shell, log_file)
+        lease_fd = self._acquire_gpu_lease(deploy_id, "deploy")
+        try:
+            spawned = self._spawn_shell(deploy_id, shell, log_file, inherited_fds=(lease_fd,))
+        except Exception:
+            self._release_gpu_lease(deploy_id)
+            raise
         proc = spawned.proc
-        self._register(
-            deploy_id,
-            "deploy",
-            spawned,
-            log_file,
-            datetime.now().isoformat(timespec="seconds"),
-            shell,
-            source_run_id=run_id,
-        )
-        self.history.update_run(
-            run_id,
-            deploy_status="running",
-            deploy_process_id=deploy_id,
-            deploy_pid=proc.pid,
-            deploy_process_log=str(log_file),
-            deploy_command=shell,
-            deploy_process_attach_command=spawned.attach_command,
-            deploy_tmux_session=spawned.tmux_session,
-            deploy_exit_file=spawned.exit_file,
-            deploy_error=None,
-            deploy_options={
-                "export_first": bool(export_first),
-                "device": device,
-                "include_ros_mock": bool(include_ros_mock),
-                "include_mujoco": bool(include_mujoco),
-                "use_cuda": bool(use_cuda),
-                "use_tensorrt": bool(use_tensorrt),
-                "mujoco_model_path": str(mujoco_model_path or ""),
-                "mujoco_only": bool(mujoco_only),
-            },
-        )
-        thread = threading.Thread(
-            target=self._monitor_deploy,
-            args=(run_id, deploy_id, proc),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self._register(
+                deploy_id,
+                "deploy",
+                spawned,
+                log_file,
+                datetime.now().isoformat(timespec="seconds"),
+                shell,
+                source_run_id=run_id,
+            )
+            self.history.update_run(
+                run_id,
+                deploy_status="running",
+                deploy_process_id=deploy_id,
+                deploy_pid=proc.pid,
+                deploy_process_log=str(log_file),
+                deploy_command=shell,
+                deploy_process_attach_command=spawned.attach_command,
+                deploy_tmux_session=spawned.tmux_session,
+                deploy_exit_file=spawned.exit_file,
+                deploy_error=None,
+                deploy_options={
+                    "export_first": bool(export_first),
+                    "device": device,
+                    "include_ros_mock": bool(include_ros_mock),
+                    "include_mujoco": bool(include_mujoco),
+                    "use_cuda": bool(use_cuda),
+                    "use_tensorrt": bool(use_tensorrt),
+                    "mujoco_model_path": str(mujoco_model_path or ""),
+                    "mujoco_only": bool(mujoco_only),
+                },
+            )
+            self._start_gpu_monitor(
+                deploy_id, proc, self._monitor_deploy, run_id, deploy_id, proc
+            )
+        except Exception:
+            self._drop_gpu_lease_reference(deploy_id)
+            raise
         return {
             "id": deploy_id,
             "source_run_id": run_id,
@@ -1097,6 +1703,14 @@ class ProcessRegistry:
         processes = self.list_processes()
         self._repair_active_training_history(processes)
         self._repair_panel_log_history()
+        for run in self.history.list_runs():
+            params = run.get("params") if isinstance(run.get("params"), dict) else {}
+            if (
+                run.get("source") == "autopilot_evaluation"
+                and str(run.get("status") or "").lower() in {"running", "stopping"}
+                and (run.get("campaign_id") or params.get("campaign_id"))
+            ):
+                self.reconcile_campaign_process(str(run["id"]))
         known_process_runs = set()
         for process in processes:
             if process.get("kind") != "training":
@@ -1109,6 +1723,10 @@ class ProcessRegistry:
             if run.get("source") != "training_panel":
                 continue
             if run.get("status") not in ("running", "stopping"):
+                continue
+            params = run.get("params") if isinstance(run.get("params"), dict) else {}
+            if run.get("campaign_id") or params.get("campaign_id"):
+                self.reconcile_campaign_process(str(run["id"]))
                 continue
             if run.get("log_dir"):
                 self.history.update_run(run["id"], log_dir=run["log_dir"])
@@ -1130,6 +1748,239 @@ class ProcessRegistry:
             if run.get("id") not in known_process_runs:
                 self.history.update_run(run["id"], status="interrupted")
         self.start_next_queued_training()
+
+    @staticmethod
+    def _campaign_training_completion_fields(
+        run: dict,
+        log_dir: str | Path | None,
+        returncode: int,
+    ) -> dict[str, object]:
+        fields: dict[str, object] = {
+            "status": "completed" if returncode == 0 else "failed"
+        }
+        params = run.get("params") if isinstance(run.get("params"), dict) else {}
+        campaign_owned = bool(params.get("campaign_id") or run.get("campaign_id"))
+        if not campaign_owned or returncode != 0:
+            return fields
+        try:
+            max_iterations = int(params["max_iterations"])
+            if max_iterations < 1 or not log_dir:
+                raise ValueError
+            expected_iteration = max_iterations - 1
+            output_checkpoint = (
+                Path(str(log_dir)).resolve() / f"model_{expected_iteration}.pt"
+            )
+            if not output_checkpoint.is_file():
+                raise FileNotFoundError(output_checkpoint)
+            fields.update(
+                output_checkpoint_path=str(output_checkpoint),
+                output_checkpoint_iteration=expected_iteration,
+                output_checkpoint_sha256=hashlib.sha256(
+                    output_checkpoint.read_bytes()
+                ).hexdigest(),
+            )
+        except (KeyError, TypeError, ValueError, OSError):
+            fields.update(
+                status="failed",
+                failure_class="evidence",
+                failure_reason=(
+                    "campaign training did not produce the exact final checkpoint "
+                    "for its reviewed iteration cap"
+                ),
+            )
+        return fields
+
+    def reconcile_campaign_process(self, process_id: str) -> dict | None:
+        """Finalize one monitor-less campaign process only when its exit file is durable."""
+
+        run = self.history.get_run(process_id)
+        if not run or not (run.get("campaign_id") or (run.get("params") or {}).get("campaign_id")):
+            return run
+        if str(run.get("status") or "").lower() not in {"running", "stopping"}:
+            return run
+        exit_file_value = run.get("exit_file")
+        if not exit_file_value:
+            return run
+        exit_file = Path(str(exit_file_value))
+        returncode = self._exit_code_from_path(exit_file)
+        if returncode is None:
+            return self._reconcile_incomplete_launch(run)
+        completed_at = self._completed_at_from_exit_file(exit_file) or datetime.now().isoformat(
+            timespec="seconds"
+        )
+        if run.get("source") == "autopilot_evaluation":
+            self._finalize_evaluation_record(
+                process_id,
+                returncode,
+                Path(str(run.get("command_csv") or "")),
+                Path(str(run.get("episode_csv") or "")),
+                Path(str(run.get("summary_csv") or "")),
+                completed_at=completed_at,
+            )
+        elif run.get("source") == "training_panel":
+            log_dir = run.get("log_dir") or self._log_dir_from_process_log(process_id)
+            if not log_dir and returncode == 0:
+                log_dir = self._completed_log_for_run(run, allow_time_fallback=False)
+            completion_fields = self._campaign_training_completion_fields(
+                run, log_dir, returncode
+            )
+            completion_fields.setdefault(
+                "failure_reason",
+                None if returncode == 0 else f"training process exited with status {returncode}",
+            )
+            self.history.update_run(
+                process_id,
+                returncode=returncode,
+                log_dir=log_dir,
+                completed_at=completed_at,
+                launch_phase="finished",
+                **completion_fields,
+            )
+            self._refresh_tensorboard_summary(process_id, str(log_dir) if log_dir else None)
+        else:
+            return run
+        self._mark_isaac_process_finished()
+        self.start_next_queued_training()
+        return self.history.get_run(process_id)
+
+    def _reconcile_incomplete_launch(self, run: dict) -> dict:
+        """Fail only an abandoned, token-bound launch intent after its grace window."""
+
+        phase = str(run.get("launch_phase") or "").lower()
+        if phase not in {"prepared", "spawned"}:
+            return run
+        receipt = self._read_launch_receipt(run)
+        if receipt:
+            updates: dict[str, object] = {}
+            if run.get("launch_pid") in (None, ""):
+                updates["launch_pid"] = receipt["pid"]
+            if receipt.get("process_group") is not None and run.get("process_group") in (None, ""):
+                updates["process_group"] = receipt["process_group"]
+            if phase == "prepared":
+                updates.update(
+                    launch_phase="spawned",
+                    launch_spawned_at=(
+                        self._completed_at_from_exit_file(
+                            Path(str(run["launch_receipt_file"]))
+                        )
+                        or datetime.now().isoformat(timespec="seconds")
+                    ),
+                    pid=receipt["pid"],
+                )
+            if updates:
+                self.history.update_run(str(run["id"]), **updates)
+                run = self.history.get_run(str(run["id"])) or run
+        if self._launch_lease_matches(run) or (
+            receipt is not None and self._launch_receipt_process_is_live(run, receipt)
+        ):
+            return run
+        grace_started_at = (
+            run.get("launch_spawned_at")
+            or run.get("launch_prepared_at")
+            or run.get("started_at")
+            or run.get("created_at")
+        )
+        if not self._launch_grace_elapsed(grace_started_at):
+            return run
+        kind = "evaluation" if run.get("source") == "autopilot_evaluation" else "training"
+        completed_at = datetime.now().isoformat(timespec="seconds")
+        self.history.update_run(
+            str(run["id"]),
+            status="failed",
+            returncode=None,
+            completed_at=completed_at,
+            launch_phase="failed",
+            failure_class="infrastructure",
+            failure_kind="infrastructure",
+            failure_reason=(
+                f"{kind} process launch temporarily unavailable: "
+                "the launch owner stopped before a live child or exit receipt was recorded"
+            ),
+        )
+        self._mark_isaac_process_finished()
+        self.start_next_queued_training()
+        return self.history.get_run(str(run["id"])) or run
+
+    def _record_launch_failure(self, process_id: str, error: Exception) -> None:
+        run = self.history.get_run(process_id)
+        if not run:
+            return
+        kind = "evaluation" if run.get("source") == "autopilot_evaluation" else "training"
+        self.history.update_run(
+            process_id,
+            status="failed",
+            returncode=None,
+            completed_at=datetime.now().isoformat(timespec="seconds"),
+            launch_phase="failed",
+            failure_class="infrastructure",
+            failure_kind="infrastructure",
+            failure_reason=f"{kind} process launch temporarily unavailable: {error}",
+        )
+
+    def _launch_grace_elapsed(self, value: object) -> bool:
+        if self.launch_grace_seconds <= 0:
+            return True
+        try:
+            started_at = datetime.fromisoformat(str(value)).timestamp()
+        except (TypeError, ValueError):
+            return True
+        return time.time() - started_at >= self.launch_grace_seconds
+
+    def _launch_lease_matches(self, run: dict) -> bool:
+        token = str(run.get("launch_owner_token") or "")
+        if not token or not self._gpu_lease_file.exists():
+            return False
+        fd = os.open(self._gpu_lease_file, os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                owner = self._read_gpu_lease_owner()
+                return (
+                    str(owner.get("process_id") or "") == str(run.get("id") or "")
+                    and str(owner.get("launch_owner_token") or "") == token
+                )
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                return False
+        finally:
+            os.close(fd)
+
+    def _read_launch_receipt(self, run: dict) -> dict | None:
+        value = run.get("launch_receipt_file")
+        token = str(run.get("launch_owner_token") or "")
+        if not value or not token:
+            return None
+        path = Path(str(value))
+        if path != self._launch_receipt_file_for_process(str(run.get("id") or "")):
+            return None
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            pid = int(receipt.get("pid"))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError, AttributeError):
+            return None
+        if receipt.get("schema_version") != 1 or receipt.get("token") != token or pid <= 0:
+            return None
+        raw_process_group = receipt.get("process_group")
+        try:
+            process_group = int(raw_process_group) if raw_process_group is not None else None
+        except (TypeError, ValueError):
+            return None
+        if process_group is not None and process_group <= 0:
+            return None
+        return {"pid": pid, "process_group": process_group, "token": token}
+
+    @staticmethod
+    def _launch_receipt_process_is_live(run: dict, receipt: dict) -> bool:
+        pid = int(receipt["pid"])
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        return (
+            str(receipt["token"]).encode("utf-8") in command
+            and str(run.get("launch_receipt_file") or "").encode("utf-8") in command
+        )
 
     def _repair_active_training_history(self, processes: list[dict]) -> None:
         """Keep history records useful even if metadata sync left a live run as a stub."""
@@ -2025,12 +2876,57 @@ class ProcessRegistry:
                 continue
         return None
 
-    def _spawn_shell(self, run_id: str, shell: str, log_file: Path) -> SpawnedProcess:
+    def _spawn_shell(
+        self,
+        run_id: str,
+        shell: str,
+        log_file: Path,
+        *,
+        inherited_fds: tuple[int, ...] = (),
+        launch_owner_token: str | None = None,
+        launch_receipt_file: Path | None = None,
+    ) -> SpawnedProcess:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         tmux = shutil.which("tmux")
         if tmux:
-            return self._spawn_tmux(run_id, shell, log_file, tmux)
+            return self._spawn_tmux(
+                run_id,
+                shell,
+                log_file,
+                tmux,
+                inherited_fds=inherited_fds,
+                launch_owner_token=launch_owner_token,
+                launch_receipt_file=launch_receipt_file,
+            )
 
+        exit_file = self._exit_file_for_process(run_id)
+        exit_file.unlink(missing_ok=True)
+        launch_commands = self._launch_receipt_commands(
+            launch_owner_token,
+            launch_receipt_file,
+        )
+        receipt_shell = "\n".join(
+            [
+                "set +e",
+                "umask 077",
+                *launch_commands,
+                f"panel_exit_file={shlex.quote(str(exit_file))}",
+                f"panel_exit_tmp={shlex.quote(str(exit_file) + '.tmp.')}$$",
+                "write_panel_exit_receipt() {",
+                "  panel_status=$1",
+                "  trap - EXIT HUP INT TERM",
+                "  printf '%s\\n' \"$panel_status\" > \"$panel_exit_tmp\"",
+                "  mv -f -- \"$panel_exit_tmp\" \"$panel_exit_file\"",
+                "  exit \"$panel_status\"",
+                "}",
+                "trap 'write_panel_exit_receipt $?' EXIT",
+                "trap 'write_panel_exit_receipt 129' HUP",
+                "trap 'write_panel_exit_receipt 130' INT",
+                "trap 'write_panel_exit_receipt 143' TERM",
+                f"bash -lc {shlex.quote(shell)}",
+                "exit $?",
+            ]
+        )
         log_handle = log_file.open("w", encoding="utf-8")
         try:
             log_handle.write("$ bash -lc <<'PANEL_COMMAND'\n")
@@ -2038,25 +2934,68 @@ class ProcessRegistry:
             log_handle.write("\nPANEL_COMMAND\n\n")
             log_handle.flush()
             proc = subprocess.Popen(
-                ["bash", "-lc", shell],
+                ["bash", "-lc", receipt_shell],
                 cwd=self.paths.repo_root,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
+                pass_fds=inherited_fds,
             )
         finally:
             log_handle.close()
-        return SpawnedProcess(proc=proc)
+        return SpawnedProcess(proc=proc, exit_file=str(exit_file))
 
-    def _spawn_tmux(self, run_id: str, shell: str, log_file: Path, tmux: str) -> SpawnedProcess:
+    def _exit_file_for_process(self, run_id: str) -> Path:
+        return self.paths.process_log_dir / f"{run_id}.exit"
+
+    def _launch_receipt_file_for_process(self, run_id: str) -> Path:
+        return self.paths.process_log_dir / f"{run_id}.launch.json"
+
+    @staticmethod
+    def _launch_receipt_commands(
+        launch_owner_token: str | None,
+        launch_receipt_file: Path | None,
+    ) -> list[str]:
+        if not launch_owner_token or launch_receipt_file is None:
+            return []
+        launch_receipt_file.unlink(missing_ok=True)
+        return [
+            f"panel_launch_file={shlex.quote(str(launch_receipt_file))}",
+            f"panel_launch_tmp={shlex.quote(str(launch_receipt_file) + '.tmp.')}$$",
+            f"panel_launch_token={shlex.quote(launch_owner_token)}",
+            'panel_launch_pgid=$(ps -o pgid= -p "$$" | tr -d "[:space:]")',
+            "printf '{\"schema_version\":1,\"token\":\"%s\",\"pid\":%s,"
+            "\"process_group\":%s}\\n' "
+            '"$panel_launch_token" "$$" "$panel_launch_pgid" > "$panel_launch_tmp"',
+            'mv -f -- "$panel_launch_tmp" "$panel_launch_file"',
+        ]
+
+    def _spawn_tmux(
+        self,
+        run_id: str,
+        shell: str,
+        log_file: Path,
+        tmux: str,
+        *,
+        inherited_fds: tuple[int, ...] = (),
+        launch_owner_token: str | None = None,
+        launch_receipt_file: Path | None = None,
+    ) -> SpawnedProcess:
         session = self._safe_tmux_session(run_id)
         done_signal = f"done_{session}"
-        exit_file = self.paths.process_log_dir / f"{run_id}.exit"
+        exit_file = self._exit_file_for_process(run_id)
+        exit_file.unlink(missing_ok=True)
+        launch_commands = self._launch_receipt_commands(
+            launch_owner_token,
+            launch_receipt_file,
+        )
         attach_command = f"tmux attach -t {shlex.quote(session)}"
         log_file.write_text("", encoding="utf-8")
         inner = "\n".join(
             [
                 "set +e",
+                "umask 077",
+                *launch_commands,
                 f"exec > >(tee -a {shlex.quote(str(log_file))}) 2>&1",
                 "echo \"$ bash -lc <<'PANEL_COMMAND'\"",
                 "cat <<'PANEL_COMMAND'",
@@ -2086,6 +3025,7 @@ class ProcessRegistry:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=inherited_fds,
         )
         return SpawnedProcess(
             proc=proc,
@@ -2280,15 +3220,29 @@ class ProcessRegistry:
             time.sleep(log_poll_interval)
 
         returncode = proc.wait()
+        self._release_gpu_lease(run_id)
         self._mark_isaac_process_finished()
         status = "completed" if returncode == 0 else "failed"
         pipeline_result = self._sensor_v2_pipeline_result(run_id)
         if pipeline_result is not None:
             log_dir = pipeline_result["ppo_log_dir"]
+        run_before_completion = self.history.get_run(run_id) or {}
+        run_params = (
+            run_before_completion.get("params")
+            if isinstance(run_before_completion.get("params"), dict)
+            else {}
+        )
+        campaign_owned_before_completion = bool(
+            run_params.get("campaign_id") or run_before_completion.get("campaign_id")
+        )
         if not log_dir:
             log_dir = self._log_dir_from_process_log(run_id)
-            if not log_dir and returncode == 0:
+            if not log_dir and returncode == 0 and not campaign_owned_before_completion:
                 log_dir = self.history.find_latest_log_after(started_at_epoch)
+        completion_artifact = self._campaign_training_completion_fields(
+            run_before_completion, log_dir, returncode
+        )
+        status = str(completion_artifact.pop("status"))
         completed_at = datetime.now().isoformat(timespec="seconds")
         self.history.update_run(
             run_id,
@@ -2296,16 +3250,19 @@ class ProcessRegistry:
             returncode=returncode,
             log_dir=log_dir,
             completed_at=completed_at,
+            launch_phase="finished",
             distillation_pipeline=pipeline_result,
+            **completion_artifact,
         )
         self._refresh_tensorboard_summary(run_id, log_dir)
 
         # Record video when: training succeeded normally, OR convergence was detected and
         # auto_record_video was requested (even if training was stopped early).
         run = self.history.get_run(run_id) or {}
+        campaign_owned = bool((run.get("params") or {}).get("campaign_id") or run.get("campaign_id"))
         force_video = bool(run.get("queue_video_on_completion")) and convergence_detected
         video_started = False
-        if (returncode == 0 or force_video) and log_dir:
+        if not campaign_owned and (returncode == 0 or force_video) and log_dir:
             checkpoint = latest_checkpoint(Path(log_dir))
             if not checkpoint:
                 self.history.update_run(run_id, video_status="missing_checkpoint")
@@ -2326,6 +3283,91 @@ class ProcessRegistry:
             pass  # no log dir found — nothing to record
         if not video_started:
             self.start_next_queued_training()
+
+    def _monitor_evaluation(
+        self,
+        evaluation_id: str,
+        proc: subprocess.Popen,
+        command_csv: Path,
+        episode_csv: Path,
+        summary_csv: Path,
+    ) -> None:
+        returncode = proc.wait()
+        self._release_gpu_lease(evaluation_id)
+        self._mark_isaac_process_finished()
+        self._finalize_evaluation_record(
+            evaluation_id,
+            returncode,
+            command_csv,
+            episode_csv,
+            summary_csv,
+            completed_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        self.start_next_queued_training()
+
+    def _finalize_evaluation_record(
+        self,
+        evaluation_id: str,
+        returncode: int,
+        command_csv: Path,
+        episode_csv: Path,
+        summary_csv: Path,
+        *,
+        completed_at: str,
+    ) -> None:
+        failure_reason = None
+        command_rows: list[dict] = []
+        episode_rows: list[dict] = []
+        summary_metrics: dict[str, str] = {}
+        if returncode == 0 and (
+            not command_csv.is_file() or not episode_csv.is_file() or not summary_csv.is_file()
+        ):
+            failure_reason = "evaluation finished without command, episode, and summary CSV artifacts"
+        if returncode == 0 and failure_reason is None:
+            try:
+                with command_csv.open(newline="", encoding="utf-8") as handle:
+                    command_rows = list(csv.DictReader(handle))
+                with episode_csv.open(newline="", encoding="utf-8") as handle:
+                    episode_rows = list(csv.DictReader(handle))
+                with summary_csv.open(newline="", encoding="utf-8") as handle:
+                    summary_metrics = {
+                        str(row.get("metric") or ""): str(row.get("value") or "")
+                        for row in csv.DictReader(handle)
+                        if row.get("metric")
+                    }
+                if not command_rows or not episode_rows or not summary_metrics:
+                    failure_reason = "evaluation artifacts were empty"
+            except (OSError, csv.Error, UnicodeError) as exc:
+                failure_reason = f"malformed evaluation evidence: {exc}"
+        if returncode != 0:
+            failure_reason = f"evaluation process exited with status {returncode}"
+        status = "completed" if failure_reason is None else "failed"
+        self.history.update_run(
+            evaluation_id,
+            status=status,
+            returncode=returncode,
+            completed_at=completed_at,
+            launch_phase="finished",
+            failure_reason=failure_reason,
+            command_csv_sha256=(
+                hashlib.sha256(command_csv.read_bytes()).hexdigest() if command_csv.is_file() else None
+            ),
+            episode_csv_sha256=(
+                hashlib.sha256(episode_csv.read_bytes()).hexdigest() if episode_csv.is_file() else None
+            ),
+            summary_csv_sha256=(
+                hashlib.sha256(summary_csv.read_bytes()).hexdigest() if summary_csv.is_file() else None
+            ),
+            evaluation_command_count=len(command_rows),
+            evaluation_episode_count=len(episode_rows),
+            evaluation_summary=summary_metrics,
+        )
+
+    def _monitor_play(self, play_id: str, proc: subprocess.Popen) -> None:
+        proc.wait()
+        self._release_gpu_lease(play_id)
+        self._mark_isaac_process_finished()
+        self.start_next_queued_training()
 
     def _refresh_tensorboard_summary(self, run_id: str, log_dir: str | None) -> None:
         if not log_dir:
@@ -2352,6 +3394,7 @@ class ProcessRegistry:
 
     def _monitor_video(self, source_run_id: str, video_id: str, proc: subprocess.Popen) -> None:
         returncode = proc.wait()
+        self._release_gpu_lease(video_id)
         self._mark_isaac_process_finished()
         run = self.history.get_run(source_run_id) or {}
         log_dir = Path(run["log_dir"]) if run.get("log_dir") else None
@@ -2396,6 +3439,7 @@ class ProcessRegistry:
 
     def _monitor_onnx(self, source_run_id: str, onnx_id: str, proc: subprocess.Popen) -> None:
         returncode = proc.wait()
+        self._release_gpu_lease(onnx_id)
         self._mark_isaac_process_finished()
         run = self.history.get_run(source_run_id) or {}
         log_dir = Path(run["log_dir"]) if run.get("log_dir") else None
@@ -2413,6 +3457,7 @@ class ProcessRegistry:
 
     def _monitor_deploy(self, source_run_id: str, deploy_id: str, proc: subprocess.Popen) -> None:
         returncode = proc.wait()
+        self._release_gpu_lease(deploy_id)
         self._mark_isaac_process_finished()
         run = self.history.get_run(source_run_id) or {}
         latest = latest_deploy_report(run) if run else None

@@ -62,6 +62,13 @@ def write_run(log_root: Path, run_id: str, checkpoints: tuple[int, ...]) -> Path
 
 
 def make_fixture_root(root: Path) -> dict:
+    # The Physics robot preview parses the real URDF, so the fixture root needs the
+    # robot description alongside the fake run logs. Symlinked rather than copied: it is
+    # read-only to the panel, and copying the meshes would cost megabytes per test.
+    description = REPO_ROOT / "test_7_description"
+    if description.exists():
+        (root / "test_7_description").symlink_to(description, target_is_directory=True)
+
     log_root = root / "logs" / "rsl_rl" / "redrhex_wheg"
     alpha = write_run(log_root, "run_alpha", (0,))
     beta = write_run(log_root, "run_beta", (0, 10))
@@ -220,6 +227,340 @@ def open_physics(page, url: str) -> None:
     page.goto(url)
     page.locator('.nav-button[data-view="physics"]').click()
     page.wait_for_selector('[data-physics-key="simulation_physics.mass.scale"]')
+
+
+def autopilot_snapshot(state: str = "draft", revision: int = 1) -> dict:
+    return {
+        "schema_version": "redrhex.autopilot.campaign.v1",
+        "id": "campaign_demo",
+        "revision": revision,
+        "state": state,
+        "goal": {
+            "schema_version": "redrhex.autopilot.goal.v1",
+            "description": "Run diagonally without falling",
+            "task": "Template-Redrhex-Direct-v0",
+            "stage": 3,
+            "evaluation_profile": "stage3",
+            "gait": "run",
+            "directions": ["forward_left", "forward_right"],
+            "command_envelope": {
+                "vx": [[0.47, 0.60]],
+                "vy": [[-0.48, -0.38], [0.38, 0.48]],
+                "wz": [[0.0, 0.0]],
+            },
+            "skill_gates": {
+                "min_command_pass_ratio": 0.70,
+                "min_skill_pass_ratio": 0.60,
+                "max_fall_rate": 0.20,
+                "min_tracking_quality": 0.0,
+                "min_stability_quality": 0.0,
+                "min_direction_sign_ratio": 0.70,
+                "max_linear_leak": 0.18,
+                "max_yaw_leak": 0.35,
+                "max_energy_per_distance": 500.0,
+            },
+            "baseline_run_id": None,
+            "baseline_checkpoint_iteration": None,
+            "physics_profile_sha256": "a" * 64,
+            "spring_profile_sha256": "b" * 64,
+            "code_sha256": "c" * 64,
+            "config_sha256": "d" * 64,
+            "command_profile_sha256": "e" * 64,
+            "budget": {"max_training_trials": 24, "max_gpu_hours": 72},
+        },
+        "leader": {"candidate_id": "candidate_1", "evaluation_id": "eval_1"},
+        "budget": {
+            "max_training_trials": 24,
+            "max_gpu_hours": 72,
+            "training_trials_used": 2,
+            "gpu_hours_used": 1.5,
+            "remaining_training_trials": 22,
+            "remaining_gpu_hours": 70.5,
+        },
+        "active_process": None,
+        "candidate_lineage": [
+            {
+                "candidate_id": "candidate_1",
+                "reward_key": "v2_reward_scales.velocity_tracking",
+                "proposed_value": 1.1,
+                "delta": 0.1,
+                "state": "completed",
+                "seed": 42,
+                "rank": 1,
+            }
+        ],
+        "decisions": [{"hypothesis": "More XY tracking should improve the diagonal gate."}],
+        "evaluations": [
+            {
+                "id": "eval_1",
+                "trial_id": "candidate_1",
+                "seed": 42,
+                "hard_gates": {"passed": True},
+                "soft_ranking": {"tracking_quality": 0.82, "energy": 4.2},
+                "artifact_ids": ["command_csv_1"],
+            }
+        ],
+        "connector": {
+            "last_heartbeat_at": "2026-08-14T10:00:00Z",
+            "polls_used": 4,
+            "max_polls": 300,
+        },
+        "terminal_reason": None,
+        "next_permitted_actions": ["arm"] if state == "draft" else ["pause", "stop"],
+        "created_at": "2026-08-14T09:00:00Z",
+        "updated_at": "2026-08-14T10:00:00Z",
+    }
+
+
+def install_autopilot_routes(page, campaigns: list[dict], writes: list[dict]) -> None:
+    capabilities = {
+        "schema_version": "redrhex.autopilot.capabilities.v1",
+        "enabled": True,
+        "max_armed_campaigns": 1,
+        "default_reward_keys": {
+            "Template-Redrhex-Direct-v0": {
+                "stage3": ["v2_reward_scales.velocity_tracking"],
+            }
+        },
+        "reward_catalog": {
+            "Template-Redrhex-Direct-v0": {
+                "stage3": [
+                    {
+                        "key": "v2_reward_scales.velocity_tracking",
+                        "description": "Command velocity tracking",
+                        "start_value": 6.0,
+                        "minimum": 4.8,
+                        "maximum": 7.2,
+                        "enabled": True,
+                    }
+                ],
+            }
+        },
+        "command_profiles": {
+            "Template-Redrhex-Direct-v0": {
+                "stage3": {
+                    "walk": {
+                        "vx": [[0.34, 0.47]],
+                        "vy": [[-0.38, -0.28], [0.28, 0.38]],
+                        "wz": [[0.0, 0.0]],
+                    },
+                    "run": {
+                        "vx": [[0.47, 0.60]],
+                        "vy": [[-0.48, -0.38], [0.38, 0.48]],
+                        "wz": [[0.0, 0.0]],
+                    },
+                },
+            }
+        },
+        "default_skill_gates": {
+            "min_command_pass_ratio": 0.70,
+            "min_skill_pass_ratio": 0.60,
+            "max_fall_rate": 0.20,
+            "min_tracking_quality": 0.0,
+            "min_stability_quality": 0.0,
+            "min_direction_sign_ratio": 0.70,
+            "max_linear_leak": 0.18,
+            "max_yaw_leak": 0.35,
+            "max_energy_per_distance": 500.0,
+        },
+    }
+
+    def handle(route):
+        request = route.request
+        path = request.url.split("?", 1)[0].split("/api/autopilot", 1)[-1]
+        if path == "/capabilities":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(capabilities))
+            return
+        if path == "/campaigns" and request.method == "GET":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"campaigns": campaigns}))
+            return
+        if path == "/campaigns" and request.method == "POST":
+            writes.append(
+                {
+                    "path": path,
+                    "headers": request.headers,
+                    "payload": request.post_data_json,
+                }
+            )
+            created = autopilot_snapshot()
+            campaigns[:] = [created]
+            route.fulfill(status=201, content_type="application/json", body=json.dumps({"campaign": created}))
+            return
+        if path == "/campaigns/campaign_demo":
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"campaign": campaigns[0]}))
+            return
+        if path == "/campaigns/campaign_demo/decision-context":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "campaign_id": "campaign_demo",
+                        "revision": campaigns[0]["revision"],
+                        "state": campaigns[0]["state"],
+                        "next_permitted_actions": campaigns[0]["next_permitted_actions"],
+                        "eligible_move_count": 6,
+                        "recent_evidence": ["eval_1"],
+                        "recent_decisions": campaigns[0]["decisions"],
+                    }
+                ),
+            )
+            return
+        if path == "/campaigns/campaign_demo/events":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(
+                    {
+                        "events": [
+                            {
+                                "sequence": 1,
+                                "type": "campaign_created",
+                                "created_at": "2026-08-14T09:00:00Z",
+                            }
+                        ]
+                    }
+                ),
+            )
+            return
+        if path == "/campaigns/campaign_demo/artifacts":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"artifacts": [{"id": "command_csv_1", "kind": "command CSV", "sha256": "abc123"}]}),
+            )
+            return
+        action = path.rsplit("/", 1)[-1]
+        if action in {"arm", "pause", "resume", "stop"} and request.method == "POST":
+            writes.append(
+                {
+                    "path": path,
+                    "headers": request.headers,
+                    "payload": request.post_data_json,
+                }
+            )
+            next_state = {"arm": "armed", "pause": "paused", "resume": "armed", "stop": "stopped"}[action]
+            next_actions = {
+                "armed": ["pause", "stop"],
+                "paused": ["resume", "stop"],
+                "stopped": [],
+            }[next_state]
+            campaigns[0] = {
+                **campaigns[0],
+                "revision": campaigns[0]["revision"] + 1,
+                "state": next_state,
+                "next_permitted_actions": next_actions,
+            }
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"campaign": campaigns[0]}))
+            return
+        route.fulfill(status=404, content_type="application/json", body=json.dumps({"error": f"unhandled {path}"}))
+
+    page.route("**/api/autopilot/**", handle)
+
+
+def test_autopilot_is_hidden_when_capability_is_disabled(panel, page):
+    page.route(
+        "**/api/autopilot/capabilities",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"enabled": False}),
+        ),
+    )
+    page.goto(panel["url"])
+    expect(page.locator("#autopilot-nav")).to_be_hidden()
+
+
+def test_autopilot_goal_draft_uses_exact_envelope_and_idempotency(panel, page):
+    campaigns = []
+    writes = []
+    install_autopilot_routes(page, campaigns, writes)
+    page.goto(panel["url"])
+
+    nav = page.locator("#autopilot-nav")
+    expect(nav).to_be_visible()
+    nav.click()
+    expect(page.locator("#autopilot-workspace")).to_be_visible()
+    page.select_option("#autopilot-task", "Template-Redrhex-Direct-v0")
+    page.select_option("#autopilot-stage", "3")
+    page.select_option("#autopilot-gait", "run")
+    assert page.locator('#autopilot-gait option[value="explicit"]').count() == 0
+    assert page.evaluate("autopilotDirections(2)") == ["left", "right"]
+    assert page.evaluate("autopilotDirections(4)") == ["yaw_ccw", "yaw_cw"]
+    expect(page.locator("#autopilot-command-preview")).to_contain_text("vx [0.47, 0.6]")
+    expect(page.locator("#autopilot-command-intervals")).to_contain_text("[-0.48, -0.38] ∪ [0.38, 0.48]")
+
+    page.fill("#autopilot-goal-description", "Run diagonally without falling")
+    page.fill("#autopilot-iterations", "1500")
+    page.fill('input[name="autopilot_reward_min"]', "5.4")
+    page.fill('input[name="autopilot_reward_max"]', "6.6")
+    page.locator("#autopilot-create").click()
+    expect(page.locator("#autopilot-campaign-title")).to_contain_text("Run diagonally")
+
+    create = next(item for item in writes if item["path"] == "/campaigns")
+    assert create["headers"]["idempotency-key"].startswith("panel-create-")
+    assert create["headers"]["if-match"] == '"0"'
+    assert create["payload"]["expected_revision"] == 0
+    assert create["payload"]["schema_version"] == "redrhex.autopilot.goal.v1"
+    assert create["payload"]["evaluation_profile"] == "stage3"
+    assert create["payload"]["gait"] == "run"
+    assert create["payload"]["directions"] == ["forward_left", "forward_right"]
+    assert create["payload"]["command_envelope"] == {
+        "vx": [[0.47, 0.60]],
+        "vy": [[-0.48, -0.38], [0.38, 0.48]],
+        "wz": [[0.0, 0.0]],
+    }
+    assert create["payload"]["budget"] == {
+        "max_training_trials": 24,
+        "max_gpu_hours": 72,
+    }
+    assert create["payload"]["skill_gates"]["max_fall_rate"] == 0.20
+    assert "target_gates" not in create["payload"]
+    assert "checkpoint_path" not in create["payload"]
+    assert create["payload"]["baseline_checkpoint_iteration"] is None
+    assert "physics_profile_sha256" not in create["payload"]
+    assert "command_profile_sha256" not in create["payload"]
+    assert create["payload"]["tunable_reward_keys"] == ["v2_reward_scales.velocity_tracking"]
+    assert create["payload"]["reward_bounds"] == {
+        "v2_reward_scales.velocity_tracking": [5.4, 6.6]
+    }
+
+
+def test_autopilot_campaign_renders_evidence_and_sends_revision(panel, page):
+    campaigns = [autopilot_snapshot()]
+    writes = []
+    install_autopilot_routes(page, campaigns, writes)
+    page.goto(f"{panel['url']}#/autopilot")
+    page.locator('[data-autopilot-campaign-id="campaign_demo"]').click()
+
+    expect(page.locator("#autopilot-candidate-rows")).to_contain_text("v2_reward_scales.velocity_tracking")
+    expect(page.locator("#autopilot-evaluation-rows")).to_contain_text("command_csv_1")
+    expect(page.locator("#autopilot-event-list")).to_contain_text("campaign created")
+    expect(page.locator("#autopilot-artifact-list")).to_contain_text("command CSV")
+    expect(page.locator("#autopilot-connector-state")).to_contain_text("4/300 polls")
+    expect(page.locator('[data-autopilot-action="stop-after-current"]')).to_be_visible()
+
+    page.locator('[data-autopilot-action="arm"]').click()
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    expect(page.locator("#confirm-dialog-body")).to_contain_text("vx [0.47, 0.6]")
+    expect(page.locator("#confirm-dialog-body")).to_contain_text("vy [-0.48, -0.38] ∪ [0.38, 0.48]")
+    expect(page.locator("#confirm-dialog-body")).to_contain_text("Training trial budget: 24")
+    expect(page.locator("#confirm-dialog-body")).to_contain_text("Active GPU-hour budget: 72")
+    page.locator("#confirm-dialog-confirm").click()
+    expect(page.locator("#autopilot-campaign-badge")).to_contain_text("armed")
+    arm = next(item for item in writes if item["path"].endswith("/arm"))
+    assert arm["payload"] == {"expected_revision": 1}
+    assert arm["headers"]["idempotency-key"].startswith("panel-arm-")
+    assert arm["headers"]["if-match"] == '"1"'
+
+    page.locator('[data-autopilot-action="stop"]').click()
+    expect(page.locator("#confirm-dialog-title")).to_have_text("Emergency Stop Campaign Work")
+    expect(page.locator("#confirm-dialog-body")).to_contain_text("Unrelated Training Panel processes are never stopped")
+    page.locator("#confirm-dialog-confirm").click()
+    expect(page.locator("#autopilot-campaign-badge")).to_contain_text("stopped")
+    stop = next(item for item in writes if item["path"].endswith("/stop"))
+    assert stop["payload"] == {"expected_revision": 2, "mode": "emergency"}
+    assert stop["headers"]["if-match"] == '"2"'
 
 
 def test_training_route_only_shows_relevant_controls(panel, page):
@@ -481,6 +822,163 @@ def test_history_drive_export_tracks_checkpoint_background_success_and_retry(pan
     expect(page.locator("#drive-export-hint")).to_contain_text("Drive quota exceeded")
 
 
+def test_settings_organizes_control_center_and_saves_drive_location(panel, page):
+    saved_requests = []
+    drive_status = {
+        "available": True,
+        "configured": True,
+        "remote": "redrhex-drive:",
+        "folder": "RedRHex Videos",
+        "destination_mode": "my_drive_path",
+        "destination_display": "RedRHex Videos",
+        "folder_url": "",
+        "destination_revision": 1,
+        "reconnect": {"status": "idle", "started_at": "", "finished_at": "", "error": ""},
+        "reconnect_command": "rclone config reconnect redrhex-drive:",
+        "remediation": "",
+    }
+
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"google_drive_export": drive_status}),
+        ),
+    )
+
+    def save_location(route, request):
+        payload = json.loads(request.post_data or "{}")
+        saved_requests.append(payload)
+        updated = {
+            **drive_status,
+            "folder": "",
+            "destination_mode": "folder_link",
+            "destination_display": "Linked Google Drive folder",
+            "folder_url": "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
+            "destination_revision": 2,
+        }
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"saved": True, "google_drive_export": updated}),
+        )
+
+    page.route("**/api/google-drive/settings", save_location)
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="access"]').click()
+
+    expect(page.locator("#view-title")).to_have_text("Settings")
+    expect(page.locator(".settings-section-nav")).to_be_visible()
+    expect(page.locator("#settings-panel-remote")).to_be_visible()
+    expect(page.locator("#settings-panel-drive")).not_to_be_visible()
+
+    page.locator("#settings-tab-drive").click()
+    expect(page.locator("#settings-panel-drive")).to_be_visible()
+    expect(page.locator("#settings-panel-remote")).not_to_be_visible()
+    expect(page.locator("#drive-settings-badge")).to_have_text("Connected")
+    expect(page.locator("#drive-destination-folder")).to_have_value("RedRHex Videos")
+
+    folder_link = "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp?usp=sharing"
+    page.locator("#drive-destination-folder").fill(folder_link)
+    expect(page.locator("#drive-destination-preview")).to_have_text("Pasted Google Drive folder")
+    expect(page.locator("#drive-destination-preview")).not_to_contain_text("redrhex-drive")
+    expect(page.locator("#drive-save-location")).to_be_enabled()
+    page.locator("#drive-save-location").click()
+
+    expect(page.locator("#panel-status")).to_contain_text("Video folder updated")
+    expect(page.locator("#drive-open-folder")).to_be_visible()
+    expect(page.locator("#drive-open-folder")).to_have_attribute(
+        "href", "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp"
+    )
+    assert saved_requests == [{"destination": folder_link}]
+
+
+def test_settings_starts_drive_account_reconnect_without_exposing_credentials(panel, page):
+    reconnect_requests = []
+    drive_status = {
+        "available": True,
+        "configured": True,
+        "remote": "redrhex-drive:",
+        "folder": "RedRHex Videos",
+        "destination_mode": "my_drive_path",
+        "destination_display": "RedRHex Videos",
+        "folder_url": "",
+        "destination_revision": 1,
+        "reconnect": {"status": "idle", "started_at": "", "finished_at": "", "error": ""},
+        "reconnect_command": "rclone config reconnect redrhex-drive:",
+        "remediation": "",
+    }
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"google_drive_export": drive_status}),
+        ),
+    )
+
+    def reconnect(route, request):
+        reconnect_requests.append(json.loads(request.post_data or "{}"))
+        authorizing = {
+            **drive_status,
+            "reconnect": {
+                "status": "authorizing",
+                "started_at": "2026-08-14T10:00:00+00:00",
+                "finished_at": "",
+                "error": "",
+            },
+        }
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "started": True,
+                    "reconnect": authorizing["reconnect"],
+                    "google_drive_export": authorizing,
+                }
+            ),
+        )
+
+    page.route("**/api/google-drive/reconnect", reconnect)
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="access"]').click()
+    page.locator("#settings-tab-drive").click()
+    expect(page.locator("#drive-reconnect-account")).to_have_text("Change Google account")
+    page.locator("#drive-reconnect-account").click()
+
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    expect(page.locator("#confirm-dialog-body")).to_contain_text("Existing Drive files")
+    page.locator("#confirm-dialog-confirm").click()
+
+    expect(page.locator("#drive-reconnect-state")).to_contain_text("Google sign-in window is open")
+    expect(page.locator("#drive-account-title")).to_have_text("Waiting for Google sign-in")
+    expect(page.locator("#drive-settings-badge")).to_have_text("Authorizing")
+    expect(page.locator("#drive-reconnect-command")).to_have_text("rclone config reconnect redrhex-drive:")
+    assert reconnect_requests == [{}]
+    assert "token" not in page.locator("#settings-panel-drive").inner_text().lower()
+
+
+def test_settings_mobile_layout_has_no_horizontal_overflow(panel, page):
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(panel["url"])
+    page.locator('.nav-button[data-view="access"]').click()
+    page.locator("#settings-tab-drive").click()
+
+    expect(page.locator("#settings-panel-drive")).to_be_visible()
+    dimensions = page.evaluate(
+        """() => ({
+          viewport: document.documentElement.clientWidth,
+          page: document.documentElement.scrollWidth,
+          navClient: document.querySelector('.settings-section-nav').clientWidth,
+          navScroll: document.querySelector('.settings-section-nav').scrollWidth,
+        })"""
+    )
+    assert dimensions["page"] <= dimensions["viewport"]
+    assert dimensions["navScroll"] >= dimensions["navClient"]
+
+
 def test_history_shows_evolution_entry_for_a_single_checkpoint(panel, page):
     open_history(page, panel["url"])
     page.locator(".run-card", has_text="run_alpha").click()
@@ -562,6 +1060,119 @@ def test_physics_preset_is_searchable_sparse_and_persistent(panel, page):
 
     page.locator('.nav-button[data-view="train"]').click()
     expect(page.locator("#train-active-physics-preset-name")).to_have_text("Measured Lab Robot")
+
+
+def open_physics_schematic(page, url: str) -> None:
+    """Open Physics with the 3D path forced off.
+
+    Headless Chrome may or may not expose a working WebGL context depending on the host,
+    so interaction tests drive the SVG fallback: it is deterministic, and it is also the
+    path a machine without GPU support actually gets.
+    """
+
+    page.goto(f"{url}/?robot3d=off")
+    page.locator('.nav-button[data-view="physics"]').click()
+    page.wait_for_selector(".robot-fallback-leg")
+
+
+def test_physics_viewport_is_built_from_the_urdf_and_reports_its_mode(panel, page):
+    open_physics(page, panel["url"])
+    expect(page.locator("#physics-viewport")).to_be_visible()
+
+    layout = page.evaluate("fetch('/api/physics/robot-geometry').then((r) => r.json())")
+    assert layout["source"] == "urdf"
+    assert len(layout["legs"]) == 6
+    assert [leg["joints"]["main"]["canonical_id"] for leg in layout["legs"]] == [
+        f"main_{index}" for index in range(6)
+    ]
+
+    expect(page.locator("#physics-viewport-mode")).to_have_text(re.compile(r"3D|Schematic"))
+    # Damping and command delay have no honest spatial depiction, so they are reported
+    # as text beside the model instead.
+    expect(page.locator(".physics-readout-chip")).to_have_count(6)
+    expect(page.locator("#physics-viewport-readout")).to_contain_text("Command delay")
+
+
+def test_physics_viewport_flags_legs_whose_name_disagrees_with_the_model(panel, page):
+    """_LEG_LABELS calls index 0 'Right front' but the URDF mounts it at the right middle.
+
+    The joint indices and tripod grouping are correct, so this is a labelling defect
+    rather than a training one. The viewer must say so rather than quietly drawing one
+    interpretation. If _LEG_LABELS is corrected, this test should be inverted.
+    """
+
+    open_physics(page, panel["url"])
+    warning = page.locator("#physics-viewport-warning")
+    expect(warning).to_be_visible()
+    expect(warning).to_contain_text("do not match")
+    expect(page.locator(".physics-label-swap")).to_have_count(3)
+    expect(warning).to_contain_text("Right front")
+    expect(warning).to_contain_text("right middle")
+
+
+def test_physics_schematic_leg_click_filters_the_editor(panel, page):
+    open_physics_schematic(page, panel["url"])
+    expect(page.locator("#physics-viewport-mode")).to_have_text("Schematic")
+    expect(page.locator(".robot-fallback-leg")).to_have_count(6)
+
+    total_rows = page.locator(".physics-row").count()
+    page.locator('.robot-fallback-leg[data-leg-index="0"]').click()
+
+    # Selecting a leg reuses the existing search filter rather than adding a second one.
+    expect(page.locator("#physics-search")).to_have_value("Right front")
+    expect(page.locator("#physics-status")).to_contain_text("leg 0")
+    assert page.locator(".physics-row").count() < total_rows
+    expect(page.locator(".physics-row-meta").first).to_contain_text("Right front")
+
+
+def test_physics_viewport_mirrors_edited_values_and_pauses_when_hidden(panel, page):
+    open_physics_schematic(page, panel["url"])
+    page.once("dialog", lambda dialog: dialog.accept("Viewer Preset"))
+    page.locator("#physics-preset-duplicate-btn").click()
+    expect(page.locator("#physics-profile-name")).to_have_value("Viewer Preset")
+
+    page.fill("#physics-search", "mass scale")
+    page.locator('[data-physics-key="simulation_physics.mass.scale"]').fill("1.8")
+    chip = page.locator(".physics-readout-chip.is-overridden")
+    expect(chip).to_have_count(1)
+    expect(chip).to_contain_text("1.8")
+
+    # The render loop must not keep running once the operator leaves the Physics view;
+    # the panel is left open for hours beside a training run.
+    frames_before = page.evaluate("window.RedRHexRobotView.frameCount()")
+    page.locator('.nav-button[data-view="train"]').click()
+    page.wait_for_timeout(400)
+    frames_after = page.evaluate("window.RedRHexRobotView.frameCount()")
+    assert frames_after == frames_before
+
+
+def test_physics_preview_follows_the_operator_down_the_field_list(panel, page):
+    """The field list is long; the preview is useless if it scrolls out of sight."""
+
+    def scroll_to(y: int) -> None:
+        # Synchronise on the settled scroll position rather than a fixed sleep: the
+        # panel's startup fetches can land mid-scroll and make a timed wait flaky.
+        page.evaluate(f"window.scrollTo(0, {y})")
+        page.wait_for_function(f"Math.abs(window.scrollY - {y}) <= 1")
+
+    open_physics_schematic(page, panel["url"])
+    viewport = page.locator("#physics-viewport")
+    expect(viewport).not_to_have_class(re.compile(r"is-stuck"))
+    resting_height = viewport.bounding_box()["height"]
+
+    scroll_to(2200)
+    expect(viewport).to_have_class(re.compile(r"is-stuck"))
+
+    box = viewport.bounding_box()
+    assert box["y"] <= 1, "preview should be pinned to the top of the window"
+    # Pinned it competes with the fields, so it must give height back.
+    assert box["height"] < resting_height * 0.6
+    # The caveat stays readable in the collapsed bar, just shorter.
+    expect(page.locator(".physics-label-short")).to_be_visible()
+    expect(page.locator(".physics-label-swap").first).to_be_hidden()
+
+    scroll_to(0)
+    expect(viewport).not_to_have_class(re.compile(r"is-stuck"))
 
 
 def test_physics_mobile_layout_has_no_horizontal_overflow(panel, page):

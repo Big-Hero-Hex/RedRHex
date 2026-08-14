@@ -6,6 +6,7 @@
 import argparse
 import csv
 import hashlib
+import json
 import math
 import os
 import sys
@@ -13,6 +14,19 @@ import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable, Sequence
+
+_REDRHEX_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REDRHEX_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REDRHEX_REPO_ROOT))
+
+from tools.training_panel.training_panel.autopilot_identity import (  # noqa: E402
+    build_dependency_manifest,
+    dependency_manifest_sha256,
+    sha256_file as _sha256_file,
+    source_code_identities,
+)
+
+_EVALUATOR_DEPENDENCY_MANIFEST: dict[str, object] | None = None
 
 from isaaclab.app import AppLauncher
 
@@ -39,8 +53,61 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment.")
 parser.add_argument("--sweep_steps", type=int, default=600, help="Evaluation steps per command.")
+parser.add_argument(
+    "--expected-step-dt",
+    type=float,
+    default=None,
+    help="Exact policy control timestep required by a strict Autopilot evaluation.",
+)
 parser.add_argument("--warmup_steps", type=int, default=120, help="Warm-up steps per command.")
 parser.add_argument("--csv", type=str, default=None, help="Optional command-table CSV path.")
+parser.add_argument("--checkpoint-sha256", type=str, default=None, help="Expected exact checkpoint SHA-256.")
+parser.add_argument(
+    "--command-profile",
+    type=str,
+    default=None,
+    help="Exact immutable redrhex.autopilot.command-profile.v1 JSON.",
+)
+parser.add_argument(
+    "--command-profile-sha256",
+    type=str,
+    default=None,
+    help="Expected SHA-256 of --command-profile.",
+)
+for _identity_name in (
+    "code",
+    "config",
+    "dependency",
+    "reward-profile",
+    "physics",
+    "spring",
+    "terrain",
+):
+    parser.add_argument(
+        f"--identity-{_identity_name}-sha256",
+        type=str,
+        default=None,
+        help=f"Frozen Autopilot {_identity_name} identity SHA-256.",
+    )
+parser.add_argument(
+    "--strict-checkpoint-loading",
+    action="store_true",
+    default=False,
+    help="Require an exact model_*.pt path and forbid fallback or partial loading.",
+)
+parser.add_argument(
+    "--strict-energy-evidence",
+    action="store_true",
+    default=False,
+    help="Fail evaluation when simulator torque evidence is unavailable; forbids proxy/zero energy evidence.",
+)
+parser.add_argument(
+    "--curriculum-stage",
+    type=int,
+    choices=(1, 2, 3, 4, 5),
+    default=None,
+    help="Typed curriculum stage; disables path-based stage inference.",
+)
 parser.add_argument(
     "--eval_profile",
     type=str,
@@ -83,6 +150,47 @@ parser.add_argument(
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if args_cli.strict_checkpoint_loading:
+    if not args_cli.checkpoint or not args_cli.checkpoint_sha256:
+        parser.error("--strict-checkpoint-loading requires --checkpoint and --checkpoint-sha256")
+    _checkpoint_file = Path(args_cli.checkpoint)
+    if not _checkpoint_file.is_file() or re.fullmatch(r"model_(\d+)\.pt", _checkpoint_file.name) is None:
+        parser.error("strict checkpoint loading requires an existing model_*.pt file")
+    _checkpoint_digest = hashlib.sha256(_checkpoint_file.read_bytes()).hexdigest()
+    if _checkpoint_digest != args_cli.checkpoint_sha256.lower():
+        parser.error(
+            "checkpoint SHA-256 mismatch: "
+            f"expected {args_cli.checkpoint_sha256.lower()}, got {_checkpoint_digest}"
+        )
+    _simulator_root = os.environ.get("ISAACSIM_ROOT")
+    if not _simulator_root:
+        parser.error("strict Autopilot evaluation requires ISAACSIM_ROOT")
+    try:
+        _EVALUATOR_DEPENDENCY_MANIFEST = build_dependency_manifest(
+            _REDRHEX_REPO_ROOT,
+            simulator_root=Path(_simulator_root),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        parser.error(f"unable to attest Autopilot dependencies: {exc}")
+
+if bool(args_cli.command_profile) != bool(args_cli.command_profile_sha256):
+    parser.error("--command-profile and --command-profile-sha256 must be supplied together")
+_command_profile_payload = None
+if args_cli.command_profile:
+    _command_profile_file = Path(args_cli.command_profile)
+    if not _command_profile_file.is_file():
+        parser.error("--command-profile must be an existing JSON file")
+    _command_profile_digest = hashlib.sha256(_command_profile_file.read_bytes()).hexdigest()
+    if _command_profile_digest != args_cli.command_profile_sha256.lower():
+        parser.error(
+            "command profile SHA-256 mismatch: "
+            f"expected {args_cli.command_profile_sha256.lower()}, got {_command_profile_digest}"
+        )
+    try:
+        _command_profile_payload = json.loads(_command_profile_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        parser.error(f"invalid command profile JSON: {exc}")
 
 sys.argv = [sys.argv[0]] + hydra_args
 
@@ -177,10 +285,20 @@ def _pick_latest_model_checkpoint_recursive(root_dir: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _resolve_rsl_rl_checkpoint_path(raw_checkpoint: str, fallback_root: str | None = None) -> str:
+def _resolve_rsl_rl_checkpoint_path(
+    raw_checkpoint: str,
+    fallback_root: str | None = None,
+    *,
+    strict: bool = False,
+) -> str:
     """Resolve user checkpoint arg to a valid rsl_rl training checkpoint (model_*.pt)."""
     resolved = Path(retrieve_file_path(raw_checkpoint))
     fallback_root_path = Path(fallback_root) if fallback_root is not None else None
+
+    if strict:
+        if not resolved.is_file() or re.fullmatch(r"model_(\d+)\.pt", resolved.name) is None:
+            raise ValueError(f"Strict evaluation requires an exact model_*.pt file: {resolved}")
+        return str(resolved)
 
     if resolved.is_dir():
         latest = _pick_latest_model_checkpoint(resolved)
@@ -264,12 +382,15 @@ def summarize_contact_hist(contact_hist: torch.Tensor) -> str:
     return " ".join(parts)
 
 
-def _sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _runtime_source_identities() -> dict[str, str]:
+    return {
+        **source_code_identities(_REDRHEX_REPO_ROOT),
+        "dependency": (
+            dependency_manifest_sha256(_EVALUATOR_DEPENDENCY_MANIFEST)
+            if _EVALUATOR_DEPENDENCY_MANIFEST is not None
+            else ""
+        ),
+    }
 
 
 def classify_command_skill(cmd: Sequence[float], eps: float = 1e-5) -> str:
@@ -334,6 +455,76 @@ def _generate_named_commands(commands: Iterable[Sequence[float]]) -> list[tuple[
         name = _name_command(cmd, skill, name_counts)
         named.append((name, cmd, skill))
     return named
+
+
+def command_set_from_profile(
+    payload: object,
+    *,
+    task: str,
+    stage: int | None,
+    evaluation_profile: str,
+) -> list[tuple[str, tuple[float, float, float], str]]:
+    """Validate an exact Autopilot command profile and return named commands."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("command profile must be a JSON object")
+    required = {
+        "schema_version", "task", "stage", "evaluation_profile", "gait", "directions",
+        "command_envelope", "commands",
+    }
+    if set(payload) != required:
+        raise ValueError("command profile has an unexpected schema")
+    if payload["schema_version"] != "redrhex.autopilot.command-profile.v1":
+        raise ValueError("unsupported command profile schema")
+    if payload["task"] != task or payload["stage"] != stage or payload["evaluation_profile"] != evaluation_profile:
+        raise ValueError("command profile task/stage/evaluation identity mismatch")
+    envelope = payload["command_envelope"]
+    if not isinstance(envelope, dict) or set(envelope) != {"vx", "vy", "wz"}:
+        raise ValueError("command profile envelope is invalid")
+    parsed_envelope: dict[str, list[tuple[float, float]]] = {}
+    for axis in ("vx", "vy", "wz"):
+        raw_intervals = envelope[axis]
+        if not isinstance(raw_intervals, list) or not raw_intervals:
+            raise ValueError(f"command profile {axis} envelope is empty")
+        parsed_envelope[axis] = []
+        for interval in raw_intervals:
+            if not isinstance(interval, list) or len(interval) != 2:
+                raise ValueError(f"command profile {axis} interval is invalid")
+            if isinstance(interval[0], bool) or isinstance(interval[1], bool):
+                raise ValueError(f"command profile {axis} interval must be numeric")
+            low, high = float(interval[0]), float(interval[1])
+            if not math.isfinite(low) or not math.isfinite(high) or low > high:
+                raise ValueError(f"command profile {axis} interval is invalid")
+            parsed_envelope[axis].append((low, high))
+    raw_commands = payload["commands"]
+    if not isinstance(raw_commands, list) or not raw_commands or len(raw_commands) > 64:
+        raise ValueError("command profile must contain 1-64 commands")
+    commands: list[tuple[str, tuple[float, float, float], str]] = []
+    names: set[str] = set()
+    for raw in raw_commands:
+        if not isinstance(raw, dict) or set(raw) != {"name", "skill", "vx", "vy", "wz"}:
+            raise ValueError("command profile command has an unexpected schema")
+        name = raw["name"]
+        skill = raw["skill"]
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError("command profile command names must be non-empty and unique")
+        if skill not in {"forward", "lateral", "diagonal", "yaw"}:
+            raise ValueError("command profile command skill is invalid")
+        values = []
+        for axis in ("vx", "vy", "wz"):
+            value = raw[axis]
+            if isinstance(value, bool):
+                raise ValueError("command profile commands must be numeric")
+            number = float(value)
+            if not math.isfinite(number) or not any(low <= number <= high for low, high in parsed_envelope[axis]):
+                raise ValueError(f"command profile command lies outside the {axis} envelope")
+            values.append(number)
+        command = (values[0], values[1], values[2])
+        if classify_command_skill(command) != skill:
+            raise ValueError("command profile skill does not match its numeric command")
+        names.add(name)
+        commands.append((name, command, skill))
+    return commands
 
 
 def build_command_set(env_cfg, profile: str, command_scale: float) -> list[tuple[str, tuple[float, float, float], str]]:
@@ -430,7 +621,12 @@ def collect_energy_metrics(
     cmd_vx: float,
     cmd_vy: float,
 ) -> dict[str, torch.Tensor]:
-    """Collect per-step energy metrics with simulator-first torque lookup and safe fallbacks."""
+    """Collect torque-backed energy metrics.
+
+    Translational commands use mechanical energy per forward-progress distance.
+    Pure-yaw commands use absolute total mechanical power so their energy gate
+    cannot collapse to a vacuous zero when commanded translation is absent.
+    """
     num_envs = unwrapped_env.num_envs
     device = unwrapped_env.device
     zeros = torch.zeros(num_envs, device=device)
@@ -499,10 +695,18 @@ def collect_energy_metrics(
             if abad_torque is not None and abad_omega is not None:
                 abad_power = torch.sum(torch.abs(abad_torque * abad_omega), dim=1)
             total_power = main_power + abad_power
+        elif args_cli.strict_energy_evidence:
+            raise RuntimeError(
+                "Strict energy evidence requires simulator-applied or environment-resolved joint torques."
+            )
         elif hasattr(unwrapped_env, "_target_drive_vel"):
             # Last-resort proxy used only when torque is unavailable.
             main_power = torch.sum(torch.abs(unwrapped_env._target_drive_vel * main_omega), dim=1)
             total_power = main_power
+    elif args_cli.strict_energy_evidence:
+        raise RuntimeError(
+            "Strict energy evidence requires resolved main-drive joint indices and torques."
+        )
 
     spring_energy = zeros.clone()
     spring_release = zeros.clone()
@@ -542,7 +746,10 @@ def collect_energy_metrics(
         torch.full_like(energy_per_distance, energy_max),
         energy_per_distance,
     )
-    energy_per_distance = torch.where(has_translation_cmd, energy_per_distance, zeros)
+    # The V1 gate is an absolute energy-effort ceiling. Pure yaw has no linear
+    # progress distance, so use total mechanical power rather than reporting
+    # zero and allowing unbounded yaw effort to pass.
+    energy_per_distance = torch.where(has_translation_cmd, energy_per_distance, total_power)
     energy_per_distance = torch.clamp(
         torch.nan_to_num(energy_per_distance, nan=energy_max, posinf=energy_max),
         max=energy_max,
@@ -569,6 +776,26 @@ def collect_energy_metrics(
 
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
+    runtime_identities = _runtime_source_identities()
+    if args_cli.strict_checkpoint_loading:
+        missing_identities = [
+            name
+            for name in (
+                "code", "config", "dependency", "reward_profile", "physics", "spring", "terrain"
+            )
+            if getattr(args_cli, f"identity_{name}_sha256") is None
+        ]
+        if missing_identities:
+            raise RuntimeError(
+                "Strict Autopilot evaluation requires every frozen identity: "
+                + ", ".join(missing_identities)
+            )
+    for name, actual in runtime_identities.items():
+        expected = getattr(args_cli, f"identity_{name}_sha256")
+        if expected is not None and expected != actual:
+            raise RuntimeError(
+                f"Frozen Autopilot {name} identity mismatch: expected {expected}, got {actual}"
+            )
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.seed = agent_cfg.seed
@@ -578,14 +805,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     if args_cli.checkpoint:
-        resume_path = _resolve_rsl_rl_checkpoint_path(args_cli.checkpoint, fallback_root=log_root_path)
+        resume_path = _resolve_rsl_rl_checkpoint_path(
+            args_cli.checkpoint,
+            fallback_root=log_root_path,
+            strict=args_cli.strict_checkpoint_loading,
+        )
     else:
         # Some configs may resolve to tensorboard event files by default (e.g. checkpt1/events...).
         # Always sanitize to a real training checkpoint (model_*.pt).
         resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
         resume_path = _resolve_rsl_rl_checkpoint_path(resume_path, fallback_root=log_root_path)
 
-    if not args_cli.disable_auto_stage_from_checkpoint and hasattr(env_cfg, "stage"):
+    if args_cli.curriculum_stage is not None:
+        if not hasattr(env_cfg, "stage"):
+            raise ValueError("--curriculum-stage is not supported by the selected task")
+        env_cfg.stage = int(args_cli.curriculum_stage)
+    elif not args_cli.disable_auto_stage_from_checkpoint and hasattr(env_cfg, "stage"):
         inferred_stage = _infer_stage_from_checkpoint_path(resume_path)
         if inferred_stage is not None:
             prev_stage = int(getattr(env_cfg, "stage"))
@@ -660,6 +895,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     if protocol.strict_checkpoint:
         runner.load(resume_path, load_optimizer=False)
+    elif args_cli.strict_checkpoint_loading:
+        try:
+            runner.load(resume_path, load_optimizer=False)
+        except TypeError:
+            runner.load(resume_path)
     else:
         _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
@@ -670,7 +910,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if hasattr(unwrapped_env, "external_control"):
         unwrapped_env.external_control = True
 
-    command_set = build_command_set(env_cfg, args_cli.eval_profile, args_cli.command_scale)
+    command_set = (
+        command_set_from_profile(
+            _command_profile_payload,
+            task=args_cli.task,
+            stage=args_cli.curriculum_stage,
+            evaluation_profile=args_cli.eval_profile,
+        )
+        if _command_profile_payload is not None
+        else build_command_set(env_cfg, args_cli.eval_profile, args_cli.command_scale)
+    )
     if len(command_set) == 0:
         raise RuntimeError(f"No commands generated for eval profile: {args_cli.eval_profile}")
     print(f"[INFO] Eval profile: {args_cli.eval_profile}, command_scale={args_cli.command_scale:.2f}")
@@ -679,10 +928,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"  - {name:<14} skill={skill:<8} cmd=({cmd[0]:+.2f}, {cmd[1]:+.2f}, {cmd[2]:+.2f})")
 
     results = []
+    episode_results = []
     num_envs = unwrapped_env.num_envs
     device = unwrapped_env.device
     total_steps = args_cli.warmup_steps + args_cli.sweep_steps
     step_dt = float(getattr(unwrapped_env, "step_dt", unwrapped_env.cfg.sim.dt * unwrapped_env.cfg.decimation))
+    if args_cli.expected_step_dt is not None and (
+        not math.isfinite(args_cli.expected_step_dt)
+        or not math.isclose(
+            step_dt,
+            float(args_cli.expected_step_dt),
+            rel_tol=0.0,
+            abs_tol=1.0e-12,
+        )
+    ):
+        raise RuntimeError(
+            "Evaluation policy timestep does not match --expected-step-dt: "
+            f"runtime={step_dt!r}, expected={args_cli.expected_step_dt!r}"
+        )
     eval_duration_s = float(args_cli.sweep_steps) * step_dt
 
     # Global acceptance accumulators
@@ -779,6 +1042,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         cmd_energy_per_distance_sum = 0.0
         cmd_energy_steps = 0
 
+        episode_number = torch.zeros(num_envs, dtype=torch.long, device=device)
+        episode_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
+        episode_err_vx = torch.zeros(num_envs, dtype=torch.float64, device=device)
+        episode_err_vy = torch.zeros(num_envs, dtype=torch.float64, device=device)
+        episode_err_wz = torch.zeros(num_envs, dtype=torch.float64, device=device)
+        episode_success = torch.zeros(num_envs, dtype=torch.long, device=device)
+        episode_falls = torch.zeros(num_envs, dtype=torch.long, device=device)
+        episode_energy = torch.zeros(num_envs, dtype=torch.float64, device=device)
+        episode_energy_effort = torch.zeros(num_envs, dtype=torch.float64, device=device)
+
+        def flush_episode_evidence(indices: torch.Tensor, *, complete: bool) -> None:
+            for env_index in indices.detach().cpu().tolist():
+                steps = int(episode_steps[env_index].item())
+                if steps <= 0:
+                    continue
+                episode_results.append(
+                    {
+                        "command": name,
+                        "skill": skill,
+                        "environment_index": int(env_index),
+                        "episode_index": int(episode_number[env_index].item()),
+                        "complete": bool(complete),
+                        "sample_count": steps,
+                        "fall_count": int(episode_falls[env_index].item()),
+                        "mae_vx": float(episode_err_vx[env_index].item()) / steps,
+                        "mae_vy": float(episode_err_vy[env_index].item()) / steps,
+                        "mae_wz": float(episode_err_wz[env_index].item()) / steps,
+                        "success_ratio": float(episode_success[env_index].item()) / steps,
+                        "energy_mech_power_total_mean": float(episode_energy[env_index].item()) / steps,
+                        "energy_effort_mean": float(episode_energy_effort[env_index].item()) / steps,
+                    }
+                )
+            if indices.numel() == 0:
+                return
+            episode_number[indices] += 1
+            for accumulator in (
+                episode_steps,
+                episode_err_vx,
+                episode_err_vy,
+                episode_err_wz,
+                episode_success,
+                episode_falls,
+                episode_energy,
+                episode_energy_effort,
+            ):
+                accumulator[indices] = 0
+
         last_actions = None
 
         for step in range(total_steps):
@@ -813,6 +1123,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 cmd_lateral_leak_sum += torch.abs(actual_vy).sum().item()
                 cmd_yaw_leak_sum += torch.abs(actual_wz).sum().item()
             cmd_samples += num_envs
+            episode_steps += 1
+            episode_err_vx += dvx.to(dtype=torch.float64)
+            episode_err_vy += dvy.to(dtype=torch.float64)
+            episode_err_wz += dwz.to(dtype=torch.float64)
 
             err_vx_sum += dvx.sum().item()
             err_vy_sum += dvy.sum().item()
@@ -840,6 +1154,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 episode_ends += int(torch.count_nonzero(terminated | time_outs).item())
                 cmd_fall_events += int(torch.count_nonzero(terminated).item())
                 cmd_episode_ends += int(torch.count_nonzero(terminated | time_outs).item())
+                episode_falls += terminated.to(dtype=torch.long)
 
             # Contact statistics
             if hasattr(unwrapped_env, "_contact_count"):
@@ -956,6 +1271,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 cmd_success_wz_steps += int(torch.count_nonzero(success_mask).item())
 
             cmd_success_steps += int(torch.count_nonzero(success_mask).item())
+            episode_success += success_mask.to(dtype=torch.long)
 
             energy_metrics = collect_energy_metrics(
                 unwrapped_env,
@@ -1003,6 +1319,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             cmd_progress_distance_sum += energy_metrics["progress_distance"].mean().item()
             cmd_energy_per_distance_sum += energy_metrics["energy_per_distance"].mean().item()
             cmd_energy_steps += 1
+            episode_energy += energy_metrics["mech_power_total"].to(dtype=torch.float64)
+            episode_energy_effort += energy_metrics["energy_per_distance"].to(dtype=torch.float64)
 
             skill_mech_power_total_sum[skill] += energy_metrics["mech_power_total"].mean().item()
             skill_cot_sum[skill] += energy_metrics["cot_proxy"].mean().item()
@@ -1014,6 +1332,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             skill_energy_per_distance_sum[skill] += energy_metrics["energy_per_distance"].mean().item()
             skill_energy_steps[skill] += 1
             energy_kpi_count += 1
+
+            done_indices = torch.nonzero(terminated | time_outs, as_tuple=False).flatten()
+            flush_episode_evidence(done_indices, complete=True)
+
+        trailing_indices = torch.nonzero(episode_steps > 0, as_tuple=False).flatten()
+        flush_episode_evidence(trailing_indices, complete=False)
 
         denom = float(max(1, cmd_samples))
         result = {
@@ -1343,11 +1667,55 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             writer.writeheader()
             writer.writerows(results)
 
+        episode_path = os.path.splitext(csv_path)[0] + "_episodes.csv"
+        with open(episode_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "command",
+                    "skill",
+                    "environment_index",
+                    "episode_index",
+                    "complete",
+                    "sample_count",
+                    "fall_count",
+                    "mae_vx",
+                    "mae_vy",
+                    "mae_wz",
+                    "success_ratio",
+                    "energy_mech_power_total_mean",
+                    "energy_effort_mean",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(episode_results)
+
         summary_path = os.path.splitext(csv_path)[0] + "_summary.csv"
         command_csv_sha256 = _sha256_file(csv_path)
+        episode_csv_sha256 = _sha256_file(episode_path)
         summary_rows = [
             {"metric": "evaluation.seed", "value": int(agent_cfg.seed)},
+            {"metric": "evaluation.num_envs", "value": int(num_envs)},
+            {"metric": "evaluation.sweep_steps", "value": int(args_cli.sweep_steps)},
+            {"metric": "evaluation.step_dt", "value": float(step_dt)},
+            {"metric": "evaluation.duration_s", "value": float(eval_duration_s)},
             {"metric": "eval.profile", "value": args_cli.eval_profile},
+            {"metric": "evaluation.agent_entry_point", "value": args_cli.agent},
+            {
+                "metric": "command.profile_sha256",
+                "value": args_cli.command_profile_sha256,
+            },
+            {"metric": "checkpoint.path", "value": os.path.abspath(resume_path)},
+            {"metric": "checkpoint.sha256", "value": _sha256_file(resume_path)},
+            {"metric": "checkpoint.strict_load", "value": bool(args_cli.strict_checkpoint_loading)},
+            {"metric": "energy.strict_evidence", "value": bool(args_cli.strict_energy_evidence)},
+            {"metric": "identity.code_sha256", "value": runtime_identities["code"]},
+            {"metric": "identity.config_sha256", "value": runtime_identities["config"]},
+            {"metric": "identity.dependency_sha256", "value": runtime_identities["dependency"]},
+            {"metric": "identity.reward_profile_sha256", "value": args_cli.identity_reward_profile_sha256},
+            {"metric": "identity.physics.sha256", "value": args_cli.identity_physics_sha256},
+            {"metric": "identity.spring.sha256", "value": args_cli.identity_spring_sha256},
+            {"metric": "identity.terrain.sha256", "value": args_cli.identity_terrain_sha256},
             {"metric": "spring.backend", "value": args_cli.spring_backend},
             {"metric": "spring.calibration_status", "value": spring_calibration_status},
             {
@@ -1360,6 +1728,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "metric": "artifact.command_csv_sha256",
                 "value": command_csv_sha256,
             },
+            {
+                "metric": "artifact.episode_csv_sha256",
+                "value": episode_csv_sha256,
+            },
+            {"metric": "evidence.episode_row_count", "value": len(episode_results)},
             {"metric": "tracking.mean_abs_vx", "value": mean_abs_vx},
             {"metric": "tracking.mean_abs_vy", "value": mean_abs_vy},
             {"metric": "tracking.mean_abs_wz", "value": mean_abs_wz},
@@ -1419,6 +1792,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             writer.writerows(summary_rows)
 
         print(f"[INFO] Wrote command table: {csv_path}")
+        print(f"[INFO] Wrote episode evidence: {episode_path}")
         print(f"[INFO] Wrote summary table: {summary_path}")
 
     env.close()

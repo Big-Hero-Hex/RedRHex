@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="approved-designs"></a>
 ## Approved designs
 
+- [AI-Guided Autopilot Campaigns](active/2026-08-14-ai-guided-autopilot-campaigns.en.md)
 - [Child Panel 3.7 remote parity](active/2026-08-14-child-panel-remote-parity.en.md)
 - [Sensor-only student distillation V2](active/2026-08-13-student-distillation-v2.en.md)
 - [macOS remote launcher](active/2026-08-13-macos-remote-launcher.en.md)

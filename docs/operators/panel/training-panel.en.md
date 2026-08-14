@@ -29,6 +29,15 @@ A blank seed makes the panel select and record one. Keep divergence handling on 
 
 Only one Isaac GPU job should run at a time. The queue inserts a settle window between jobs. Stop a selected process from Process Console and wait for termination before launching another.
 
+<a id="autopilot-campaigns"></a>
+## Run an Autopilot campaign
+
+Autopilot is an off-by-default, simulation-only preview for bounded standard-PPO reward experiments. Start Mother with `REDRHEX_AUTOPILOT_ENABLED=1` on loopback, open **Autopilot**, and draft the task, stage, walk/run label, directions, exact numeric command envelope, initialization, tunable weights, explicit iteration cap, and campaign budget. Review the generated numbers and immutable identities before the human-only **Arm** action. Only one campaign may be armed; the maximum is 24 training trials and 72 active GPU-hours.
+
+After arming, the panel owns training, exact-checkpoint command evaluation, safety gates, ranking, confirmation seeds, recovery, and the `simulation_goal_met` decision. ChatGPT can only advise through the narrow connector; it cannot arm, resume, widen budgets, declare success, deploy, or operate hardware. The repository includes the adapter and recurring prompt but does not provision ChatGPT Scheduled, an OpenAI Secure MCP Tunnel, or credentials. Without those external services, active work finishes and the campaign waits safely.
+
+Use pause-after-current, resume, stop-after-current, or campaign-only emergency stop according to the displayed state. A patch handoff is a download-only review artifact and is never applied automatically. For the complete draft, connector, and recovery workflow, see the [component operator guide](../../../tools/training_panel/docs/operator-guide.en.md#autopilot). `simulation_goal_met` is not policy export, deployment readiness, or hardware authorization.
+
 <a id="physics-presets"></a>
 ## Use physics presets
 
@@ -48,14 +57,18 @@ rclone listremotes
 rclone lsd redrhex-drive:
 ```
 
-In History, select a run and choose the latest recording or an older checkpoint video, then click **Export to Drive**. The background upload targets `RedRHex Videos/<run-id>/<video-filename>`. An unchanged completed export is reused, failed or interrupted work can be retried, and **Open in Drive** opens the connected account's private file without changing sharing permissions. Rclone credentials remain on the training PC and are never returned by the Panel API.
+Open **Settings → Google Drive** to manage two explicit choices: **Google account** and **Choose a Drive folder**. To use an existing folder, copy its Google Drive folder URL, paste it into **Google Drive folder**, and click **Use this folder**. The panel extracts the folder ID locally and verifies that the connected account can access it; it never changes sharing. You may instead type a relative My Drive path such as `Robotics/Panel Exports`, which rclone verifies or creates privately. With the restricted `drive.file` scope, a manually created folder link may not be visible; in that case use a path created through Settings or reconfigure the rclone scope deliberately.
+
+To switch owners for new uploads, wait for active Drive work to finish and click **Change Google account**, then choose the account in the browser opened on the training PC. Existing files and private links stay in their original account. Account and folder changes are versioned so the next export does not incorrectly reuse a record from the previous destination.
+
+In History, select a run and choose the latest recording or an older checkpoint video, then click **Export to Drive**. The background upload targets `<configured-folder>/<run-id>/<video-filename>`. An unchanged completed export for the same destination is reused, failed or interrupted work can be retried, and **Open in Drive** opens the connected account's private file without changing sharing permissions. Rclone credentials remain on the training PC and are never returned by the Panel API. **Copy terminal command** provides the host-side reconnect command when browser authorization cannot be started from Settings.
 
 <a id="remote"></a>
 ## Use remote team mode
 
 The remote worker requires Supabase URL, anonymous key, machine token, machine ID, and an explicit accept-jobs setting. Store them in `~/.redrhex_remote.env` with mode `600`; never place the service-role or machine token in GitHub Pages or committed files.
 
-Start and supervise the worker from Control Center. Leave remote job acceptance disabled until configuration and ownership are verified. Apply the additive 3.7 migration, update Mother, restart the worker, and confirm that its heartbeat and capability row both report `3.7.0-remote-parity` before publishing Child assets or accepting jobs. An older schema or worker leaves Child signed in but read-only.
+Start and supervise the worker from **Settings → Remote operations**. Leave remote job acceptance disabled until configuration and ownership are verified. Apply the additive 3.7 migration, update Mother, restart the worker, and confirm that its heartbeat and capability row both report `3.7.0-remote-parity` before publishing Child assets or accepting jobs. An older schema or worker leaves Child signed in but read-only. Connection URLs and integration health are under **Connections**; launch mode, auto-start, logs, and raw status are under **Advanced**.
 
 Child keeps Dashboard, Train, History, and More phone-first while adding Mother-grade routes, shared Reward/Terrain/Physics presets, folders, comparison, bounded curves, provenance, private Drive links, deployment evidence, read-only detection, activity attribution, and Connection health. Checkpoints are selected by run and iteration; the worker resolves the host path. Viewer is inspection-only, operator may edit shared metadata and run non-destructive jobs, and admin additionally deletes. Bulk deletion requires `DELETE` and reports each run separately.
 

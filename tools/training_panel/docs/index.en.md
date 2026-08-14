@@ -21,7 +21,9 @@ last_reviewed: 2026-08-14
 ## Developer documentation
 
 - [Architecture and contracts](architecture.en.md)
+- [Autopilot API reference](autopilot-api.en.md)
 - [Porting and extension guide](porting.en.md)
+- [Release 3.8.0 Autopilot preview](releases/v3-8-0.en.md)
 - [Release 3.7.0](releases/v3-7-0.en.md)
 - [Release 3.6.4](releases/v3-6-4.en.md)
 - [Release 3.6.3](releases/v3-6-3.en.md)

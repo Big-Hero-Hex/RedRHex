@@ -3,6 +3,8 @@ from __future__ import annotations
 import random
 import re
 import shlex
+import hashlib
+import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
 SPRING_BACKENDS = ("explicit", "native")
 DEFAULT_PANEL_SPRING_BACKEND = "native"
+AUTOPILOT_EVALUATION_STEP_DT = 1.0 / 60.0
 EXPLICIT_SPRING_QUARANTINE_REASON = (
     "Explicit torsion-spring training is quarantined in the Panel: the current "
     "uncalibrated 200 N·m/rad model is numerically unstable at the 120 Hz physics "
@@ -149,6 +152,17 @@ class TrainingParams:
     seed: int | None = None
     resume: bool = False
     checkpoint: str | None = None
+    checkpoint_sha256: str | None = None
+    initialization_mode: str = "fresh"
+    strict_checkpoint_loading: bool = False
+    curriculum_stage: int | None = None
+    evaluation_profile: str | None = None
+    reward_profile_file: str | None = None
+    reward_profile_sha256: str | None = None
+    terrain_profile_file: str | None = None
+    terrain_profile_sha256: str | None = None
+    campaign_id: str | None = None
+    campaign_trial_id: str | None = None
     reward_preset_id: str = DEFAULT_REWARD_PRESET_ID
     reward_overrides: dict = field(default_factory=dict)
     terrain_preset_id: str = "baseline"
@@ -173,6 +187,10 @@ class TrainingParams:
         raw_physics_overrides = data.get("physics_overrides") or {}
         training_route = str(data.get("training_route") or "standard")
         task = SENSOR_V2_TASK if training_route.startswith("sensor_v2") else str(data.get("task") or DEFAULT_TRAINING_TASK)
+        resume = bool(data.get("resume", False))
+        initialization_mode = str(
+            data.get("initialization_mode") or ("full_resume" if resume else "fresh")
+        )
         params = cls(
             training_route=training_route,
             task=task,
@@ -188,8 +206,41 @@ class TrainingParams:
             # A blank seed used to mean "env default", which made runs
             # unreproducible. The panel now picks one and records it.
             seed=int(data["seed"]) if data.get("seed") not in (None, "") else random.randint(0, 2 ** 31 - 1),
-            resume=bool(data.get("resume", False)),
+            resume=resume or initialization_mode in {"policy_only", "full_resume"},
             checkpoint=str(data["checkpoint"]) if data.get("checkpoint") else None,
+            checkpoint_sha256=(
+                str(data["checkpoint_sha256"]).lower() if data.get("checkpoint_sha256") else None
+            ),
+            initialization_mode=initialization_mode,
+            strict_checkpoint_loading=bool(data.get("strict_checkpoint_loading", False)),
+            curriculum_stage=(
+                int(data["curriculum_stage"])
+                if data.get("curriculum_stage") not in (None, "")
+                else None
+            ),
+            evaluation_profile=(
+                str(data["evaluation_profile"]) if data.get("evaluation_profile") else None
+            ),
+            reward_profile_file=(
+                str(data["reward_profile_file"]) if data.get("reward_profile_file") else None
+            ),
+            reward_profile_sha256=(
+                str(data["reward_profile_sha256"]).lower()
+                if data.get("reward_profile_sha256")
+                else None
+            ),
+            terrain_profile_file=(
+                str(data["terrain_profile_file"]) if data.get("terrain_profile_file") else None
+            ),
+            terrain_profile_sha256=(
+                str(data["terrain_profile_sha256"]).lower()
+                if data.get("terrain_profile_sha256")
+                else None
+            ),
+            campaign_id=str(data["campaign_id"]) if data.get("campaign_id") else None,
+            campaign_trial_id=(
+                str(data["campaign_trial_id"]) if data.get("campaign_trial_id") else None
+            ),
             reward_preset_id=str(data.get("reward_preset_id") or DEFAULT_REWARD_PRESET_ID),
             reward_overrides=normalize_reward_overrides(raw_overrides),
             terrain_preset_id=str(data.get("terrain_preset_id") or "baseline"),
@@ -227,6 +278,20 @@ class TrainingParams:
         if not (self.device == "cpu" or self.device.startswith("cuda")):
             raise ValueError("device must be cpu or cuda[:index]")
         validate_spring_backend(self.spring_backend)
+        if self.initialization_mode not in {"fresh", "policy_only", "full_resume"}:
+            raise ValueError("initialization_mode must be fresh, policy_only, or full_resume")
+        if self.initialization_mode != "fresh" and not self.checkpoint:
+            raise ValueError("checkpoint is required for checkpoint initialization")
+        if self.curriculum_stage is not None and self.curriculum_stage not in {1, 2, 3, 4, 5}:
+            raise ValueError("curriculum_stage must be between 1 and 5")
+        if self.evaluation_profile is not None and self.evaluation_profile not in {
+            "stage1", "stage2", "stage3", "stage4", "stage5", "full"
+        }:
+            raise ValueError("evaluation_profile must be stage1 through stage5, or full")
+        for name in ("checkpoint_sha256", "reward_profile_sha256", "terrain_profile_sha256"):
+            value = getattr(self, name)
+            if value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
         if self.resume and not self.checkpoint:
             raise ValueError("checkpoint is required when resume is enabled")
         if self.training_route in {"sensor_v2_distillation", "sensor_v2_ppo"} and not self.checkpoint:
@@ -244,7 +309,150 @@ class TrainingParams:
         return asdict(self)
 
 
-def training_argv(params: TrainingParams, *, physics_profile_file: str | None = None) -> list[str]:
+@dataclass
+class EvaluationParams:
+    source_run_id: str
+    checkpoint: str
+    checkpoint_sha256: str
+    task: str
+    agent_entry_point: str
+    seed: int
+    evaluation_profile: str
+    curriculum_stage: int
+    command_profile_file: str
+    command_profile_sha256: str
+    code_sha256: str
+    config_sha256: str
+    dependency_sha256: str
+    reward_profile_sha256: str
+    physics_identity_sha256: str
+    spring_identity_sha256: str
+    terrain_profile_sha256: str
+    sweep_steps: int = 600
+    expected_step_dt: float = AUTOPILOT_EVALUATION_STEP_DT
+    num_envs: int = 256
+    device: str = "cuda:0"
+    spring_backend: str = DEFAULT_PANEL_SPRING_BACKEND
+    physics_profile_file: str | None = None
+    campaign_id: str | None = None
+    campaign_trial_id: str | None = None
+
+    def validate(self) -> None:
+        if not self.source_run_id:
+            raise ValueError("source_run_id is required")
+        checkpoint = Path(self.checkpoint)
+        if not checkpoint.is_file() or re.fullmatch(r"model_\d+\.pt", checkpoint.name) is None:
+            raise ValueError("checkpoint must be an exact existing model_*.pt file")
+        if re.fullmatch(r"[0-9a-f]{64}", self.checkpoint_sha256) is None:
+            raise ValueError("checkpoint_sha256 must be a lowercase SHA-256 digest")
+        if self.agent_entry_point != "rsl_rl_cfg_entry_point":
+            raise ValueError(
+                "V1 evaluation agent_entry_point must be rsl_rl_cfg_entry_point"
+            )
+        command_profile = Path(self.command_profile_file)
+        if not command_profile.is_file():
+            raise ValueError("command_profile_file must be an exact existing JSON file")
+        for name in (
+            "command_profile_sha256", "code_sha256", "config_sha256", "dependency_sha256",
+            "reward_profile_sha256", "physics_identity_sha256", "spring_identity_sha256",
+            "terrain_profile_sha256",
+        ):
+            if re.fullmatch(r"[0-9a-f]{64}", getattr(self, name)) is None:
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+        if hashlib.sha256(command_profile.read_bytes()).hexdigest() != self.command_profile_sha256:
+            raise ValueError("command profile SHA-256 mismatch")
+        if self.evaluation_profile not in {"stage1", "stage2", "stage3", "stage4", "stage5", "full"}:
+            raise ValueError("evaluation_profile must be stage1 through stage5, or full")
+        if self.curriculum_stage not in {1, 2, 3, 4, 5}:
+            raise ValueError("curriculum_stage must be between 1 and 5")
+        if self.num_envs < 1 or self.num_envs > 8192:
+            raise ValueError("num_envs must be between 1 and 8192")
+        if isinstance(self.sweep_steps, bool) or not 1 <= int(self.sweep_steps) <= 100000:
+            raise ValueError("sweep_steps must be between 1 and 100000")
+        if (
+            isinstance(self.expected_step_dt, bool)
+            or not math.isfinite(float(self.expected_step_dt))
+            or not math.isclose(
+                float(self.expected_step_dt),
+                AUTOPILOT_EVALUATION_STEP_DT,
+                rel_tol=0.0,
+                abs_tol=1.0e-12,
+            )
+        ):
+            raise ValueError("V1 expected_step_dt must be exactly 1/60 second")
+        validate_spring_backend(self.spring_backend)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def evaluation_argv(params: EvaluationParams, *, csv_file: str) -> list[str]:
+    params.validate()
+    argv = [
+        "scripts/rsl_rl/eval_command_sweep.py",
+        "--task",
+        params.task,
+        "--agent",
+        params.agent_entry_point,
+        "--num_envs",
+        str(params.num_envs),
+        "--device",
+        params.device,
+        "--spring-backend",
+        params.spring_backend,
+        "--seed",
+        str(params.seed),
+        "--sweep_steps",
+        str(params.sweep_steps),
+        "--expected-step-dt",
+        repr(float(params.expected_step_dt)),
+        "--eval_profile",
+        params.evaluation_profile,
+        "--curriculum-stage",
+        str(params.curriculum_stage),
+        "--command-profile",
+        params.command_profile_file,
+        "--command-profile-sha256",
+        params.command_profile_sha256,
+        "--identity-code-sha256",
+        params.code_sha256,
+        "--identity-config-sha256",
+        params.config_sha256,
+        "--identity-dependency-sha256",
+        params.dependency_sha256,
+        "--identity-reward-profile-sha256",
+        params.reward_profile_sha256,
+        "--identity-physics-sha256",
+        params.physics_identity_sha256,
+        "--identity-spring-sha256",
+        params.spring_identity_sha256,
+        "--identity-terrain-sha256",
+        params.terrain_profile_sha256,
+        "--disable_auto_stage_from_checkpoint",
+        "--checkpoint",
+        params.checkpoint,
+        "--checkpoint-sha256",
+        params.checkpoint_sha256,
+        "--strict-checkpoint-loading",
+        "--strict-energy-evidence",
+        "--csv",
+        csv_file,
+        "--headless",
+    ]
+    if params.physics_profile_file:
+        argv.extend(["--physics-profile", params.physics_profile_file])
+    return argv
+
+
+def training_argv(
+    params: TrainingParams,
+    *,
+    physics_profile_file: str | None = None,
+    reward_profile_file: str | None = None,
+    reward_profile_sha256: str | None = None,
+    terrain_profile_file: str | None = None,
+    terrain_profile_sha256: str | None = None,
+) -> list[str]:
     validate_panel_training_spring_backend(params.spring_backend)
     if params.training_route == "sensor_v2_full":
         argv = [
@@ -289,8 +497,22 @@ def training_argv(params: TrainingParams, *, physics_profile_file: str | None = 
         params.spring_backend,
     ]
     if params.training_route == "standard":
-        # train.py only applies active_*_override.json when this flag is present.
-        argv.append("--panel_overrides")
+        reward_file = reward_profile_file or params.reward_profile_file
+        terrain_file = terrain_profile_file or params.terrain_profile_file
+        if reward_file:
+            argv.extend(["--reward-profile", reward_file])
+            digest = reward_profile_sha256 or params.reward_profile_sha256
+            if digest:
+                argv.extend(["--reward-profile-sha256", digest])
+        if terrain_file:
+            argv.extend(["--terrain-profile", terrain_file])
+            digest = terrain_profile_sha256 or params.terrain_profile_sha256
+            if digest:
+                argv.extend(["--terrain-profile-sha256", digest])
+        if not reward_file and not terrain_file:
+            # Backward compatibility for callers outside ProcessRegistry. Panel launches
+            # always provide immutable per-run files.
+            argv.append("--panel_overrides")
     else:
         argv.extend(["--agent", sensor_agents[params.training_route]])
     if params.headless:
@@ -299,13 +521,21 @@ def training_argv(params: TrainingParams, *, physics_profile_file: str | None = 
         argv.extend(["--seed", str(params.seed)])
     if physics_profile_file:
         argv.extend(["--physics-profile", physics_profile_file])
+    if params.curriculum_stage is not None:
+        argv.extend(["--curriculum-stage", str(params.curriculum_stage)])
     if params.training_route == "sensor_v2_distillation":
         argv.extend(["--teacher_checkpoint", params.checkpoint or ""])
     elif params.training_route == "sensor_v2_ppo":
         argv.extend(["--student_checkpoint", params.checkpoint or ""])
-    elif params.resume:
+    elif params.initialization_mode in {"policy_only", "full_resume"} or params.resume:
         argv.append("--resume")
+        if params.initialization_mode == "policy_only":
+            argv.append("--resume_policy_only")
+        if params.strict_checkpoint_loading:
+            argv.append("--strict-checkpoint-loading")
         argv.extend(["--checkpoint", params.checkpoint or ""])
+        if params.checkpoint_sha256:
+            argv.extend(["--checkpoint-sha256", params.checkpoint_sha256])
     return argv
 
 

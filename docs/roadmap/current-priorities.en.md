@@ -6,7 +6,7 @@ audience: shared
 type: roadmap
 status: active
 owner: project
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="validation"></a>
@@ -40,8 +40,16 @@ The evidence gates and their interpretation are recorded in the [2026-08-13 rese
 <a id="reward-agent"></a>
 ## Reward Agent
 
-- Keep bounded candidate planning, dry-run inspection, explicit launch, trial persistence, and metric-based reports.
-- Add proposal UI and deeper Training Panel integration only after a separate design; do not silently edit reward source or let an LLM declare success without metrics.
+- Retain bounded candidate planning, dry-run inspection, explicit legacy launch, trial persistence, and metric-based reports as a manual workflow outside armed Autopilot campaigns.
+- Keep legacy session import non-armable and preserve its source JSON; do not reinterpret legacy scores as deterministic campaign evidence.
+
+<a id="autopilot-rollout"></a>
+## Autopilot rollout
+
+- Keep `REDRHEX_AUTOPILOT_ENABLED` off by default until fake-advisor loops, restart recovery, idempotency, and single-GPU host serialization pass on the target training host.
+- Provision ChatGPT Scheduled and OpenAI Secure MCP Tunnel externally, with runtime credentials outside the repository; verify shadow proposals and tunnel-loss waiting before any unattended launch.
+- Progress from a four-trial ForwardFast pilot through restart recovery to an opt-in 24-trial qualification campaign. Enable Direct stages 2–5 only after those gates pass.
+- Keep Sensor V2, remote-child campaign control, automatic source application, policy export/deployment, hardware promotion, and cross-campaign learning out of V1. A later compatibility design is required before changing the `3.7.0-remote-parity` protocol.
 
 <a id="documentation"></a>
 ## Documentation

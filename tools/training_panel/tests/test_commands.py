@@ -1,13 +1,16 @@
 import ast
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools.training_panel.training_panel.commands import (
+    EvaluationParams,
     FORWARD_FAST_TASK,
     TrainingParams,
     VideoParams,
     export_onnx_argv,
+    evaluation_argv,
     play_argv,
     shell_for_command,
     training_argv,
@@ -202,6 +205,76 @@ class CommandTests(unittest.TestCase):
         argv = training_argv(TrainingParams.from_dict({"spring_backend": "native"}))
 
         self.assertEqual(argv[argv.index("--spring-backend") + 1], "native")
+
+    def test_autopilot_training_argv_uses_immutable_profiles_and_strict_policy_fork(self):
+        digest = "a" * 64
+        params = TrainingParams.from_dict(
+            {
+                "checkpoint": "/tmp/model_10.pt",
+                "checkpoint_sha256": digest,
+                "initialization_mode": "policy_only",
+                "strict_checkpoint_loading": True,
+                "curriculum_stage": 2,
+            }
+        )
+
+        argv = training_argv(
+            params,
+            reward_profile_file="/tmp/reward.json",
+            reward_profile_sha256="b" * 64,
+            terrain_profile_file="/tmp/terrain.json",
+            terrain_profile_sha256="c" * 64,
+        )
+
+        self.assertNotIn("--panel_overrides", argv)
+        self.assertIn("--resume_policy_only", argv)
+        self.assertIn("--strict-checkpoint-loading", argv)
+        self.assertEqual(argv[argv.index("--checkpoint-sha256") + 1], digest)
+        self.assertEqual(argv[argv.index("--curriculum-stage") + 1], "2")
+        self.assertEqual(argv[argv.index("--reward-profile") + 1], "/tmp/reward.json")
+
+    def test_evaluation_argv_requires_exact_checkpoint_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "model_10.pt"
+            checkpoint.write_bytes(b"checkpoint")
+            command_profile = Path(tmp) / "command_profile.json"
+            command_profile.write_text("{}", encoding="utf-8")
+            command_profile_digest = hashlib.sha256(command_profile.read_bytes()).hexdigest()
+            params = EvaluationParams(
+                source_run_id="panel_1",
+                checkpoint=str(checkpoint),
+                checkpoint_sha256="a" * 64,
+                task=FORWARD_FAST_TASK,
+                agent_entry_point="rsl_rl_cfg_entry_point",
+                seed=42,
+                evaluation_profile="stage1",
+                curriculum_stage=1,
+                command_profile_file=str(command_profile),
+                command_profile_sha256=command_profile_digest,
+                code_sha256="b" * 64,
+                config_sha256="c" * 64,
+                dependency_sha256="d" * 64,
+                reward_profile_sha256="e" * 64,
+                physics_identity_sha256="f" * 64,
+                spring_identity_sha256="1" * 64,
+                terrain_profile_sha256="2" * 64,
+            )
+
+            argv = evaluation_argv(params, csv_file=str(Path(tmp) / "commands.csv"))
+
+            self.assertIn("--strict-checkpoint-loading", argv)
+            self.assertEqual(argv[argv.index("--checkpoint") + 1], str(checkpoint))
+            self.assertEqual(argv[argv.index("--checkpoint-sha256") + 1], "a" * 64)
+            self.assertEqual(argv[argv.index("--eval_profile") + 1], "stage1")
+            self.assertEqual(argv[argv.index("--sweep_steps") + 1], "600")
+            self.assertEqual(
+                float(argv[argv.index("--expected-step-dt") + 1]), 1.0 / 60.0
+            )
+            self.assertEqual(
+                argv[argv.index("--agent") + 1], "rsl_rl_cfg_entry_point"
+            )
+            self.assertEqual(argv[argv.index("--command-profile-sha256") + 1], command_profile_digest)
+            self.assertEqual(argv[argv.index("--identity-reward-profile-sha256") + 1], "e" * 64)
 
     def test_physics_profile_is_forwarded_to_train_play_and_export(self):
         params = TrainingParams.from_dict(

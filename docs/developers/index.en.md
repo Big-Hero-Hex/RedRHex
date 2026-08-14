@@ -20,6 +20,7 @@ last_reviewed: 2026-08-14
 - [ROS 2 deployment architecture](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.en.md)
 - [Reward Agent architecture](../../tools/reward_agent/docs/architecture.en.md)
 - [Training Panel architecture](../../tools/training_panel/docs/architecture.en.md)
+- [Training Panel Autopilot API](../../tools/training_panel/docs/autopilot-api.en.md)
 - [Windows remote launcher architecture (draft)](../../tools/windows/docs/architecture.en.md)
 - [macOS remote launcher architecture (draft)](../../tools/macos/docs/architecture.en.md)
 

@@ -10,6 +10,8 @@
 #import ext_furuta_pendulum  # :)
 
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -79,6 +81,34 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--reward-profile",
+    type=str,
+    default=None,
+    help="Immutable per-run reward override JSON. Prefer this over --panel_overrides.",
+)
+parser.add_argument("--reward-profile-sha256", type=str, default=None, help="Expected reward profile SHA-256.")
+parser.add_argument(
+    "--terrain-profile",
+    type=str,
+    default=None,
+    help="Immutable per-run terrain override JSON. Prefer this over --panel_overrides.",
+)
+parser.add_argument("--terrain-profile-sha256", type=str, default=None, help="Expected terrain profile SHA-256.")
+parser.add_argument("--checkpoint-sha256", type=str, default=None, help="Expected exact source checkpoint SHA-256.")
+parser.add_argument(
+    "--strict-checkpoint-loading",
+    action="store_true",
+    default=False,
+    help="Forbid legacy shape-compatible policy fallback.",
+)
+parser.add_argument(
+    "--curriculum-stage",
+    type=int,
+    choices=(1, 2, 3, 4, 5),
+    default=None,
+    help="Typed Direct curriculum stage selected by the panel.",
+)
+parser.add_argument(
     "--resume_policy_only",
     action="store_true",
     default=False,
@@ -145,10 +175,32 @@ def _validate_checkpoint_cli() -> None:
         parser.error("V2 resume requires --resume --checkpoint PATH for exact same-kind loading")
     if _is_sensor_v2_task(args_cli.task) and args_cli.resume_policy_only:
         parser.error("V2 forbids --resume_policy_only and shape-compatible partial loading")
+    if args_cli.resume_policy_only and not args_cli.resume:
+        parser.error("--resume_policy_only requires --resume")
+    if args_cli.strict_checkpoint_loading and args_cli.checkpoint is None:
+        parser.error("--strict-checkpoint-loading requires --checkpoint")
+
+
+def _validate_sha256_bound_file(label: str, raw_path: str | None, expected: str | None) -> None:
+    if expected is None:
+        return
+    if raw_path is None:
+        parser.error(f"--{label}-sha256 requires --{label}")
+    if len(expected) != 64 or any(char not in "0123456789abcdef" for char in expected.lower()):
+        parser.error(f"--{label}-sha256 must be a 64-character hexadecimal digest")
+    path = Path(raw_path)
+    if not path.is_file():
+        parser.error(f"--{label} must name an existing regular file when a digest is supplied")
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != expected.lower():
+        parser.error(f"--{label} SHA-256 mismatch: expected {expected.lower()}, got {actual}")
 
 
 _validate_spring_backend_cli()
 _validate_checkpoint_cli()
+_validate_sha256_bound_file("reward-profile", args_cli.reward_profile, args_cli.reward_profile_sha256)
+_validate_sha256_bound_file("terrain-profile", args_cli.terrain_profile, args_cli.terrain_profile_sha256)
+_validate_sha256_bound_file("checkpoint", args_cli.checkpoint, args_cli.checkpoint_sha256)
 
 # always enable cameras to record video
 if args_cli.video:
@@ -301,6 +353,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.curriculum_stage is not None:
+        if not hasattr(env_cfg, "stage"):
+            raise ValueError("--curriculum-stage is not supported by the selected task")
+        env_cfg.stage = int(args_cli.curriculum_stage)
+        print(f"[INFO] Training curriculum stage fixed to {env_cfg.stage}")
     # check for invalid combination of CPU device with distributed training
     if args_cli.distributed and args_cli.device is not None and "cpu" in args_cli.device:
         raise ValueError(
@@ -342,30 +399,50 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
 
-    # Reward/terrain override files written by the training panel or Reward Agent Lab.
-    # Only applied when --panel_overrides is passed (the panel adds it when spawning
-    # train.py); otherwise a stale override file must not silently reshape manual runs.
+    # New panel launches use immutable hash-bound per-run snapshots. The global files
+    # remain a compatibility path for older manual tooling only.
     _override_file = Path(__file__).parents[2] / "tools" / "training_panel" / "active_reward_override.json"
     _terrain_override_file = Path(__file__).parents[2] / "tools" / "training_panel" / "active_terrain_override.json"
+    _reward_input = Path(args_cli.reward_profile) if args_cli.reward_profile else None
+    _terrain_input = Path(args_cli.terrain_profile) if args_cli.terrain_profile else None
     if args_cli.panel_overrides:
-        if _override_file.exists():
-            import json as _json
-            from tools.training_panel.training_panel.reward_overrides import apply_reward_overrides
+        _reward_input = _reward_input or (_override_file if _override_file.exists() else None)
+        _terrain_input = _terrain_input or (_terrain_override_file if _terrain_override_file.exists() else None)
 
-            _overrides = _json.loads(_override_file.read_text(encoding="utf-8"))
-            _applied = apply_reward_overrides(env_cfg, _overrides)
-            if _applied:
-                print(f"[INFO] Training panel reward overrides applied: {', '.join(_applied)}")
+    if _reward_input is not None:
+        from tools.training_panel.training_panel.reward_overrides import apply_reward_overrides
 
-        if _terrain_override_file.exists():
-            import json as _json
-            from tools.training_panel.training_panel.terrain import apply_terrain_overrides
+        _overrides = json.loads(_reward_input.read_text(encoding="utf-8"))
+        if not isinstance(_overrides, dict):
+            raise ValueError(f"Reward profile must contain a JSON object: {_reward_input}")
+        _applied = apply_reward_overrides(
+            env_cfg,
+            _overrides,
+            require_all=bool(args_cli.reward_profile),
+        )
+        if _applied:
+            print(f"[INFO] Training panel reward overrides applied: {', '.join(_applied)}")
 
-            _terrain_overrides = _json.loads(_terrain_override_file.read_text(encoding="utf-8"))
-            _applied = apply_terrain_overrides(env_cfg, _terrain_overrides)
-            if _applied:
-                print(f"[INFO] Training panel terrain overrides applied: {', '.join(_applied)}")
-    else:
+    if _terrain_input is not None:
+        from tools.training_panel.training_panel.terrain import apply_terrain_overrides
+
+        _terrain_overrides = json.loads(_terrain_input.read_text(encoding="utf-8"))
+        if not isinstance(_terrain_overrides, dict):
+            raise ValueError(f"Terrain profile must contain a JSON object: {_terrain_input}")
+        _applied = apply_terrain_overrides(
+            env_cfg,
+            _terrain_overrides,
+            require_exact=bool(args_cli.terrain_profile),
+        )
+        if args_cli.terrain_profile and len(_applied) != len(_terrain_overrides):
+            raise ValueError(
+                "Terrain profile did not resolve exactly: "
+                f"requested={sorted(_terrain_overrides)}, applied={_applied}"
+            )
+        if _applied:
+            print(f"[INFO] Training panel terrain overrides applied: {', '.join(_applied)}")
+
+    if not args_cli.panel_overrides and _reward_input is None and _terrain_input is None:
         for _stale in (_override_file, _terrain_override_file):
             if _stale.exists():
                 print(
@@ -499,7 +576,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 resume_path,
                 env.unwrapped.device,
                 load_optimizer=False,
-                allow_partial_policy=True,
+                allow_partial_policy=not args_cli.strict_checkpoint_loading,
             )
             runner.current_learning_iteration = 0
             print("[INFO]: Resume mode = policy-only (optimizer state skipped, iteration reset to 0).")

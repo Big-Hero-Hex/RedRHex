@@ -18,6 +18,8 @@ last_reviewed: 2026-08-14
 <a id="component-releases"></a>
 ## Component releases
 
+- [Training Panel 3.8.0 Autopilot preview](../../tools/training_panel/docs/releases/v3-8-0.en.md)
+- [Training Panel 3.7.0 remote parity](../../tools/training_panel/docs/releases/v3-7-0.en.md)
 - [Training Panel 3.6.1](../../tools/training_panel/docs/releases/v3-6-1.en.md)
 - [Training Panel 3.6.0](../../tools/training_panel/docs/releases/v3-6-0.en.md)
 - [Training Panel 3.5.0](../../tools/training_panel/docs/releases/v3-5-0.en.md)

@@ -1982,6 +1982,311 @@ html[data-theme="dark"] .comparison-diff {
   overflow-wrap: anywhere;
 }
 
+.settings-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--blue) 16%, transparent), transparent 34%),
+    linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 74%, transparent), var(--surface));
+  box-shadow: 0 14px 34px rgba(25, 35, 39, 0.08);
+}
+
+.settings-page-head h2,
+.settings-section-head h2 {
+  margin: 2px 0 4px;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+}
+
+.settings-eyebrow {
+  display: block;
+  color: var(--blue);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.settings-page-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.settings-workspace {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.settings-section-nav {
+  position: sticky;
+  top: 18px;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 10px 28px rgba(25, 35, 39, 0.07);
+}
+
+.settings-section-button {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+}
+
+.settings-section-button strong {
+  color: inherit;
+  font-size: 0.92rem;
+}
+
+.settings-section-button span {
+  font-size: 0.75rem;
+  font-weight: 550;
+  line-height: 1.35;
+}
+
+.settings-section-button:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  transform: none;
+}
+
+.settings-section-button.active {
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--line));
+  background: var(--blue-bg);
+  color: var(--blue);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+.settings-content,
+.settings-panel {
+  min-width: 0;
+}
+
+.settings-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 2px 2px 4px;
+}
+
+.settings-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.settings-card-grid-primary {
+  grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.8fr);
+}
+
+.settings-workspace .control-card {
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 10px 28px rgba(25, 35, 39, 0.07);
+}
+
+.settings-feature-card {
+  border-color: color-mix(in srgb, var(--blue) 24%, var(--line));
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--blue-bg) 42%, transparent), transparent 46%),
+    var(--surface);
+}
+
+.settings-toggle-surface {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.settings-toggle-surface .toggle-row {
+  margin-bottom: 4px;
+}
+
+.settings-card-kicker,
+.drive-path-preview > span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.settings-card-kicker {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.settings-field {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-field > span {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.settings-field small {
+  color: var(--muted);
+}
+
+.drive-path-preview {
+  display: grid;
+  gap: 6px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+
+.drive-path-preview strong {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.drive-path-preview small,
+.drive-account-summary span,
+.drive-account-caveat,
+.settings-technical-details p {
+  color: var(--muted);
+}
+
+.drive-privacy-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.drive-privacy-note span {
+  display: grid;
+  width: 19px;
+  height: 19px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--green-bg);
+  color: var(--green);
+  font-weight: 900;
+}
+
+.drive-account-summary {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.drive-account-summary > div {
+  display: grid;
+  gap: 2px;
+}
+
+.drive-account-mark {
+  display: grid;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--line));
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--blue);
+  font-size: 1.05rem;
+  font-weight: 900;
+}
+
+.drive-account-caveat {
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.settings-technical-details {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.settings-technical-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.settings-technical-details[open] summary {
+  margin-bottom: 9px;
+}
+
+.settings-technical-details p {
+  margin: 8px 0;
+  font-size: 0.8rem;
+}
+
+.settings-technical-label code {
+  padding: 2px 5px;
+}
+
+.settings-callout {
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-callout[data-state="running"] {
+  border-left-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.settings-callout[data-state="success"] {
+  border-left-color: var(--green);
+  background: var(--green-bg);
+}
+
+.settings-callout[data-state="error"] {
+  border-left-color: var(--red-dark);
+  background: var(--failed-bg);
+}
+
+.settings-diagnostics {
+  margin-top: 0;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
 .control-center-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
@@ -2240,6 +2545,35 @@ pre {
   .worker-settings-grid,
   .convergence-layout {
     grid-template-columns: 1fr;
+  }
+
+  .settings-page-head,
+  .settings-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-page-actions {
+    justify-content: flex-start;
+  }
+
+  .settings-workspace,
+  .settings-card-grid,
+  .settings-card-grid-primary {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-section-nav {
+    position: static;
+    display: flex;
+    max-width: 100%;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+  }
+
+  .settings-section-button {
+    flex: 0 0 min(210px, 72vw);
+    scroll-snap-align: start;
   }
 
   .training-route-summary {
@@ -3579,4 +3913,686 @@ html[data-theme="dark"] .folder-item.drop-target {
   left: auto;
   right: 0;
   transform: none;
+}
+
+/* ── AI-guided Autopilot campaigns ── */
+.autopilot-workspace,
+.autopilot-main-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.autopilot-status-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.autopilot-status-strip > div {
+  display: grid;
+  gap: 2px;
+}
+
+.autopilot-status-strip span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.autopilot-status-strip strong {
+  font-size: 13px;
+}
+
+.autopilot-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.28fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.autopilot-goal-form {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 14px;
+}
+
+.autopilot-goal-form textarea {
+  min-height: 92px;
+}
+
+.autopilot-wide-field,
+.autopilot-command-fields {
+  grid-column: 1 / -1;
+}
+
+.autopilot-command-fields {
+  margin: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.autopilot-command-fields legend {
+  padding: 0 5px;
+  color: var(--text);
+  font-weight: 850;
+}
+
+.autopilot-command-intervals,
+.autopilot-skill-gate-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.autopilot-interval-card {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.autopilot-interval-card span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.autopilot-interval-card strong {
+  overflow-wrap: anywhere;
+}
+
+.autopilot-tunables {
+  margin: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.autopilot-tunables legend {
+  padding: 0 5px;
+  color: var(--text);
+  font-weight: 850;
+}
+
+.autopilot-skill-gates {
+  margin: 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.autopilot-skill-gates legend {
+  padding: 0 5px;
+  color: var(--text);
+  font-weight: 850;
+}
+
+.autopilot-skill-gate-list {
+  margin-top: 10px;
+}
+
+.autopilot-tunable-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.autopilot-tunable-card {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.autopilot-tunable-card .check-row {
+  padding: 0;
+}
+
+.autopilot-bound-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.autopilot-bound-inputs label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.autopilot-bound-inputs input {
+  width: 100%;
+}
+
+.autopilot-command-preview {
+  grid-column: 1 / -1;
+  min-height: 66px;
+}
+
+.autopilot-campaign-sidebar {
+  position: sticky;
+  top: 112px;
+  max-height: calc(100vh - 138px);
+  overflow: auto;
+}
+
+.autopilot-campaign-list,
+.autopilot-event-list,
+.autopilot-artifact-list {
+  display: grid;
+  gap: 8px;
+}
+
+.autopilot-campaign-button {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: left;
+}
+
+.autopilot-campaign-button:hover,
+.autopilot-campaign-button.active {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+  transform: none;
+}
+
+.autopilot-campaign-button > span,
+.autopilot-campaign-button > small {
+  color: var(--muted);
+}
+
+.autopilot-campaign-button > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.autopilot-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.autopilot-summary-item {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.autopilot-summary-item span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.autopilot-summary-item strong {
+  overflow-wrap: anywhere;
+}
+
+.autopilot-detail-section {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.autopilot-detail-section .section-header {
+  margin-bottom: 8px;
+}
+
+.autopilot-decision-context {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.autopilot-decision-card,
+.autopilot-event,
+.autopilot-artifact {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+}
+
+.autopilot-decision-card small,
+.autopilot-event small,
+.autopilot-artifact small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.autopilot-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.autopilot-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.autopilot-table th,
+.autopilot-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.autopilot-table th {
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.autopilot-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.autopilot-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.autopilot-artifact a {
+  color: var(--blue);
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .autopilot-layout,
+  .autopilot-evidence-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .autopilot-campaign-sidebar {
+    position: static;
+    max-height: none;
+    grid-row: 1;
+  }
+
+  .autopilot-campaign-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .autopilot-status-strip,
+  .autopilot-goal-form,
+  .autopilot-command-fields,
+  .autopilot-command-intervals,
+  .autopilot-summary-grid,
+  .autopilot-decision-context,
+  .autopilot-campaign-list,
+  .autopilot-tunable-list,
+  .autopilot-skill-gate-list {
+    grid-template-columns: 1fr;
+  }
+
+  .autopilot-wide-field,
+  .autopilot-command-fields,
+  .autopilot-command-preview {
+    grid-column: auto;
+  }
+}
+
+/* ---------------------------------------------------------------- physics viewport */
+/* The 3D robot preview on the Physics page. Colors come from the theme tokens so the
+   scene (which samples them at runtime) and its chrome stay in step in both themes. */
+/* The field list is long, so the preview follows the operator down the page. Without
+   this the model scrolls away exactly when a value is being edited. */
+/* Zero-height marker at the preview's resting position. It never moves when the
+   preview collapses, so it is a stable reference for "is the preview pinned yet". */
+#physics-viewport-anchor {
+  height: 0;
+}
+
+.physics-viewport {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  margin-bottom: 16px;
+  overflow: hidden;
+  transition: box-shadow 160ms ease;
+}
+
+/* Once stuck it is competing with the fields for screen, so it gives most of its
+   height back and drops the chrome that is only useful at rest. */
+.physics-viewport.is-stuck {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: var(--shadow);
+}
+
+.physics-viewport.is-stuck .physics-viewport-head {
+  padding: 8px 16px;
+}
+
+.physics-viewport.is-stuck .physics-viewport-head .muted-copy,
+.physics-viewport.is-stuck .physics-viewport-hint,
+.physics-viewport.is-stuck .physics-label-swap,
+.physics-viewport.is-stuck .physics-viewport-readout {
+  display: none;
+}
+
+.physics-viewport.is-stuck .physics-viewport-canvas,
+.physics-viewport.is-stuck .robot-fallback-svg {
+  height: 190px;
+}
+
+.physics-viewport.is-stuck .physics-label-warning {
+  margin: 0 16px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+/* Full caveat at rest, one-line reminder while stuck. */
+.physics-label-short {
+  display: none;
+}
+
+.physics-viewport.is-stuck .physics-label-short {
+  display: inline;
+}
+
+.physics-viewport.is-stuck .physics-label-full {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .physics-viewport {
+    transition: none;
+  }
+}
+
+.physics-viewport-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.physics-viewport-head h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+}
+
+.physics-viewport-head .muted-copy {
+  margin: 0;
+  font-size: 12px;
+}
+
+.physics-viewport-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.physics-viewport-stage {
+  position: relative;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface));
+}
+
+.physics-viewport-canvas {
+  width: 100%;
+  height: 420px;
+  touch-action: none;
+  cursor: grab;
+}
+
+.physics-viewport-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.physics-viewport-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  font-size: 11px;
+  color: var(--muted);
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  opacity: 0.85;
+}
+
+.physics-viewport-readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* Quantities with no honest spatial depiction are reported here instead of being
+   mimed by the model. */
+.physics-readout-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 12px;
+}
+
+.physics-readout-chip small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.physics-readout-chip strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.physics-readout-chip.is-overridden {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.physics-label-warning {
+  margin: 12px 16px 0;
+}
+
+.physics-label-warning ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.physics-label-warning code {
+  background: var(--code-bg);
+  color: var(--code-text);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+/* Fallback schematic, used when WebGL is unavailable. Kept interactive so the
+   click-a-leg-to-filter behavior survives the downgrade. */
+.robot-fallback-svg {
+  display: block;
+  width: 100%;
+  height: 420px;
+}
+
+.robot-fallback-body {
+  fill: var(--surface-2);
+  stroke: var(--line-strong);
+  stroke-width: 0.004;
+}
+
+.robot-fallback-leg {
+  cursor: pointer;
+}
+
+.robot-fallback-leg circle {
+  fill: var(--red);
+  stroke: var(--surface);
+  stroke-width: 0.004;
+  transition: fill 120ms ease;
+}
+
+.robot-fallback-leg text {
+  fill: var(--surface);
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.robot-fallback-leg:hover circle,
+.robot-fallback-leg:focus-visible circle {
+  fill: var(--green);
+}
+
+.robot-fallback-leg:focus-visible {
+  outline: none;
+}
+
+.robot-fallback-leg:focus-visible circle {
+  stroke: var(--blue);
+  stroke-width: 0.008;
+}
+
+.robot-fallback-com {
+  fill: var(--amber);
+  stroke: var(--surface);
+  stroke-width: 0.004;
+}
+
+@media (max-width: 900px) {
+  .physics-viewport-canvas,
+  .robot-fallback-svg {
+    height: 240px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .robot-fallback-leg circle {
+    transition: none;
+  }
+}
+
+.physics-label-swap {
+  display: inline-block;
+  margin: 4px 6px 0 0;
+  padding: 2px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Keyboard navigation and scrollIntoView must not park a field underneath the pinned
+   preview. Scoped to the physics rows so other views keep their own scroll behavior. */
+.physics-row {
+  scroll-margin-top: 290px;
+}
+
+/* On a short viewport a pinned preview would take most of the usable height, so it
+   scrolls away normally instead. */
+@media (max-height: 620px) {
+  .physics-viewport {
+    position: static;
+  }
+
+  .physics-row {
+    scroll-margin-top: 0;
+  }
+}
+
+/* Joint families differ in shape first and colour second; the legend names both so the
+   model is readable without hovering every part. */
+.physics-viewport-legend {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  margin: 0;
+  padding: 8px 12px;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+  opacity: 0.92;
+  pointer-events: none;
+}
+
+.physics-viewport-legend li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.joint-key {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.joint-key-main {
+  background: var(--blue);
+}
+
+.joint-key-abad {
+  background: var(--green);
+}
+
+.joint-key-damper {
+  background: var(--line-strong);
+}
+
+.physics-viewport.is-stuck .physics-viewport-legend {
+  display: none;
 }

@@ -1,13 +1,23 @@
+import hashlib
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from tools.training_panel.training_panel.commands import DEFAULT_TASK, TrainingParams, VideoParams, resolve_spring_backend
+from tools.training_panel.training_panel.commands import (
+    DEFAULT_TASK,
+    EvaluationParams,
+    TrainingParams,
+    VideoParams,
+    resolve_spring_backend,
+)
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.history import HistoryStore
 from tools.training_panel.training_panel.processes import (
@@ -15,8 +25,10 @@ from tools.training_panel.training_panel.processes import (
     EXTERNAL_GPU_ID_PREFIX,
     EXTERNAL_TRAINING_ID_PREFIX,
     EXTERNAL_VIDEO_ID_PREFIX,
+    GpuHostLeaseBusy,
     ProcessInfo,
     ProcessRegistry,
+    ProcessStartError,
     SpawnedProcess,
 )
 
@@ -41,6 +53,37 @@ class ProcessRegistryTests(unittest.TestCase):
             isaacsim_root=root / "isaacsim",
             conda_sh=conda_sh,
             conda_env="env",
+        )
+
+    @staticmethod
+    def make_evaluation_params(root: Path) -> EvaluationParams:
+        checkpoint = root / "model_1.pt"
+        checkpoint.write_bytes(b"checkpoint")
+        command_profile = root / "command_profile.json"
+        command_profile.write_text('{"commands":[]}\n', encoding="utf-8")
+        identity = "a" * 64
+        return EvaluationParams(
+            source_run_id="panel_source",
+            checkpoint=str(checkpoint),
+            checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            task="Template-Redrhex-Direct-v0",
+            agent_entry_point="rsl_rl_cfg_entry_point",
+            seed=42,
+            evaluation_profile="stage1",
+            curriculum_stage=1,
+            command_profile_file=str(command_profile),
+            command_profile_sha256=hashlib.sha256(command_profile.read_bytes()).hexdigest(),
+            code_sha256=identity,
+            config_sha256=identity,
+            dependency_sha256=identity,
+            reward_profile_sha256=identity,
+            physics_identity_sha256=identity,
+            spring_identity_sha256=identity,
+            terrain_profile_sha256=identity,
+            num_envs=1,
+            device="cpu",
+            campaign_id="campaign-launch-recovery",
+            campaign_trial_id="trial-launch-recovery",
         )
 
     def test_training_record_preserves_tweak_metadata(self):
@@ -237,6 +280,195 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(history.get_run(queued["id"])["status"], "queued")
             self.assertIsNone(history.get_run(queued["id"]).get("pid"))
 
+    def test_gpu_host_lease_serializes_two_registry_instances(self):
+        class RunningProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            first_registry = ProcessRegistry(paths, history)
+            second_registry = ProcessRegistry(paths, history)
+            with (
+                patch.object(
+                    first_registry,
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=RunningProcess()),
+                ),
+                patch.object(first_registry, "_raise_if_immediate_exit"),
+                patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls,
+            ):
+                thread_cls.return_value.start = Mock()
+                first = first_registry.start_play("run_one", "/tmp/model.pt", device="cpu")
+
+            with patch.object(second_registry, "_spawn_shell") as second_spawn:
+                with self.assertRaises(GpuHostLeaseBusy) as caught:
+                    second_registry.start_onnx_export("run_one", "/tmp/model.pt", device="cpu")
+
+            self.assertEqual(caught.exception.payload["code"], "gpu_host_lease_busy")
+            self.assertEqual(caught.exception.payload["lease"]["process_id"], first["id"])
+            self.assertEqual(caught.exception.payload["lease"]["kind"], "play")
+            second_spawn.assert_not_called()
+
+            params = TrainingParams.from_dict(
+                {"task": "Template-Redrhex-Direct-v0", "num_envs": 4, "max_iterations": 8}
+            )
+            with (
+                patch.object(second_registry, "_spawn_shell") as queued_spawn,
+                patch.object(second_registry, "_schedule_queued_training_start_locked") as schedule,
+            ):
+                queued = second_registry.queue_training(params)
+            self.assertEqual(history.get_run(queued["id"])["status"], "queued")
+            queued_spawn.assert_not_called()
+            schedule.assert_called_once_with(1.0)
+            first_registry._release_gpu_lease(first["id"])
+
+    def test_gpu_host_lease_acquisition_is_atomic_across_registry_threads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registries = [
+                ProcessRegistry(paths, HistoryStore(paths)),
+                ProcessRegistry(paths, HistoryStore(paths)),
+            ]
+            start_barrier = threading.Barrier(3)
+            attempted_barrier = threading.Barrier(3)
+            release_winner = threading.Event()
+            outcomes: list[tuple[str, int]] = []
+
+            def attempt(index: int) -> None:
+                acquired = False
+                start_barrier.wait()
+                try:
+                    registries[index]._acquire_gpu_lease(f"process_{index}", "training")
+                    acquired = True
+                    outcomes.append(("acquired", index))
+                except GpuHostLeaseBusy:
+                    outcomes.append(("busy", index))
+                attempted_barrier.wait()
+                if acquired:
+                    release_winner.wait(timeout=2)
+                    registries[index]._release_gpu_lease(f"process_{index}")
+
+            threads = [threading.Thread(target=attempt, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            start_barrier.wait()
+            attempted_barrier.wait()
+            self.assertEqual(sorted(outcome for outcome, _index in outcomes), ["acquired", "busy"])
+            release_winner.set()
+            for thread in threads:
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive())
+
+    def test_gpu_host_lease_is_released_when_spawn_fails(self):
+        class RunningProcess:
+            pid = 12346
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            failed_registry = ProcessRegistry(paths, history)
+            next_registry = ProcessRegistry(paths, history)
+            with patch.object(failed_registry, "_spawn_shell", side_effect=OSError("spawn failed")):
+                with self.assertRaisesRegex(OSError, "spawn failed"):
+                    failed_registry.start_play("run_one", "/tmp/model.pt", device="cpu")
+
+            with (
+                patch.object(
+                    next_registry,
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=RunningProcess()),
+                ),
+                patch.object(next_registry, "_raise_if_immediate_exit"),
+                patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls,
+            ):
+                thread_cls.return_value.start = Mock()
+                started = next_registry.start_play("run_one", "/tmp/model.pt", device="cpu")
+
+            self.assertIn(started["id"], next_registry._gpu_lease_fds)
+            next_registry._release_gpu_lease(started["id"])
+
+    def test_gpu_host_lease_parent_fd_is_closed_when_monitor_start_fails(self):
+        class CompletedProcess:
+            pid = 12348
+
+            def poll(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run({"id": "run_one", "source": "training_panel", "status": "completed"})
+            registry = ProcessRegistry(paths, history)
+            with (
+                patch.object(
+                    registry,
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=CompletedProcess()),
+                ),
+                patch(
+                    "tools.training_panel.training_panel.processes.threading.Thread.start",
+                    side_effect=RuntimeError("monitor failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "monitor failed"):
+                    registry.start_onnx_export("run_one", "/tmp/model.pt", device="cpu")
+
+            self.assertEqual(registry._gpu_lease_fds, {})
+            other_registry = ProcessRegistry(paths, history)
+            other_registry._acquire_gpu_lease("next_process", "training")
+            other_registry._release_gpu_lease("next_process")
+
+    def test_gpu_host_lease_fd_is_inherited_and_released_after_monitor_exit(self):
+        class CompletedProcess:
+            pid = 12347
+
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, isaac_settle_seconds=0)
+            proc = CompletedProcess()
+            with (
+                patch.object(
+                    registry,
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=proc),
+                ) as spawn,
+                patch.object(registry, "_raise_if_immediate_exit"),
+                patch.object(registry, "start_next_queued_training"),
+                patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls,
+            ):
+                thread_cls.return_value.start = Mock()
+                result = registry.start_play("run_one", "/tmp/model.pt", device="cpu")
+
+            inherited_fds = spawn.call_args.kwargs["inherited_fds"]
+            self.assertEqual(len(inherited_fds), 1)
+            self.assertEqual(inherited_fds[0], registry._gpu_lease_fds[result["id"]])
+            registry._monitor_play(result["id"], proc)
+            self.assertNotIn(result["id"], registry._gpu_lease_fds)
+
+            other_registry = ProcessRegistry(paths, history)
+            lease_fd = other_registry._acquire_gpu_lease("next_process", "training")
+            self.assertGreaterEqual(lease_fd, 0)
+            other_registry._release_gpu_lease("next_process")
+
     def test_queue_training_waits_during_isaac_settle_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -285,6 +517,125 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(record["client_request_id"], "child-123")
             self.assertEqual(record["params"]["folder"], "tests")
             self.assertEqual(record["params"]["client_request_id"], "child-123")
+
+    def test_client_request_id_is_atomic_across_registry_instances(self):
+        class RunningProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registries = [
+                ProcessRegistry(paths, HistoryStore(paths)),
+                ProcessRegistry(paths, HistoryStore(paths)),
+            ]
+            params = [
+                TrainingParams.from_dict(
+                    {
+                        "task": "Template-Redrhex-Direct-v0",
+                        "num_envs": 4,
+                        "max_iterations": 8,
+                        "device": "cpu",
+                        "seed": 42,
+                        "client_request_id": "shared-launch-123",
+                    }
+                )
+                for _ in registries
+            ]
+            barrier = threading.Barrier(3)
+            results: list[dict] = []
+            errors: list[BaseException] = []
+
+            def launch(index: int) -> None:
+                barrier.wait()
+                try:
+                    results.append(registries[index].start_training(params[index]))
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            with (
+                patch.object(
+                    registries[0],
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=RunningProcess()),
+                ) as first_spawn,
+                patch.object(
+                    registries[1],
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=RunningProcess()),
+                ) as second_spawn,
+                patch.object(registries[0], "_start_gpu_monitor"),
+                patch.object(registries[1], "_start_gpu_monitor"),
+            ):
+                threads = [threading.Thread(target=launch, args=(index,)) for index in range(2)]
+                for thread in threads:
+                    thread.start()
+                barrier.wait()
+                for thread in threads:
+                    thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive())
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["id"], results[1]["id"])
+            self.assertEqual(first_spawn.call_count + second_spawn.call_count, 1)
+            matching = [
+                run
+                for run in HistoryStore(paths).list_runs()
+                if run.get("client_request_id") == "shared-launch-123"
+            ]
+            self.assertEqual(len(matching), 1)
+            for registry in registries:
+                registry._release_gpu_lease(results[0]["id"])
+
+    def test_client_request_id_mismatch_fails_closed_and_completed_run_is_reused(self):
+        class RunningProcess:
+            pid = 12346
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            first_registry = ProcessRegistry(paths, HistoryStore(paths))
+            request = {
+                "task": "Template-Redrhex-Direct-v0",
+                "num_envs": 4,
+                "max_iterations": 8,
+                "device": "cpu",
+                "seed": 42,
+                "client_request_id": "stable-launch-123",
+            }
+            with (
+                patch.object(
+                    first_registry,
+                    "_spawn_shell",
+                    return_value=SpawnedProcess(proc=RunningProcess()),
+                ),
+                patch.object(first_registry, "_start_gpu_monitor"),
+            ):
+                first = first_registry.start_training(TrainingParams.from_dict(request))
+
+            first_registry.history.update_run(first["id"], status="completed")
+            first_registry._release_gpu_lease(first["id"])
+            second_registry = ProcessRegistry(paths, HistoryStore(paths))
+            with patch.object(second_registry, "_spawn_shell") as duplicate_spawn:
+                repeated = second_registry.start_training(TrainingParams.from_dict(request))
+            self.assertEqual(repeated["id"], first["id"])
+            self.assertEqual(repeated["status"], "completed")
+            duplicate_spawn.assert_not_called()
+
+            changed = {**request, "max_iterations": 9}
+            with patch.object(second_registry, "_spawn_shell") as mismatch_spawn:
+                with self.assertRaises(ProcessStartError) as caught:
+                    second_registry.start_training(TrainingParams.from_dict(changed))
+            self.assertEqual(caught.exception.payload["code"], "client_request_id_conflict")
+            self.assertEqual(caught.exception.payload["existing_run_id"], first["id"])
+            mismatch_spawn.assert_not_called()
 
     def test_start_deploy_validation_records_process_metadata(self):
         class FakeProcess:
@@ -1281,6 +1632,91 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(run["returncode"], 0)
             self.assertEqual(run["log_dir"], str(log_dir))
 
+    def test_campaign_monitor_records_only_the_iteration_cap_checkpoint(self):
+        class CompletedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            log_dir = paths.rsl_rl_log_root / "campaign_run"
+            log_dir.mkdir(parents=True)
+            exact = log_dir / "model_7.pt"
+            exact.write_bytes(b"exact campaign output")
+            (log_dir / "model_999.pt").write_bytes(b"unrelated later file")
+            history.add_run(
+                {
+                    "id": "panel_campaign",
+                    "source": "training_panel",
+                    "status": "running",
+                    "campaign_id": "campaign-one",
+                    "created_at": "2026-08-14T12:00:00",
+                    "params": {
+                        "campaign_id": "campaign-one",
+                        "max_iterations": 8,
+                        "device": "cpu",
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            with patch.object(
+                registry, "_log_dir_from_process_log", return_value=str(log_dir)
+            ), patch.object(registry, "_refresh_tensorboard_summary"):
+                registry._monitor_training("panel_campaign", CompletedProcess(), 0)
+
+            run = history.get_run("panel_campaign")
+            self.assertEqual(run["status"], "completed")
+            self.assertEqual(run["output_checkpoint_path"], str(exact.resolve()))
+            self.assertEqual(run["output_checkpoint_iteration"], 7)
+            self.assertEqual(
+                run["output_checkpoint_sha256"], hashlib.sha256(exact.read_bytes()).hexdigest()
+            )
+
+    def test_campaign_monitor_never_fallback_selects_another_run_directory(self):
+        class CompletedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            unrelated = paths.rsl_rl_log_root / "unrelated"
+            unrelated.mkdir(parents=True)
+            (unrelated / "model_7.pt").write_bytes(b"wrong run")
+            history.add_run(
+                {
+                    "id": "panel_campaign_missing_log",
+                    "source": "training_panel",
+                    "status": "running",
+                    "campaign_id": "campaign-one",
+                    "params": {"campaign_id": "campaign-one", "max_iterations": 8},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            with patch.object(
+                registry, "_log_dir_from_process_log", return_value=None
+            ), patch.object(
+                history, "find_latest_log_after", return_value=str(unrelated)
+            ) as fallback, patch.object(registry, "_refresh_tensorboard_summary"):
+                registry._monitor_training(
+                    "panel_campaign_missing_log", CompletedProcess(), 0
+                )
+
+            fallback.assert_not_called()
+            run = history.get_run("panel_campaign_missing_log")
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["failure_class"], "evidence")
+            self.assertNotIn("output_checkpoint_path", run)
+
     def test_stop_all_for_run_stops_linked_play_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1879,6 +2315,458 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(panel["log_dir"], str(log_dir))
             self.assertEqual(panel["latest_checkpoint"], str(log_dir / "model_9999.pt"))
             self.assertFalse(any(run["id"] == log_dir.name for run in runs))
+
+    def test_campaign_reconciliation_finalizes_monitorless_training_after_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            run_id = "panel_campaign_restart"
+            process_log = paths.process_log_dir / f"{run_id}.log"
+            process_log.parent.mkdir(parents=True, exist_ok=True)
+            process_log.write_text(
+                "Exact experiment name requested from command line: restart_run\n",
+                encoding="utf-8",
+            )
+            log_dir = paths.rsl_rl_log_root / "restart_run_wheg_locomotion"
+            log_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_10.pt"
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            exit_file = paths.process_log_dir / f"{run_id}.exit"
+            history.add_run(
+                {
+                    "id": run_id,
+                    "source": "training_panel",
+                    "status": "running",
+                    "created_at": "2026-08-14T10:00:00",
+                    "process_log": str(process_log),
+                    "exit_file": str(exit_file),
+                    "campaign_id": "campaign-one",
+                    "campaign_trial_id": "trial-one",
+                    "params": {
+                        "campaign_id": "campaign-one",
+                        "max_iterations": 11,
+                    },
+                }
+            )
+            restarted = ProcessRegistry(paths, HistoryStore(paths))
+
+            unchanged = restarted.reconcile_campaign_process(run_id)
+            self.assertEqual(unchanged["status"], "running")
+            exit_file.write_text("0", encoding="utf-8")
+            completed = restarted.reconcile_campaign_process(run_id)
+
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["returncode"], 0)
+            self.assertEqual(completed["log_dir"], str(log_dir))
+            self.assertEqual(completed["latest_checkpoint"], str(checkpoint))
+            self.assertEqual(
+                completed["output_checkpoint_path"], str(checkpoint.resolve())
+            )
+            self.assertEqual(completed["output_checkpoint_iteration"], 10)
+            self.assertEqual(
+                completed["output_checkpoint_sha256"],
+                hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            )
+
+    def test_fallback_training_persists_exit_receipt_before_spawn_and_reconciles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.isaaclab_launcher.write_text(
+                "#!/usr/bin/env bash\nexit 7\n",
+                encoding="utf-8",
+            )
+            os.chmod(paths.isaaclab_launcher, 0o755)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, isaac_settle_seconds=0)
+            params = TrainingParams.from_dict(
+                {
+                    "task": "Template-Redrhex-Direct-v0",
+                    "num_envs": 1,
+                    "max_iterations": 1,
+                    "device": "cpu",
+                    "campaign_id": "campaign-fallback",
+                    "campaign_trial_id": "trial-fallback",
+                }
+            )
+            original_spawn = registry._spawn_shell
+            recorded_before_spawn: list[str] = []
+
+            def spawn_with_record_check(run_id, shell, log_file, **kwargs):
+                recorded = history.get_run(run_id)
+                recorded_before_spawn.append(str(recorded.get("exit_file") or ""))
+                return original_spawn(run_id, shell, log_file, **kwargs)
+
+            with (
+                patch.object(registry, "_spawn_shell", side_effect=spawn_with_record_check),
+                patch.object(registry, "_start_gpu_monitor"),
+                patch("tools.training_panel.training_panel.processes.shutil.which", return_value=None),
+            ):
+                started = registry.start_training(params)
+
+            process = registry._processes[started["id"]]
+            self.assertEqual(process.wait(timeout=2), 7)
+            registry._release_gpu_lease(started["id"])
+            exit_file = paths.process_log_dir / f"{started['id']}.exit"
+            self.assertEqual(recorded_before_spawn, [str(exit_file)])
+            self.assertEqual(started["exit_file"], str(exit_file))
+            self.assertEqual(exit_file.read_text(encoding="utf-8").strip(), "7")
+
+            completed = ProcessRegistry(paths, HistoryStore(paths)).reconcile_campaign_process(
+                started["id"]
+            )
+            self.assertEqual(completed["status"], "failed")
+            self.assertEqual(completed["returncode"], 7)
+            self.assertEqual(
+                completed["failure_reason"],
+                "training process exited with status 7",
+            )
+
+    def test_campaign_training_killed_after_history_add_before_spawn_is_infrastructure_failure(self):
+        class SimulatedPanelDeath(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, launch_grace_seconds=0)
+            params = TrainingParams.from_dict(
+                {
+                    "task": "Template-Redrhex-Direct-v0",
+                    "num_envs": 1,
+                    "max_iterations": 1,
+                    "device": "cpu",
+                    "campaign_id": "campaign-pre-spawn",
+                    "campaign_trial_id": "trial-pre-spawn",
+                }
+            )
+            with patch.object(
+                registry,
+                "_spawn_shell",
+                side_effect=SimulatedPanelDeath("panel killed before spawn"),
+            ):
+                with self.assertRaises(SimulatedPanelDeath):
+                    registry.start_training(params)
+
+            intent = history.list_runs()[0]
+            self.assertEqual(intent["launch_phase"], "prepared")
+            self.assertRegex(intent["launch_owner_token"], r"^[0-9a-f]{32}$")
+            registry._release_gpu_lease(intent["id"])
+
+            grace_protected = ProcessRegistry(
+                paths,
+                HistoryStore(paths),
+                launch_grace_seconds=60,
+            ).reconcile_campaign_process(intent["id"])
+            self.assertEqual(grace_protected["status"], "running")
+
+            failed = ProcessRegistry(
+                paths,
+                HistoryStore(paths),
+                launch_grace_seconds=0,
+            ).reconcile_campaign_process(intent["id"])
+
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["launch_phase"], "failed")
+            self.assertEqual(failed["failure_kind"], "infrastructure")
+            self.assertIn("temporarily unavailable", failed["failure_reason"])
+            self.assertIsNone(failed["returncode"])
+
+    def test_campaign_evaluation_killed_after_history_add_before_spawn_is_infrastructure_failure(self):
+        class SimulatedPanelDeath(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, launch_grace_seconds=0)
+            with patch.object(
+                registry,
+                "_spawn_shell",
+                side_effect=SimulatedPanelDeath("panel killed before spawn"),
+            ):
+                with self.assertRaises(SimulatedPanelDeath):
+                    registry.start_evaluation(self.make_evaluation_params(root))
+
+            intent = history.list_runs()[0]
+            self.assertEqual(intent["source"], "autopilot_evaluation")
+            self.assertEqual(intent["launch_phase"], "prepared")
+            self.assertRegex(intent["launch_owner_token"], r"^[0-9a-f]{32}$")
+            registry._release_gpu_lease(intent["id"])
+
+            failed = ProcessRegistry(
+                paths,
+                HistoryStore(paths),
+                launch_grace_seconds=0,
+            ).reconcile_campaign_process(intent["id"])
+
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(failed["launch_phase"], "failed")
+            self.assertEqual(failed["failure_kind"], "infrastructure")
+            self.assertIn("temporarily unavailable", failed["failure_reason"])
+            self.assertIsNone(failed["returncode"])
+
+    def test_live_monitorless_campaign_child_keeps_launch_intent_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history, launch_grace_seconds=0)
+            params = TrainingParams.from_dict(
+                {
+                    "task": "Template-Redrhex-Direct-v0",
+                    "num_envs": 1,
+                    "max_iterations": 1,
+                    "device": "cpu",
+                    "campaign_id": "campaign-live-child",
+                    "campaign_trial_id": "trial-live-child",
+                }
+            )
+            with (
+                patch.object(registry, "_start_gpu_monitor"),
+                patch("tools.training_panel.training_panel.processes.shutil.which", return_value=None),
+            ):
+                started = registry.start_training(params)
+            proc = registry._processes[started["id"]]
+            registry._drop_gpu_lease_reference(started["id"])
+            try:
+                recovered = ProcessRegistry(
+                    paths,
+                    HistoryStore(paths),
+                    launch_grace_seconds=0,
+                ).reconcile_campaign_process(started["id"])
+                self.assertEqual(recovered["status"], "running")
+                self.assertEqual(recovered["launch_phase"], "spawned")
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=3)
+
+    def test_restart_stop_resolves_exact_live_campaign_training_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.isaaclab_launcher.write_text(
+                "#!/usr/bin/env bash\necho training-started\nsleep 30\n",
+                encoding="utf-8",
+            )
+            os.chmod(paths.isaaclab_launcher, 0o755)
+            history = HistoryStore(paths)
+            original = ProcessRegistry(paths, history, launch_grace_seconds=0)
+            params = TrainingParams.from_dict(
+                {
+                    "task": "Template-Redrhex-Direct-v0",
+                    "num_envs": 1,
+                    "max_iterations": 1,
+                    "device": "cpu",
+                    "campaign_id": "campaign-restart-stop-training",
+                    "campaign_trial_id": "trial-restart-stop-training",
+                }
+            )
+            with (
+                patch.object(original, "_start_gpu_monitor"),
+                patch("tools.training_panel.training_panel.processes.shutil.which", return_value=None),
+            ):
+                started = original.start_training(params)
+            proc = original._processes[started["id"]]
+            receipt = Path(started["launch_receipt_file"])
+            deadline = time.time() + 2
+            while not receipt.is_file() and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(receipt.is_file())
+            original._drop_gpu_lease_reference(started["id"])
+            unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            try:
+                restarted = ProcessRegistry(paths, HistoryStore(paths), launch_grace_seconds=0)
+                with patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+                    thread_cls.return_value.start = Mock()
+                    self.assertTrue(restarted.stop(started["id"]))
+                self.assertEqual(proc.wait(timeout=3), 130)
+                self.assertIsNone(unrelated.poll())
+                completed = restarted.reconcile_campaign_process(started["id"])
+                self.assertEqual(completed["status"], "failed")
+                self.assertEqual(completed["returncode"], 130)
+                self.assertEqual(completed["launch_phase"], "finished")
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=3)
+                if unrelated.poll() is None:
+                    os.killpg(unrelated.pid, signal.SIGTERM)
+                    unrelated.wait(timeout=3)
+
+    def test_restart_stop_resolves_exact_live_campaign_evaluation_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.isaaclab_launcher.write_text(
+                "#!/usr/bin/env bash\necho evaluation-started\nsleep 30\n",
+                encoding="utf-8",
+            )
+            os.chmod(paths.isaaclab_launcher, 0o755)
+            history = HistoryStore(paths)
+            original = ProcessRegistry(paths, history, launch_grace_seconds=0)
+            with (
+                patch.object(original, "_start_gpu_monitor"),
+                patch("tools.training_panel.training_panel.processes.shutil.which", return_value=None),
+            ):
+                started = original.start_evaluation(self.make_evaluation_params(root))
+            proc = original._processes[started["id"]]
+            receipt = Path(started["launch_receipt_file"])
+            deadline = time.time() + 2
+            while not receipt.is_file() and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(receipt.is_file())
+            original._drop_gpu_lease_reference(started["id"])
+            unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            try:
+                restarted = ProcessRegistry(paths, HistoryStore(paths), launch_grace_seconds=0)
+                with patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+                    thread_cls.return_value.start = Mock()
+                    self.assertTrue(restarted.stop(started["id"]))
+                self.assertEqual(proc.wait(timeout=3), 130)
+                self.assertIsNone(unrelated.poll())
+                completed = restarted.reconcile_campaign_process(started["id"])
+                self.assertEqual(completed["status"], "failed")
+                self.assertEqual(completed["returncode"], 130)
+                self.assertEqual(completed["launch_phase"], "finished")
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=3)
+                if unrelated.poll() is None:
+                    os.killpg(unrelated.pid, signal.SIGTERM)
+                    unrelated.wait(timeout=3)
+
+    def test_restart_stop_rejects_swapped_receipt_and_preserves_unrelated_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            paths.isaaclab_launcher.write_text(
+                "#!/usr/bin/env bash\nsleep 30\n",
+                encoding="utf-8",
+            )
+            os.chmod(paths.isaaclab_launcher, 0o755)
+            history = HistoryStore(paths)
+            original = ProcessRegistry(paths, history, launch_grace_seconds=0)
+            params = TrainingParams.from_dict(
+                {
+                    "task": "Template-Redrhex-Direct-v0",
+                    "num_envs": 1,
+                    "max_iterations": 1,
+                    "device": "cpu",
+                    "campaign_id": "campaign-swapped-receipt",
+                    "campaign_trial_id": "trial-swapped-receipt",
+                }
+            )
+            with (
+                patch.object(original, "_start_gpu_monitor"),
+                patch("tools.training_panel.training_panel.processes.shutil.which", return_value=None),
+            ):
+                started = original.start_training(params)
+            proc = original._processes[started["id"]]
+            receipt_path = Path(started["launch_receipt_file"])
+            deadline = time.time() + 2
+            while not receipt_path.is_file() and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(receipt_path.is_file())
+            original._drop_gpu_lease_reference(started["id"])
+            unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                receipt.update(pid=unrelated.pid, process_group=os.getpgid(unrelated.pid))
+                receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+                restarted = ProcessRegistry(paths, HistoryStore(paths), launch_grace_seconds=0)
+                self.assertFalse(restarted.stop(started["id"]))
+                self.assertIsNone(proc.poll())
+                self.assertIsNone(unrelated.poll())
+            finally:
+                if proc.poll() is None:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=3)
+                if unrelated.poll() is None:
+                    os.killpg(unrelated.pid, signal.SIGTERM)
+                    unrelated.wait(timeout=3)
+
+    def test_fallback_exit_receipt_preserves_interrupt_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            ready_file = root / "fallback-ready"
+            with patch(
+                "tools.training_panel.training_panel.processes.shutil.which",
+                return_value=None,
+            ):
+                spawned = registry._spawn_shell(
+                    "fallback_interrupt",
+                    f"touch {ready_file}; sleep 10",
+                    paths.process_log_dir / "fallback_interrupt.log",
+                )
+            deadline = time.time() + 2
+            while not ready_file.exists() and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready_file.exists())
+
+            os.killpg(spawned.proc.pid, signal.SIGINT)
+
+            self.assertEqual(spawned.proc.wait(timeout=2), 130)
+            self.assertEqual(
+                Path(spawned.exit_file or "").read_text(encoding="utf-8").strip(),
+                "130",
+            )
+
+    def test_campaign_reconciliation_finalizes_monitorless_evaluation_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            evaluation_id = "evaluation_campaign_restart"
+            artifact_dir = paths.evaluation_dir / evaluation_id
+            artifact_dir.mkdir(parents=True)
+            command_csv = artifact_dir / "commands.csv"
+            episode_csv = artifact_dir / "commands_episodes.csv"
+            summary_csv = artifact_dir / "commands_summary.csv"
+            command_csv.write_text("command,score\nforward,1\n", encoding="utf-8")
+            episode_csv.write_text("command,episode\nforward,0\n", encoding="utf-8")
+            summary_csv.write_text("metric,value\nevaluation.seed,42\n", encoding="utf-8")
+            exit_file = paths.process_log_dir / f"{evaluation_id}.exit"
+            history.add_run(
+                {
+                    "id": evaluation_id,
+                    "source": "autopilot_evaluation",
+                    "status": "running",
+                    "created_at": "2026-08-14T10:00:00",
+                    "exit_file": str(exit_file),
+                    "command_csv": str(command_csv),
+                    "episode_csv": str(episode_csv),
+                    "summary_csv": str(summary_csv),
+                    "campaign_id": "campaign-one",
+                    "campaign_trial_id": "trial-one",
+                    "params": {"campaign_id": "campaign-one"},
+                }
+            )
+            restarted = ProcessRegistry(paths, HistoryStore(paths))
+
+            self.assertEqual(
+                restarted.reconcile_campaign_process(evaluation_id)["status"],
+                "running",
+            )
+            exit_file.write_text("0", encoding="utf-8")
+            completed = restarted.reconcile_campaign_process(evaluation_id)
+
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(completed["returncode"], 0)
+            self.assertEqual(completed["evaluation_command_count"], 1)
+            self.assertEqual(completed["evaluation_episode_count"], 1)
+            self.assertEqual(
+                completed["command_csv_sha256"],
+                hashlib.sha256(command_csv.read_bytes()).hexdigest(),
+            )
 
     def test_reconcile_repairs_completed_panel_stub_from_process_log(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -5,6 +5,7 @@ import pytest
 
 from tools.training_panel.training_panel.rewards import (
     read_reward_scales_from_yaml,
+    reward_defaults,
     reward_diff,
 )
 
@@ -54,6 +55,35 @@ def test_handles_zero_values(tmp_path):
     yaml_file.write_text("rew_scale_action_rate: 0.0\n")
     scales = read_reward_scales_from_yaml(yaml_file)
     assert scales["rew_scale_action_rate"] == 0.0
+
+
+def test_parses_nested_v2_reward_scales(tmp_path):
+    yaml_file = tmp_path / "env.yaml"
+    yaml_file.write_text(
+        "stage: 2\nv2_reward_scales:\n  velocity_tracking: 6.0\n  stall_penalty: -3.0\nterrain: null\n"
+    )
+
+    scales = read_reward_scales_from_yaml(yaml_file)
+
+    assert scales["v2_reward_scales.velocity_tracking"] == 6.0
+    assert scales["v2_reward_scales.stall_penalty"] == -3.0
+
+
+def test_reward_defaults_select_task_specific_v2_mapping(tmp_path):
+    cfg_dir = tmp_path / "source" / "RedRhex" / "RedRhex" / "tasks" / "direct" / "redrhex"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "redrhex_env_cfg.py").write_text(
+        "class RedrhexEnvCfg:\n"
+        "    v2_reward_scales = {'velocity_tracking': 4.0}\n"
+        "class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):\n"
+        "    v2_reward_scales = {'velocity_tracking': 6.0}\n"
+    )
+
+    direct = reward_defaults(tmp_path, task="Template-Redrhex-Direct-v0")
+    forward = reward_defaults(tmp_path, task="Template-Redrhex-ForwardFast-Direct-v0")
+
+    assert direct["v2_reward_scales.velocity_tracking"] == 4.0
+    assert forward["v2_reward_scales.velocity_tracking"] == 6.0
 
 
 # ---- reward_diff ----

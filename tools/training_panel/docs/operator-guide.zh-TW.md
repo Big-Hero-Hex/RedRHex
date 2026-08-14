@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.7.0 操作指南
+title: Training Panel 3.8.0 操作指南
 lang: zh-TW
 audience: operator
 type: how-to
@@ -42,6 +42,23 @@ Pipeline 會依序執行 F1、F2 與 F3。它使用 `--teacher_checkpoint` 把�
 
 完整 pipeline 完成後，History 會連到最後的 F3 PPO directory。從 **Process Console** 可查看目前 stage 與確切 checkpoint handoff；從 **TensorBoard** 可查看最後的 F3 metrics。F1 與 F2 stage directories 仍分別保留在 `logs/rsl_rl/redrhex_forward_v2_teacher` 與 `logs/rsl_rl/redrhex_forward_v2_distillation`。一次完成的 run 只代表一個 seed 的訓練，不代表已取得 three-seed、recorded-sensor 或 hardware promotion evidence。
 
+<a id="autopilot"></a>
+### 執行 bounded Autopilot campaign
+
+Autopilot 是 preview，預設關閉。先停止 Mother，只在已 review 的 local pilot 啟用，並維持 loopback binding：
+
+```bash
+REDRHEX_AUTOPILOT_ENABLED=1 python -m tools.training_panel --host 127.0.0.1 --port 8080
+```
+
+開啟 **Autopilot** 並建立 draft。選取 ForwardFast 或 Direct、支援的 stage、walk/run label 與 direction。閱讀產生的 `{vx, vy, wz}` interval：label 只是 stage range 下半部或上半部的 shortcut，畫面顯示的 numeric value 才是 contract。選擇 fresh initialization，或一個由 run、確切 `model_<iteration>.pt` iteration 與 checkpoint SHA-256 識別的已記錄 baseline choice。Panel 不會掃描 run directory 來選取 latest 檔案。V1 會拒絕任何含 terrain override 的 baseline；請改用 default-terrain baseline 或 fresh initialization。檢查 immutable reward checklist 與 80–120% hard bound；需要時可停用 key，或縮窄其 absolute minimum/maximum。縮窄的 interval 必須包含 campaign-start value，且不得超過畫面顯示的 hard range。Advisor candidate 只能使用縮窄後、以 campaign-start value 計算的有限 80%、90%、100%、110% 與 120% lattice，不能在 interval 內任意選值。設定明確的 per-trial iteration cap，並核准不超過 24 個 training trial 與 72 active GPU-hour。同一時間只能 arm 一個 campaign；draft 不會保留 slot。
+
+Arming 只能由 human 操作。Arm 後，panel 會執行 unchanged seed-42 control、exact-checkpoint command evaluation、有界 candidate screen，並在符合條件時以 seed 43 與 44 進行 paired confirmation。Ranking 前會先套用 fall、health、tracking、direction、leakage、stability、energy、identity 與 evidence gate。每個 evaluated trial 綁定四個 immutable artifact：command row、episode row、summary row 與 evaluated report。Panel 會在 restart 後與 final confirmation 前重新檢查這些 binding。Training reward 與 TensorBoard curve 不能建立 success。若 control 已通過就停止 tuning；否則 panel 在需要下一個 bounded decision 時等待 external advisor。
+
+Repository 包含 local `redrhex-autopilot` MCP adapter 與 recurring-task prompt，但不會建立 ChatGPT Scheduled task、Secure MCP Tunnel、Platform tunnel ID/permission 或 runtime credential。請另行設定這些外部元件，且 credential 必須留在 repository 之外。設定完成前，local training/evaluation 仍會完成並保存；campaign 接著進入 `waiting_for_chatgpt`。
+
+使用 **Pause after current** 保留目前 job，並在下個 transition 前暫停；只有 review state 後才能 **Resume**；**Stop after current** 會 graceful terminate。**Emergency stop** 只作用於 campaign-owned work。若 controller 本身在 campaign job 執行中失敗，panel 會在發出 signal 前記錄 durable 且只屬於該 campaign 的 stop intent；restart 後會繼續停止與 GPU accounting，然後 campaign 才進入 `blocked_safety` 或 `failed`。進入 `patch_handoff` 時，下載保存的 review artifact；panel 絕不套用它。任何經 review 的 source change 都必須開啟新 campaign。`simulation_goal_met` 只代表通過 simulator gate，不等於 policy export、deployment readiness 或 hardware authorization。
+
 <a id="physics-presets"></a>
 ### 調整 physical quantity
 
@@ -50,6 +67,10 @@ Pipeline 會依序執行 F1、F2 與 F3。它使用 `--teacher_checkpoint` 把�
 Editor 公開 113 個可獨立調整的 simulation quantity：rigid-body damping；mass scale、added root mass 與 root center-of-mass offset；contact friction 與 restitution；aggregate command delay；每個 actuator group 的 stiffness、damping、effort limit、velocity limit、armature 與 friction；全部 18 個 joint 的 static、dynamic 與 viscous friction；六個 passive spring；以及六組 ABAD target scale 與 offset。Ground static/dynamic friction 是 coupled contract。Invalid value 會在啟動前被拒絕。
 
 扭轉彈簧 damping 預設為零。`damper_0` 到 `damper_5` 保留為穩定 profile aliases。扭轉彈簧 actuator 的大型 effort/velocity limits 是 nonbinding，不是 spring torque clipping 或人工 velocity brake。在沒有 reviewed physical evidence 前，不得使用任意 armature 或統一 mass scaling 作為不穩定修正。
+
+**Robot preview** 位於 field 清單上方，顯示的是你正在編輯的 preset，而非機器人即時狀態。拖曳可 orbit、滾輪可 zoom、按住 shift 拖曳可 pan；**Reset view** 還原取景，**Hide** 收合預覽。變更扭轉彈簧 rest position 會轉動該腿，質心標記會跟隨三個 offset field，地面色調會跟隨 contact friction。每個 joint 依其作用繪製，並在模型上附圖例：藍色圓柱是驅動腿部旋轉的 main drive，綠色鉸鏈是使腿部向外擺動的 ABAD，裸金屬線圈則是被動扭轉彈簧。聚焦或滑過某個 field 會 highlight 它影響的部位；點擊某條腿會把該腿名稱填入搜尋框，使清單只顯示該腿。Damping 與 command delay 無法誠實以空間方式呈現，因此以文字顯示於模型下方。當你向下捲動至 field 清單時，預覽會固定在視窗頂端並收合為精簡列，讓模型在編輯時保持可見；捲回上方即恢復完整尺寸，在螢幕高度不足時則不會固定。
+
+當腿部名稱與模型不符時，預覽會提出警告。腿部依 URDF 的安裝位置繪製，而目前名為 right front、right middle、right rear 的 field 實際對應的是右中、右後、右前腿。腿部 index 本身正確，訓練不受影響；判斷某個 field 屬於哪條腿前，請先閱讀該警告。若瀏覽器無法繪製 3D，預覽會改為俯視示意圖，仍可點擊腿部。
 
 保存 preset 後可在之後重用。即使尚未保存，選定 draft 仍會用於下一個 run，Train page 會顯示其名稱。Training 會把確切 `CalibrationProfileV1` snapshot 到 run。Play、Record Video 與 Export ONNX 會重用該 snapshot，不會改用目前選定的 preset。這些設定只改變 simulation behavior；hardware calibration、E-stop 準備與 motor-enable authorization 仍是獨立 gate。
 
@@ -88,7 +109,7 @@ Convergence view 包含兩條各自獨立的規則。**Plateau rule** 判定 rew
 <a id="navigation"></a>
 ## 導覽與診斷 UI
 
-目前 view 與選定 run 會保存於 URL，因此 refresh 或分享連結都能保留 context。Top bar 會回報 backend freshness；若顯示 stale，操作人員應先停止送出新 action，直到理解連線狀態。初次載入時使用 skeleton，不會誤報沒有資料；Rewards、Terrain、Convergence、Activity 與 Control Center 的 action failure 會顯示在目前 view。
+目前 view 與選定 run 會保存於 URL，因此 refresh 或分享連結都能保留 context。Top bar 會回報 backend freshness；若顯示 stale，操作人員應先停止送出新 action，直到理解連線狀態。初次載入時使用 skeleton，不會誤報沒有資料；Rewards、Terrain、Convergence、Activity 與 Settings 的 action failure 會顯示在目前 view。Settings 分開 Remote operations、Google Drive、Connections 與 Advanced diagnostics，避免日常 control 與 raw status 互相競爭。
 
 <a id="child"></a>
 ## 安全使用 Child
@@ -111,7 +132,11 @@ Export ONNX 會從選定 training checkpoint 產生 `exported/policy.pt` 與 `ex
 
 若要使用 one-touch Google Drive 匯出，請在 training PC 安裝 `rclone`，並透過 `rclone config` 建立名稱必須完全是 `redrhex-drive` 的 Google Drive remote。個人 My Drive 建議使用 `drive.file` scope。確認 `rclone listremotes` 包含 `redrhex-drive:`，且 `rclone lsd redrhex-drive:` 成功，再重新啟動 Mother，讓 `/api/system` 將 integration 回報為已設定。
 
-在 History 顯示最新或 checkpoint 影片，然後按 **Export to Drive**。上傳會在背景繼續，不占用 Isaac/GPU lock，並寫入 `RedRHex Videos/<run-id>/<video-filename>`。相同且未變更的來源不會重複上傳。**Open in Drive** 使用回傳的 Drive file ID 開啟私人檔案，不會建立 anyone-with-link 權限。失敗或因 restart 中斷的匯出會保留錯誤並可重試。
+使用 **Settings → Google Drive** 分別選擇 account 與 video folder。複製既有 Google Drive folder URL，貼到 **Google Drive folder**，再按 **Use this folder**。Settings 會透過已連線的 rclone account 驗證 folder，解析出的 folder ID 與舊式 resource key 只留在本機，而且不會改變 sharing。相對於 My Drive 的 path 仍可使用，必要時會私下建立。使用 `drive.file` 時，無關且手動建立的 folder 可能仍不可見；請改用 Settings 建立的 path，或明確重新設定 rclone scope。
+
+若要切換 account，先等候 active export 完成，再按 **Change Google account**，並在 training PC 瀏覽器核准新的 Google 帳號。既有私人連結不會被移動。Account 或 folder 變更會推進 destination revision，因此不會重用前一個目的地的 completed export。
+
+在 History 顯示最新或 checkpoint 影片，然後按 **Export to Drive**。上傳會在背景繼續，不占用 Isaac/GPU lock，並寫入 `<configured-folder>/<run-id>/<video-filename>`。只有相同目的地中相同且未變更的來源才不會重複上傳。**Open in Drive** 使用回傳的 Drive file ID 開啟私人檔案，不會建立 anyone-with-link 權限。失敗或因 restart 中斷的匯出會保留錯誤並可重試。
 
 <a id="next"></a>
 ## 下一步

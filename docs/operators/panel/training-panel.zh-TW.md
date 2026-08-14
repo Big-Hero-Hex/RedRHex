@@ -29,6 +29,15 @@ Seed 留白時，面板會選擇並記錄一個值。先以目前 task 的 rewar
 
 同一時間只能執行一個 Isaac GPU 工作。Queue 會在工作之間保留 settle window。請從 Process Console 停止選定程序，並等候完全結束後再啟動另一個工作。
 
+<a id="autopilot-campaigns"></a>
+## 執行 Autopilot campaign
+
+Autopilot 是預設關閉、僅供 simulation 使用的 preview，用於 bounded standard-PPO reward experiment。以 `REDRHEX_AUTOPILOT_ENABLED=1` 在 loopback 啟動 Mother，開啟 **Autopilot**，建立包含 task、stage、walk/run label、direction、exact numeric command envelope、initialization、tunable weight、explicit iteration cap 與 campaign budget 的 draft。在只能由 human 執行的 **Arm** 前，先檢查產生的數字與 immutable identity。同一時間只能 arm 一個 campaign；上限為 24 個 training trial 與 72 active GPU-hour。
+
+Arm 後，training、exact-checkpoint command evaluation、safety gate、ranking、confirmation seed、recovery 與 `simulation_goal_met` decision 都由 panel 負責。ChatGPT 只能透過 narrow connector 提供建議；不能 arm、resume、擴大 budget、宣告成功、deploy 或操作 hardware。Repository 包含 adapter 與 recurring prompt，但不會 provision ChatGPT Scheduled、OpenAI Secure MCP Tunnel 或 credential。沒有這些外部 service 時，active work 仍會完成，campaign 接著安全等待。
+
+依畫面 state 使用 pause-after-current、resume、stop-after-current 或 campaign-only emergency stop。Patch handoff 是只能下載以供 review 的 artifact，絕不會自動套用。完整的 draft、connector 與 recovery workflow 請見[元件操作指南](../../../tools/training_panel/docs/operator-guide.zh-TW.md#autopilot)。`simulation_goal_met` 不等於 policy export、deployment readiness 或 hardware authorization。
+
 <a id="physics-presets"></a>
 ## 使用 physics preset
 
@@ -48,14 +57,18 @@ rclone listremotes
 rclone lsd redrhex-drive:
 ```
 
-在 History 選擇 run，再選擇最新錄影或較舊 checkpoint 的影片，然後按 **Export to Drive**。背景上傳目的地為 `RedRHex Videos/<run-id>/<video-filename>`。未變更且已完成的匯出會直接重用；失敗或中斷的工作可重試；**Open in Drive** 會開啟已連線帳號中的私人檔案，不會改變分享權限。Rclone credential 只留在 training PC，Panel API 不會回傳。
+開啟 **Settings → Google Drive** 管理兩個清楚分開的選項：**Google account** 與 **Choose a Drive folder**。若要使用既有 folder，複製 Google Drive folder URL，貼到 **Google Drive folder**，再按 **Use this folder**。面板只在本機解析 folder ID，並確認已連線帳號可存取；不會變更 sharing。也可以輸入相對於 My Drive 的路徑，例如 `Robotics/Panel Exports`，由 rclone 私下驗證或建立。使用受限的 `drive.file` scope 時，手動建立的 folder link 可能不會對 rclone 顯示；此時請使用 Settings 建立的 path，或明確重新設定 rclone scope。
+
+若要更換新上傳檔案的擁有者，先等候 active Drive 工作完成，按 **Change Google account**，再從 training PC 開啟的瀏覽器選擇帳號。既有檔案與私人連結會留在原本帳號。Account 與 folder 變更都會更新版本，因此下一次匯出不會錯誤重用前一個目的地的紀錄。
+
+在 History 選擇 run，再選擇最新錄影或較舊 checkpoint 的影片，然後按 **Export to Drive**。背景上傳目的地為 `<configured-folder>/<run-id>/<video-filename>`。只有相同目的地中未變更且已完成的匯出才會直接重用；失敗或中斷的工作可重試；**Open in Drive** 會開啟已連線帳號中的私人檔案，不會改變分享權限。Rclone credential 只留在 training PC，Panel API 不會回傳。若 Settings 無法啟動瀏覽器授權，**Copy terminal command** 會提供 host-side reconnect command。
 
 <a id="remote"></a>
 ## 使用遠端團隊模式
 
 Remote worker 需要 Supabase URL、anonymous key、machine token、machine ID 與明確的 accept-jobs 設定。請將它們存於權限為 `600` 的 `~/.redrhex_remote.env`；絕不可把 service-role 或 machine token 放入 GitHub Pages 或已提交檔案。
 
-從 Control Center 啟動及監督 worker。設定與擁有者尚未確認前，保持關閉遠端工作接受功能。套用 additive 3.7 migration、更新 Mother、restart worker，確認 heartbeat 與 capability row 都回報 `3.7.0-remote-parity` 後，才能發布 Child asset 或接受 job。舊 schema 或 worker 會讓 Child 保持登入但進入 read-only。
+從 **Settings → Remote operations** 啟動及監督 worker。設定與擁有者尚未確認前，保持關閉遠端工作接受功能。套用 additive 3.7 migration、更新 Mother、restart worker，確認 heartbeat 與 capability row 都回報 `3.7.0-remote-parity` 後，才能發布 Child asset 或接受 job。舊 schema 或 worker 會讓 Child 保持登入但進入 read-only。Connection URL 與 integration health 位於 **Connections**；launch mode、auto-start、log 與 raw status 位於 **Advanced**。
 
 Child 維持 phone-first Dashboard、Train、History、More，並新增 Mother-grade route、共享 Reward/Terrain/Physics preset、folder、comparison、bounded curve、provenance、private Drive link、deployment evidence、read-only detection、activity attribution 與 Connection health。Checkpoint 以 run 與 iteration 選擇；worker 解析 host path。Viewer 僅能 inspection，operator 可編輯共享 metadata 並執行 non-destructive job，admin 另可 delete。Bulk deletion 需要輸入 `DELETE`，並逐一回報各 run。
 

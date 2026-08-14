@@ -20,6 +20,7 @@ last_reviewed: 2026-08-14
 - [ROS 2 部署架構](../../ros2_ws/src/redrhex_rl_controller/docs/architecture.zh-TW.md)
 - [Reward Agent 架構](../../tools/reward_agent/docs/architecture.zh-TW.md)
 - [Training Panel 架構](../../tools/training_panel/docs/architecture.zh-TW.md)
+- [Training Panel Autopilot API](../../tools/training_panel/docs/autopilot-api.zh-TW.md)
 - [Windows 遠端啟動器架構（草稿）](../../tools/windows/docs/architecture.zh-TW.md)
 - [macOS 遠端啟動器架構（草稿）](../../tools/macos/docs/architecture.zh-TW.md)
 

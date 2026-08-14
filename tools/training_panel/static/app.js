@@ -7,6 +7,36 @@ const REMOTE_FOLDER_REASON = "Unavailable in Windows/macOS remote mode: folders 
 const REMOTE_PLAY_REASON = "Unavailable in Windows/macOS remote mode: the live Isaac viewer opens on the training PC. Use Record Video instead.";
 const REMOTE_MUJOCO_REASON = "Unavailable in Windows/macOS remote mode: the live MuJoCo viewer opens on the training PC. Use Record MuJoCo MP4 instead.";
 const REMOTE_HEADLESS_REASON = "Windows/macOS remote mode requires headless training because the Isaac window opens on the training PC.";
+const AUTOPILOT_POLL_MS = 15000;
+
+const AUTOPILOT_FALLBACK_COMMAND_PRESETS = {
+  "Template-Redrhex-ForwardFast-Direct-v0": {
+    1: { vx: [[0.22, 0.42]], vy: [[0, 0]], wz: [[0, 0]] },
+  },
+  "Template-Redrhex-Direct-v0": {
+    1: { vx: [[0.2, 0.45]], vy: [[0, 0]], wz: [[0, 0]] },
+    2: { vx: [[0, 0]], vy: [[-0.64, -0.32], [0.32, 0.64]], wz: [[0, 0]] },
+    3: { vx: [[0.34, 0.6]], vy: [[-0.48, -0.28], [0.28, 0.48]], wz: [[0, 0]] },
+    4: { vx: [[0, 0]], vy: [[0, 0]], wz: [[-0.62, -0.2], [0.2, 0.62]] },
+    5: {
+      vx: [[0, 0], [0.22, 0.45], [0.32, 0.56]],
+      vy: [[-0.6, -0.28], [-0.44, -0.26], [0, 0], [0.26, 0.44], [0.28, 0.6]],
+      wz: [[-0.7, -0.28], [0, 0], [0.28, 0.7]],
+    },
+  },
+};
+
+const AUTOPILOT_DEFAULT_SKILL_GATES = {
+  min_command_pass_ratio: 0.70,
+  min_skill_pass_ratio: 0.60,
+  max_fall_rate: 0.20,
+  min_tracking_quality: 0.0,
+  min_stability_quality: 0.0,
+  min_direction_sign_ratio: 0.70,
+  max_linear_leak: 0.18,
+  max_yaw_leak: 0.35,
+  max_energy_per_distance: 500.0,
+};
 
 const state = {
   applyingRoute: false,
@@ -83,6 +113,17 @@ const state = {
   deployDebug: null,
   deployDebugTimer: null,
   convergenceSaved: null,
+  // AI-guided, panel-authoritative reward campaigns.
+  autopilotCapabilities: null,
+  autopilotCampaigns: [],
+  autopilotSelectedCampaignId: "",
+  autopilotSelectedCampaign: null,
+  autopilotDecisionContext: null,
+  autopilotEvents: [],
+  autopilotArtifacts: [],
+  autopilotDraftEnvelope: null,
+  autopilotRefreshTimer: null,
+  autopilotRefreshInFlight: null,
   remoteStatus: null,
   activityEvents: [],
   activityAnalytics: null,
@@ -130,7 +171,7 @@ function skeletonHtml(rows = 3) {
     .join("");
 }
 
-const ROUTE_VIEWS = ["train", "rewards", "terrain", "history", "deploy", "convergence", "activity", "access"];
+const ROUTE_VIEWS = ["train", "autopilot", "rewards", "terrain", "physics", "history", "deploy", "convergence", "activity", "access"];
 
 function writeHashRoute() {
   if (state.applyingRoute) return;
@@ -593,6 +634,7 @@ function setView(name) {
   });
   const titles = {
     train: ["Train", "Start a controlled RSL-RL run with the repo defaults."],
+    autopilot: ["Autopilot", "Run bounded reward-tuning campaigns with deterministic safety and evaluation gates."],
     rewards: ["Rewards", "Tune reward weights with presets and see which settings each run used."],
     terrain: ["Terrain", "Tune terrain generator, curriculum, and sub-terrain mix with presets."],
     physics: ["Physics", "Tune validated mass, limits, contact, actuator, joint, spring, timing, and calibration quantities."],
@@ -600,13 +642,22 @@ function setView(name) {
     deploy: ["Deploy", "Validate exported policies before Jetson ROS2 bring-up."],
     convergence: ["Convergence", "Define reward plateau detection and automatic result-video behavior."],
     activity: ["Activity", "See team run requests, panel actions, and lightweight usage analytics."],
-    access: ["Control Center", "Manage local access, V3.0 remote worker status, and remote launch acceptance."],
+    access: ["Settings", "Manage the Mother station, private exports, team connections, and diagnostics."],
   };
   $("#view-title").textContent = titles[name][0];
   $("#view-subtitle").textContent = titles[name][1];
+  if (name === "physics") {
+    robotViewer.ensure().catch(() => {});
+  } else {
+    robotViewer.suspend();
+  }
   if (name === "deploy") {
     syncDeploySelection();
     loadDeployForSelectedRun().catch(handleActionError);
+  }
+  if (name === "autopilot") {
+    setAutopilotCapabilityUi();
+    if (state.autopilotCapabilities?.enabled) refreshAutopilot().catch(handleActionError);
   }
   writeHashRoute();
 }
@@ -4766,6 +4817,173 @@ async function createNewTerrainPreset() {
 // Physics & sparse CalibrationProfileV1 presets
 // ============================================================
 
+
+/* ---------------------------------------------------------------- robot viewer ---
+ * Thin controller around the robot_view.js ES module. The module owns all rendering;
+ * this only decides when it is mounted, feeds it the draft values, and translates a
+ * leg click into the search filter the editor already has.
+ *
+ * Every call is guarded: the viewer is an aid, and a failure in it must never stop
+ * someone from editing physics values.
+ */
+const robotViewer = {
+  layout: null,
+  mounted: false,
+  failed: false,
+  hidden: false,
+
+  api() {
+    return window.RedRHexRobotView || null;
+  },
+
+  async ensure() {
+    const host = $("#physics-viewport");
+    const canvas = $("#physics-viewport-canvas");
+    if (!host || !canvas || this.failed || this.hidden) return;
+    const view = this.api();
+    if (!view) return;
+    if (this.mounted) {
+      view.setRunning(true);
+      return;
+    }
+    try {
+      if (!this.layout) this.layout = await api("/api/physics/robot-geometry");
+      const forceFallback = new URLSearchParams(location.search).get("robot3d") === "off";
+      const mode = view.mount(canvas, this.layout, { forceFallback });
+      this.mounted = true;
+      host.hidden = false;
+      this.renderMode(mode);
+      this.renderLabelWarning();
+      this.watchStuck();
+      view.update(state.physicsDraftValues);
+      view.setRunning(true);
+      this.renderReadout();
+    } catch (error) {
+      this.failed = true;
+      host.hidden = true;
+      console.warn("Robot viewer unavailable", error);
+    }
+  },
+
+  /* Collapse the preview once it sticks to the top, so it does not crowd out the very
+   * fields it exists to explain.
+   *
+   * Measured on scroll rather than with an IntersectionObserver sentinel: an instant
+   * jump (anchor link, scrollIntoView, or a fast flick) can move a sentinel from below
+   * the fold to above it without ever intersecting, so the ratio never crosses a
+   * threshold and the observer stays silent. A sticky element is pinned at top 0 by
+   * definition, which is both simpler and exact.
+   */
+  watchStuck() {
+    const host = $("#physics-viewport");
+    const anchor = $("#physics-viewport-anchor");
+    if (!host || !anchor || this.stuckHandler) return;
+    let queued = false;
+    const measure = () => {
+      queued = false;
+      // Measure the anchor, not the preview. Collapsing the preview changes its own
+      // height, so testing its rect would let the collapse invalidate the condition
+      // that produced it and latch the wrong state. The anchor sits above it and never
+      // moves. Sticking is disabled on short viewports, so honour the computed position.
+      const sticky = getComputedStyle(host).position === "sticky";
+      const rect = anchor.getBoundingClientRect();
+      host.classList.toggle("is-stuck", sticky && rect.bottom <= 0.5);
+    };
+    this.stuckHandler = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(measure);
+    };
+    window.addEventListener("scroll", this.stuckHandler, { passive: true });
+    window.addEventListener("resize", this.stuckHandler, { passive: true });
+    measure();
+  },
+
+  renderMode(mode) {
+    const badge = $("#physics-viewport-mode");
+    if (!badge) return;
+    badge.textContent = mode === "webgl" ? "3D" : "Schematic";
+    badge.title = mode === "webgl" ? "" : "3D rendering is unavailable, showing a top-down layout instead.";
+  },
+
+  /* The URDF is the authority on where a leg is; _LEG_LABELS is only a label on top of
+   * it. Where they disagree, say so rather than letting the picture imply agreement. */
+  renderLabelWarning() {
+    const node = $("#physics-viewport-warning");
+    const audit = this.layout?.label_audit;
+    if (!node) return;
+    if (!audit || audit.consistent || !audit.mismatched?.length) {
+      node.hidden = true;
+      return;
+    }
+    const rows = audit.mismatched
+      .map((item) => `<span class="physics-label-swap"><strong>${escapeHtml(item.contract_label)}</strong> is really ${escapeHtml(item.geometric_label.toLowerCase())}</span>`)
+      .join("");
+    node.innerHTML = `<span class="physics-label-full"><strong>Leg names below do not match the model.</strong> Positions here come from the URDF. ${rows}</span>`
+      + `<span class="physics-label-short"><strong>Heads up:</strong> right-side leg names do not match the model.</span>`;
+    node.hidden = false;
+  },
+
+  /* Damping and command delay have no honest spatial depiction, so they are reported
+   * as text next to the model rather than mimed by it. */
+  renderReadout() {
+    const node = $("#physics-viewport-readout");
+    if (!node) return;
+    const values = state.physicsDraftValues || {};
+    const show = (key, label, unit, fallback) => {
+      const raw = values[key];
+      const value = Number.isFinite(Number(raw)) ? Number(raw) : fallback;
+      const overridden = Object.hasOwn(values, key);
+      return `<span class="physics-readout-chip ${overridden ? "is-overridden" : ""}">
+        <small>${escapeHtml(label)}</small><strong>${escapeHtml(String(value))}</strong><small>${escapeHtml(unit)}</small></span>`;
+    };
+    node.innerHTML = [
+      show("simulation_physics.rigid_body.linear_damping", "Linear damping", "1/s", 0.05),
+      show("simulation_physics.rigid_body.angular_damping", "Angular damping", "1/s", 0.1),
+      show("sensor_timing.aggregate_command_delay_s", "Command delay", "s", 0),
+      show("simulation_physics.mass.scale", "Mass scale", "×", 1),
+      show("simulation_physics.ground.static_friction", "Static friction", "", 1.2),
+      show("simulation_physics.ground.restitution", "Restitution", "", 0),
+    ].join("");
+  },
+
+  sync() {
+    if (!this.mounted) return;
+    try {
+      this.api()?.update(state.physicsDraftValues);
+      this.renderReadout();
+    } catch (error) {
+      /* the editor keeps working even if the picture does not */
+    }
+  },
+
+  highlight(key) {
+    if (this.mounted) this.api()?.highlightField(key);
+  },
+
+  suspend() {
+    if (this.mounted) this.api()?.setRunning(false);
+  },
+};
+
+/* Clicking a leg reuses the existing search filter rather than adding a second one. */
+document.addEventListener("redrhex:leg-selected", (event) => {
+  const detail = event.detail || {};
+  const label = state.physicsSchema.some((meta) => meta.label.startsWith(detail.contractLabel))
+    ? detail.contractLabel
+    : detail.geometricLabel;
+  state.physicsSearch = label;
+  const search = $("#physics-search");
+  if (search) search.value = label;
+  renderPhysicsEditor();
+  setPhysicsStatus(`Showing ${label} (leg ${detail.index}). Clear the search box to see every quantity.`);
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) robotViewer.suspend();
+  else if (state.currentView === "physics") robotViewer.ensure().catch(() => {});
+});
+
 function setPhysicsStatus(message) {
   const status = $("#physics-status");
   if (status) status.textContent = message;
@@ -4886,13 +5104,26 @@ function renderPhysicsEditor() {
         categoryBadge.textContent = `${changed}/${total} changed`;
       }
       updatePhysicsChangeSummary();
+      robotViewer.sync();
       setPhysicsStatus("Unsaved overrides are selected for the next training run; save to keep this preset.");
     });
+  });
+  container.querySelectorAll("[data-physics-key]").forEach((input) => {
+    const key = input.dataset.physicsKey;
+    input.addEventListener("focus", () => robotViewer.highlight(key));
+    input.addEventListener("blur", () => robotViewer.highlight(null));
+  });
+  container.querySelectorAll(".physics-row").forEach((row) => {
+    const key = row.querySelector("[data-physics-key]")?.dataset.physicsKey;
+    if (!key) return;
+    row.addEventListener("pointerenter", () => robotViewer.highlight(key));
+    row.addEventListener("pointerleave", () => robotViewer.highlight(null));
   });
   container.querySelectorAll("[data-physics-reset]").forEach((button) => {
     button.addEventListener("click", () => {
       delete state.physicsDraftValues[button.dataset.physicsReset];
       renderPhysicsEditor();
+      robotViewer.sync();
       setPhysicsStatus("Override reset to the inherited value. Save to keep this preset.");
     });
   });
@@ -4935,6 +5166,7 @@ function selectPhysicsPresetForEdit(presetId) {
   $("#physics-search").disabled = false;
   $("#physics-changed-only").disabled = false;
   renderPhysicsEditor();
+  robotViewer.sync();
   updateTrainingPresetIndicators();
 }
 
@@ -5955,9 +6187,864 @@ async function loadActivity() {
   renderActivity();
 }
 
+// ---------------------------------------------------------------------------
+// AI-guided Autopilot campaigns
+// ---------------------------------------------------------------------------
+
+function autopilotCampaignId(campaign) {
+  return String(campaign?.id || campaign?.campaign_id || "");
+}
+
+function autopilotCampaignState(campaign) {
+  return String(campaign?.state || campaign?.status || "draft").toLowerCase();
+}
+
+function autopilotCampaignRevision(campaign) {
+  const value = Number(campaign?.revision ?? campaign?.campaign_revision ?? 0);
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function autopilotGoal(campaign) {
+  return campaign?.goal || campaign?.goal_spec || campaign?.spec || {};
+}
+
+function autopilotList(data, key) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.[key])) return data[key];
+  if (Array.isArray(data?.data?.[key])) return data.data[key];
+  return [];
+}
+
+function autopilotNumber(value, fallback = null) {
+  if (typeof value === "boolean" || value === null || value === "") return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function autopilotFormatNumber(value, suffix = "") {
+  const number = autopilotNumber(value);
+  if (number === null) return "—";
+  const rendered = Number.isInteger(number) ? String(number) : number.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `${rendered}${suffix}`;
+}
+
+function autopilotStatusClass(status) {
+  const normalized = String(status || "").toLowerCase();
+  if (["simulation_goal_met", "completed", "passed", "pass", "valid"].includes(normalized)) return "status-completed";
+  if (["armed", "control_training", "control_evaluating", "awaiting_advisor", "candidate_training", "candidate_evaluating", "confirming", "running", "queued"].includes(normalized)) return "status-running";
+  if (["paused", "waiting_for_chatgpt", "patch_handoff", "budget_exhausted", "stopped"].includes(normalized)) return "status-interrupted";
+  if (["blocked_safety", "failed", "invalid", "fail"].includes(normalized)) return "status-failed";
+  return "status-unknown";
+}
+
+function autopilotStatusLabel(status) {
+  return String(status || "unknown").replaceAll("_", " ");
+}
+
+function autopilotIdempotencyKey(action) {
+  const random = window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `panel-${action}-${random}`;
+}
+
+function autopilotMutationOptions(action, payload) {
+  const expectedRevision = autopilotCampaignRevision({ revision: payload?.expected_revision });
+  return {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Idempotency-Key": autopilotIdempotencyKey(action),
+      "If-Match": `"${expectedRevision}"`,
+    },
+    body: JSON.stringify(payload),
+  };
+}
+
+function setAutopilotCapabilityUi() {
+  const capability = state.autopilotCapabilities || {};
+  const enabled = capability.enabled === true;
+  const nav = $("#autopilot-nav");
+  if (nav) nav.hidden = !enabled;
+  const workspace = $("#autopilot-workspace");
+  const unavailable = $("#autopilot-unavailable");
+  if (workspace) workspace.hidden = !enabled;
+  if (unavailable) unavailable.hidden = enabled || state.currentView !== "autopilot";
+  const service = $("#autopilot-service-state");
+  if (service) service.textContent = enabled ? (capability.service_state || "Ready") : "Disabled";
+  const hostLimit = $("#autopilot-host-limit");
+  if (hostLimit) {
+    const count = autopilotNumber(capability.max_armed_campaigns, 1);
+    hostLimit.textContent = `${count} armed campaign${count === 1 ? "" : "s"}`;
+  }
+}
+
+async function loadAutopilotCapabilities() {
+  try {
+    const data = await api("/api/autopilot/capabilities");
+    state.autopilotCapabilities = data.capabilities || data.autopilot || data;
+  } catch (error) {
+    if (![404, 501, 503].includes(error.status)) throw error;
+    state.autopilotCapabilities = { enabled: false, unavailable_reason: error.message };
+  }
+  setAutopilotCapabilityUi();
+  renderAutopilotTunables();
+  renderAutopilotBaselineOptions();
+  updateAutopilotGoalForm();
+  return state.autopilotCapabilities;
+}
+
+function autopilotCatalogEntries(task, stage) {
+  const capability = state.autopilotCapabilities || {};
+  let catalog = capability.reward_catalog || capability.tunable_rewards || capability.reward_catalog_entries;
+  if (catalog && !Array.isArray(catalog) && !Array.isArray(catalog.entries)) {
+    catalog = catalog[task]?.[`stage${stage}`] || catalog[task]?.[stage] || [];
+  }
+  if (!catalog && capability.default_reward_keys) {
+    catalog = capability.default_reward_keys[task]?.[`stage${stage}`] || capability.default_reward_keys[task]?.[stage] || [];
+  }
+  catalog ||= [];
+  const entries = Array.isArray(catalog) ? catalog : (catalog.entries || []);
+  return entries.map((entry) => typeof entry === "string" ? { key: entry } : entry);
+}
+
+function renderAutopilotTunables() {
+  const target = $("#autopilot-tunable-list");
+  if (!target) return;
+  const task = $("#autopilot-task")?.value || "";
+  const stage = Number($("#autopilot-stage")?.value || 1);
+  const entries = autopilotCatalogEntries(task, stage).filter((entry) => {
+    const tasks = entry.tasks || entry.compatible_tasks || [];
+    const stages = entry.stages || entry.compatible_stages || [];
+    return entry.mutable !== false && entry.enabled !== false &&
+      (!tasks.length || tasks.includes(task)) &&
+      (!stages.length || stages.map(Number).includes(stage));
+  });
+  if (!entries.length) {
+    target.innerHTML = `<p class="muted-copy">No mutable reward weights are advertised for this task and stage.</p>`;
+    return;
+  }
+  target.innerHTML = entries.map((entry) => {
+    const key = entry.key || entry.name || entry.reward_key;
+    const bounds = entry.bounds || [entry.minimum ?? entry.min, entry.maximum ?? entry.max];
+    const boundText = bounds.every((value) => value !== undefined && value !== null)
+      ? ` · ${autopilotFormatNumber(bounds[0])}–${autopilotFormatNumber(bounds[1])}`
+      : "";
+    const hasBounds = bounds.every((value) => value !== undefined && value !== null);
+    return `
+      <div class="autopilot-tunable-card" title="${escapeHtml(entry.description || "Bounded shaping reward")}">
+        <label class="check-row">
+          <input type="checkbox" name="autopilot_tunable" value="${escapeHtml(key)}" checked />
+          <span>${escapeHtml(key)}${escapeHtml(boundText)}</span>
+        </label>
+        ${hasBounds ? `
+          <div class="autopilot-bound-inputs" aria-label="Narrow bounds for ${escapeHtml(key)}">
+            <label>Min <input type="number" step="any" name="autopilot_reward_min" data-reward-key="${escapeHtml(key)}" data-hard-min="${escapeHtml(bounds[0])}" data-hard-max="${escapeHtml(bounds[1])}" value="${escapeHtml(bounds[0])}" /></label>
+            <label>Max <input type="number" step="any" name="autopilot_reward_max" data-reward-key="${escapeHtml(key)}" data-hard-min="${escapeHtml(bounds[0])}" data-hard-max="${escapeHtml(bounds[1])}" value="${escapeHtml(bounds[1])}" /></label>
+          </div>
+        ` : ""}
+      </div>
+    `;
+  }).join("");
+}
+
+function autopilotRewardSelection() {
+  const keys = Array.from(document.querySelectorAll('input[name="autopilot_tunable"]:checked')).map((input) => input.value);
+  const rewardBounds = {};
+  for (const key of keys) {
+    const minimumInput = document.querySelector(`input[name="autopilot_reward_min"][data-reward-key="${CSS.escape(key)}"]`);
+    const maximumInput = document.querySelector(`input[name="autopilot_reward_max"][data-reward-key="${CSS.escape(key)}"]`);
+    if (!minimumInput || !maximumInput) continue;
+    const minimum = autopilotNumber(minimumInput.value);
+    const maximum = autopilotNumber(maximumInput.value);
+    const hardMinimum = autopilotNumber(minimumInput.dataset.hardMin);
+    const hardMaximum = autopilotNumber(maximumInput.dataset.hardMax);
+    if (
+      minimum === null || maximum === null || hardMinimum === null || hardMaximum === null ||
+      minimum > maximum || minimum < hardMinimum || maximum > hardMaximum
+    ) {
+      minimumInput.setCustomValidity("Bounds must stay within the displayed hard range and minimum must not exceed maximum.");
+      minimumInput.reportValidity();
+      return null;
+    }
+    minimumInput.setCustomValidity("");
+    rewardBounds[key] = [minimum, maximum];
+  }
+  return { keys, rewardBounds };
+}
+
+function autopilotAxisIntervals(axis) {
+  if (Array.isArray(axis)) {
+    const values = axis.length === 2 && !Array.isArray(axis[0]) ? [axis] : axis;
+    const intervals = values.map((interval) => {
+      if (!Array.isArray(interval) || interval.length !== 2) return null;
+      const minimum = autopilotNumber(interval[0]);
+      const maximum = autopilotNumber(interval[1]);
+      return minimum !== null && maximum !== null && minimum <= maximum ? [minimum, maximum] : null;
+    });
+    return intervals.length && intervals.every(Boolean) ? intervals : null;
+  }
+  if (axis && typeof axis === "object") {
+    const minimum = autopilotNumber(axis.min ?? axis.minimum ?? axis.lower);
+    const maximum = autopilotNumber(axis.max ?? axis.maximum ?? axis.upper);
+    return minimum !== null && maximum !== null && minimum <= maximum ? [[minimum, maximum]] : null;
+  }
+  const scalar = autopilotNumber(axis);
+  return scalar === null ? null : [[scalar, scalar]];
+}
+
+function autopilotNormalizeEnvelope(value) {
+  if (!value || typeof value !== "object") return null;
+  const envelope = value.command_envelope || value.envelope || value;
+  const result = {
+    vx: autopilotAxisIntervals(envelope.vx),
+    vy: autopilotAxisIntervals(envelope.vy),
+    wz: autopilotAxisIntervals(envelope.wz),
+  };
+  return Object.values(result).every(Boolean) ? result : null;
+}
+
+function autopilotCapabilityEnvelope(task, stage, gait) {
+  const capability = state.autopilotCapabilities || {};
+  const profiles = capability.command_profiles || capability.command_envelopes || [];
+  if (Array.isArray(profiles)) {
+    const profile = profiles.find((item) =>
+      (item.task === task || item.task_id === task) && Number(item.stage) === Number(stage)
+    );
+    if (profile) {
+      const gaitProfile = profile.gaits?.[gait] || profile.paces?.[gait] || profile[gait] || profile.command_envelopes?.[gait];
+      const normalized = autopilotNormalizeEnvelope(gaitProfile || profile);
+      if (normalized) return normalized;
+    }
+  } else if (profiles && typeof profiles === "object") {
+    const profile = profiles[task]?.[stage] || profiles[task]?.[`stage${stage}`];
+    const normalized = autopilotNormalizeEnvelope(profile?.[gait] || profile?.gaits?.[gait] || profile?.paces?.[gait] || profile);
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function autopilotSplitInterval(interval, gait) {
+  const [minimum, maximum] = interval;
+  if (minimum === 0 && maximum === 0) return [0, 0];
+  if (maximum <= 0) {
+    const minMagnitude = Math.abs(maximum);
+    const maxMagnitude = Math.abs(minimum);
+    const middle = (minMagnitude + maxMagnitude) / 2;
+    return gait === "walk" ? [-middle, -minMagnitude] : [-maxMagnitude, -middle];
+  }
+  if (minimum >= 0) {
+    const middle = (minimum + maximum) / 2;
+    return gait === "walk" ? [minimum, middle] : [middle, maximum];
+  }
+  return null;
+}
+
+function autopilotResolvedEnvelope(task, stage, gait) {
+  const advertised = autopilotCapabilityEnvelope(task, stage, gait);
+  if (advertised) return { envelope: advertised, source: "server profile" };
+  const fallback = AUTOPILOT_FALLBACK_COMMAND_PRESETS[task]?.[stage];
+  if (!fallback) return { envelope: null, source: "unavailable" };
+  const envelope = {};
+  for (const [axis, intervals] of Object.entries(fallback)) {
+    const split = intervals.map((interval) => autopilotSplitInterval(interval, gait));
+    if (split.some((interval) => !interval)) return { envelope: null, source: "unavailable" };
+    envelope[axis] = split;
+  }
+  return {
+    envelope,
+    source: "task contract",
+  };
+}
+
+function autopilotIntervalText(intervals) {
+  if (!Array.isArray(intervals) || !intervals.length) return "—";
+  return intervals.map(([minimum, maximum]) => `[${autopilotFormatNumber(minimum)}, ${autopilotFormatNumber(maximum)}]`).join(" ∪ ");
+}
+
+function autopilotCurrentEnvelope() {
+  const envelope = autopilotNormalizeEnvelope(state.autopilotDraftEnvelope);
+  return envelope ? JSON.parse(JSON.stringify(envelope)) : null;
+}
+
+function renderAutopilotCommandIntervals(envelope) {
+  const target = $("#autopilot-command-intervals");
+  if (!target) return;
+  if (!envelope) {
+    target.innerHTML = `<p class="muted-copy">No valid command profile is available.</p>`;
+    return;
+  }
+  const labels = { vx: "vx · m/s", vy: "vy · m/s", wz: "wz · rad/s" };
+  target.innerHTML = ["vx", "vy", "wz"].map((axis) => `
+    <div class="autopilot-interval-card">
+      <span>${escapeHtml(labels[axis])}</span>
+      <strong>${escapeHtml(autopilotIntervalText(envelope[axis]))}</strong>
+    </div>
+  `).join("");
+}
+
+function autopilotSkillGates() {
+  const capability = state.autopilotCapabilities || {};
+  return { ...AUTOPILOT_DEFAULT_SKILL_GATES, ...(capability.default_skill_gates || capability.skill_gates || {}) };
+}
+
+function renderAutopilotSkillGates() {
+  const target = $("#autopilot-skill-gate-list");
+  if (!target) return;
+  const labels = {
+    min_command_pass_ratio: "Min command pass",
+    min_skill_pass_ratio: "Min skill pass",
+    max_fall_rate: "Max fall rate",
+    min_tracking_quality: "Min tracking quality",
+    min_stability_quality: "Min stability quality",
+    min_direction_sign_ratio: "Min direction sign",
+    max_linear_leak: "Max linear leak",
+    max_yaw_leak: "Max yaw leak",
+    max_energy_per_distance: "Max energy / distance",
+  };
+  target.innerHTML = Object.entries(autopilotSkillGates()).map(([key, value]) => `
+    <div class="autopilot-interval-card" title="${escapeHtml(key)}">
+      <span>${escapeHtml(labels[key] || autopilotStatusLabel(key))}</span>
+      <strong>${escapeHtml(autopilotFormatNumber(value))}</strong>
+    </div>
+  `).join("");
+}
+
+function renderAutopilotCommandPreview(source = "") {
+  const preview = $("#autopilot-command-preview");
+  if (!preview) return;
+  const envelope = autopilotCurrentEnvelope();
+  const title = preview.querySelector("strong");
+  const copy = preview.querySelector("span");
+  if (!envelope) {
+    title.textContent = "Invalid command envelope";
+    copy.textContent = "Every minimum must be finite and less than or equal to its maximum.";
+    return;
+  }
+  const values = ["vx", "vy", "wz"].map((axis) => `${axis} ${autopilotIntervalText(envelope[axis])}`);
+  title.textContent = `${$("#autopilot-gait")?.selectedOptions[0]?.textContent || "Gait"} · ${source || "reviewed values"}`;
+  copy.textContent = values.join(" · ");
+}
+
+function updateAutopilotGoalForm() {
+  const task = $("#autopilot-task")?.value || "Template-Redrhex-ForwardFast-Direct-v0";
+  const stageSelect = $("#autopilot-stage");
+  if (!stageSelect) return;
+  const forwardFast = task === "Template-Redrhex-ForwardFast-Direct-v0";
+  for (const option of stageSelect.options) option.disabled = forwardFast && option.value !== "1";
+  if (forwardFast) stageSelect.value = "1";
+  const stage = Number(stageSelect.value);
+  const gait = $("#autopilot-gait")?.value || "walk";
+  const resolved = autopilotResolvedEnvelope(task, stage, gait);
+  state.autopilotDraftEnvelope = resolved.envelope;
+  renderAutopilotCommandIntervals(resolved.envelope);
+  renderAutopilotCommandPreview(resolved.source);
+  renderAutopilotSkillGates();
+  renderAutopilotTunables();
+}
+
+function autopilotBaselineRecords() {
+  const capability = state.autopilotCapabilities || {};
+  const advertised = capability.baselines || capability.baseline_runs || capability.baseline_candidates || [];
+  const records = [];
+  for (const item of advertised) {
+    const runId = item.run_id || item.id;
+    const checkpointSha = item.checkpoint_sha256 || item.latest_checkpoint_sha256 || item.sha256;
+    const checkpointIteration = Number(item.checkpoint_iteration);
+    if (runId && checkpointSha && Number.isInteger(checkpointIteration) && checkpointIteration >= 0) {
+      records.push({
+        runId,
+        checkpointSha,
+        checkpointIteration,
+        label: item.display_name || runId,
+      });
+    }
+  }
+  return records;
+}
+
+function renderAutopilotBaselineOptions() {
+  const select = $("#autopilot-baseline");
+  if (!select) return;
+  const selected = select.value;
+  select.replaceChildren(new Option("Fresh initialization", ""));
+  for (const baseline of autopilotBaselineRecords()) {
+    const option = new Option(
+      `${baseline.label} · model_${baseline.checkpointIteration}.pt · SHA ${baseline.checkpointSha.slice(0, 10)}`,
+      `${baseline.runId}:${baseline.checkpointIteration}`,
+    );
+    option.dataset.baselineRunId = baseline.runId;
+    option.dataset.baselineCheckpointIteration = String(baseline.checkpointIteration);
+    option.dataset.checkpointSha256 = baseline.checkpointSha;
+    select.add(option);
+  }
+  if (Array.from(select.options).some((option) => option.value === selected)) select.value = selected;
+}
+
+function autopilotDirections(stage) {
+  return {
+    1: ["forward"],
+    2: ["left", "right"],
+    3: ["forward_left", "forward_right"],
+    4: ["yaw_ccw", "yaw_cw"],
+    5: ["forward", "left", "right", "forward_left", "forward_right", "yaw_ccw", "yaw_cw"],
+  }[stage] || [];
+}
+
+function autopilotGoalPayload() {
+  const form = $("#autopilot-goal-form");
+  if (!form?.reportValidity()) return null;
+  const rewardSelection = autopilotRewardSelection();
+  if (!rewardSelection || !rewardSelection.keys.length) return null;
+  const task = $("#autopilot-task").value;
+  const stage = Number($("#autopilot-stage").value);
+  const envelope = autopilotCurrentEnvelope();
+  if (!envelope) {
+    renderAutopilotCommandPreview("reviewed values");
+    return null;
+  }
+  const baseline = $("#autopilot-baseline");
+  const selectedBaseline = baseline.selectedOptions[0];
+  const baselineRunId = selectedBaseline?.dataset.baselineRunId || null;
+  const baselineCheckpointIteration = selectedBaseline?.dataset.baselineCheckpointIteration;
+  return {
+    schema_version: "redrhex.autopilot.goal.v1",
+    expected_revision: 0,
+    description: $("#autopilot-goal-description").value.trim(),
+    task,
+    stage,
+    evaluation_profile: `stage${stage}`,
+    gait: $("#autopilot-gait").value,
+    directions: autopilotDirections(stage),
+    command_envelope: envelope,
+    skill_gates: autopilotSkillGates(),
+    baseline_run_id: baselineRunId,
+    baseline_checkpoint_iteration: baselineRunId ? Number(baselineCheckpointIteration) : null,
+    checkpoint_sha256: selectedBaseline?.dataset.checkpointSha256 || null,
+    initialization_mode: baselineRunId ? "policy_only" : "fresh",
+    training_seeds: [42, 43, 44],
+    per_trial_iteration_cap: Number($("#autopilot-iterations").value),
+    budget: {
+      max_training_trials: Number($("#autopilot-trial-budget").value),
+      max_gpu_hours: Number($("#autopilot-hour-budget").value),
+    },
+    tunable_reward_keys: rewardSelection.keys,
+    reward_bounds: rewardSelection.rewardBounds,
+  };
+}
+
+async function createAutopilotCampaign(event) {
+  event.preventDefault();
+  const payload = autopilotGoalPayload();
+  if (!payload) {
+    setStatusTone("Review the Autopilot goal and numeric command envelope.", "error");
+    return;
+  }
+  const button = $("#autopilot-create");
+  button.disabled = true;
+  $("#autopilot-form-status").textContent = "Creating a draft…";
+  try {
+    const data = await api("/api/autopilot/campaigns", autopilotMutationOptions("create", payload));
+    const campaign = data.campaign || data;
+    state.autopilotSelectedCampaignId = autopilotCampaignId(campaign);
+    $("#autopilot-goal-form").reset();
+    $("#autopilot-trial-budget").value = "24";
+    $("#autopilot-hour-budget").value = "72";
+    updateAutopilotGoalForm();
+    await loadAutopilotCampaigns({ refreshSelected: true });
+    setStatus("Autopilot goal draft created. Review its contract before arming.");
+  } finally {
+    button.disabled = false;
+    $("#autopilot-form-status").textContent = "";
+  }
+}
+
+function renderAutopilotCampaignList() {
+  const list = $("#autopilot-campaign-list");
+  if (!list) return;
+  $("#autopilot-campaign-count").textContent = String(state.autopilotCampaigns.length);
+  if (!state.autopilotCampaigns.length) {
+    list.innerHTML = `<article class="empty-panel"><p class="muted-copy">No campaigns yet. Create a draft to begin.</p></article>`;
+    return;
+  }
+  list.innerHTML = state.autopilotCampaigns.map((campaign) => {
+    const id = autopilotCampaignId(campaign);
+    const goal = autopilotGoal(campaign);
+    const status = autopilotCampaignState(campaign);
+    return `
+      <button type="button" class="autopilot-campaign-button ${id === state.autopilotSelectedCampaignId ? "active" : ""}" data-autopilot-campaign-id="${escapeHtml(id)}">
+        <strong>${escapeHtml(goal.description || campaign.display_name || id)}</strong>
+        <span><span>${escapeHtml(autopilotStatusLabel(status))}</span><span>r${autopilotCampaignRevision(campaign)}</span></span>
+        <small>${escapeHtml(formatRelativeTime(campaign.updated_at || campaign.created_at) || "Not started")}</small>
+      </button>
+    `;
+  }).join("");
+}
+
+function autopilotEnvelopeText(envelope) {
+  const normalized = autopilotNormalizeEnvelope(envelope);
+  if (!normalized) return "—";
+  return ["vx", "vy", "wz"].map((axis) => `${axis} ${autopilotIntervalText(normalized[axis])}`).join(" · ");
+}
+
+function autopilotBudgetValues(campaign) {
+  const budget = campaign.budget || autopilotGoal(campaign).budget || {};
+  const usedTrials = budget.training_trials_used ?? budget.used_training_trials ?? campaign.training_trials_used ?? 0;
+  const maxTrials = budget.max_training_trials ?? 24;
+  const usedHours = budget.gpu_hours_used ?? budget.active_gpu_hours_used ?? budget.used_active_gpu_hours ?? campaign.active_gpu_hours_used ?? 0;
+  const maxHours = budget.max_gpu_hours ?? 72;
+  return { usedTrials, maxTrials, usedHours, maxHours };
+}
+
+function autopilotSummaryItem(label, value) {
+  return `<div class="autopilot-summary-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value ?? "—")}</strong></div>`;
+}
+
+function autopilotIdentityText(value) {
+  const text = String(value || "");
+  return text.length > 16 ? `${text.slice(0, 12)}…${text.slice(-4)}` : (text || "—");
+}
+
+function renderAutopilotHeartbeat(campaign = state.autopilotSelectedCampaign) {
+  const capability = state.autopilotCapabilities || {};
+  const connector = campaign?.connector || capability.connector || {};
+  const heartbeat = campaign?.connector_heartbeat_at || campaign?.connector_heartbeat || connector.last_heartbeat_at || connector.heartbeat_at || capability.connector_heartbeat_at;
+  const target = $("#autopilot-connector-state");
+  if (!target) return;
+  if (!heartbeat) {
+    const polls = connector.max_polls ? ` · ${connector.polls_used || 0}/${connector.max_polls} polls` : "";
+    target.textContent = `${connector.state || "No heartbeat"}${polls}`;
+    return;
+  }
+  const iso = typeof heartbeat === "string" ? heartbeat : heartbeat.at || heartbeat.timestamp;
+  const polls = connector.max_polls ? ` · ${connector.polls_used || 0}/${connector.max_polls} polls` : "";
+  target.textContent = iso ? `${connector.state || "Connected"} · ${formatRelativeTime(iso)}${polls}` : `${connector.state || "Heartbeat received"}${polls}`;
+  target.title = iso ? absoluteTime(iso) : "";
+}
+
+function renderAutopilotDecisionContext(context) {
+  const target = $("#autopilot-decision-context");
+  if (!target) return;
+  const actions = context?.next_permitted_actions || state.autopilotSelectedCampaign?.next_permitted_actions || [];
+  const nextAction = context?.next_permitted_action || context?.next_action || state.autopilotSelectedCampaign?.next_permitted_action || actions[0] || "wait";
+  $("#autopilot-next-action").textContent = actions.length ? actions.map(autopilotStatusLabel).join(" · ") : autopilotStatusLabel(nextAction);
+  const recent = context?.recent_evidence || context?.evidence_ids || [];
+  const moves = context?.remaining_allowable_move_count
+    ?? (Array.isArray(context?.remaining_allowable_moves) ? context.remaining_allowable_moves.length : null)
+    ?? context?.eligible_move_count
+    ?? context?.eligible_moves?.length;
+  const decisions = context?.recent_decisions || state.autopilotSelectedCampaign?.decisions || [];
+  const lastDecision = context?.last_decision || decisions[decisions.length - 1] || state.autopilotSelectedCampaign?.last_decision || {};
+  target.innerHTML = [
+    ["Next permitted action", autopilotStatusLabel(nextAction)],
+    ["Eligible reward moves", moves ?? "—"],
+    ["Recent evidence", Array.isArray(recent) ? (recent.slice(0, 4).join(", ") || "None") : recent],
+    ["Last hypothesis", lastDecision.hypothesis || context?.hypothesis || "No advisor decision yet"],
+    ["Leader", context?.leader_candidate_id || context?.leader_id || "Control"],
+    ["Idle reason", context?.idle_reason || state.autopilotSelectedCampaign?.idle_reason || "—"],
+  ].map(([label, value]) => `<div class="autopilot-decision-card"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
+function renderAutopilotCandidates(campaign) {
+  const target = $("#autopilot-candidate-rows");
+  if (!target) return;
+  const candidates = campaign.candidate_lineage || campaign.candidates || campaign.trials || state.autopilotDecisionContext?.candidates || [];
+  if (!candidates.length) {
+    target.innerHTML = `<tr><td colspan="5" class="muted-copy">No candidates have been proposed.</td></tr>`;
+    return;
+  }
+  target.innerHTML = candidates.map((candidate) => {
+    const key = candidate.reward_key || candidate.change?.reward_key || candidate.reward_delta?.key || "Control";
+    const value = candidate.proposed_value ?? candidate.change?.proposed_value ?? candidate.reward_delta?.value;
+    const delta = candidate.delta ?? candidate.change?.delta ?? candidate.reward_delta?.delta;
+    const change = key === "Control" ? key : `${key} → ${autopilotFormatNumber(value)}${delta === undefined ? "" : ` (${autopilotFormatNumber(delta)})`}`;
+    return `<tr>
+      <td>${escapeHtml(candidate.id || candidate.candidate_id || candidate.trial_id || "—")}</td>
+      <td>${escapeHtml(change)}</td>
+      <td><span class="status-badge ${autopilotStatusClass(candidate.state || candidate.status)}">${escapeHtml(autopilotStatusLabel(candidate.state || candidate.status))}</span></td>
+      <td>${escapeHtml(candidate.seed ?? candidate.training_seed ?? "—")}</td>
+      <td>${escapeHtml(candidate.rank ?? candidate.ranking?.rank ?? "—")}</td>
+    </tr>`;
+  }).join("");
+}
+
+function autopilotGateSummary(report) {
+  const gates = report.hard_gates || report.gates || {};
+  if (typeof gates.passed === "boolean") return gates.passed ? "Pass" : "Fail";
+  if (typeof report.passed === "boolean") return report.passed ? "Pass" : "Fail";
+  const entries = Array.isArray(gates) ? gates : Object.values(gates);
+  if (!entries.length) return "—";
+  const passed = entries.filter((gate) => gate === true || gate?.passed === true).length;
+  return `${passed}/${entries.length} pass`;
+}
+
+function renderAutopilotEvaluations(campaign) {
+  const target = $("#autopilot-evaluation-rows");
+  if (!target) return;
+  const evaluations = campaign.evaluations || campaign.evaluation_reports || state.autopilotDecisionContext?.evaluations || [];
+  if (!evaluations.length) {
+    target.innerHTML = `<tr><td colspan="6" class="muted-copy">No deterministic evaluations yet.</td></tr>`;
+    return;
+  }
+  target.innerHTML = evaluations.map((report) => {
+    const score = report.soft_ranking || report.ranking || report.metrics || {};
+    const evidence = report.artifact_ids || report.evidence_ids || [];
+    const gateSummary = autopilotGateSummary(report);
+    return `<tr>
+      <td>${escapeHtml(report.trial_id || report.candidate_id || report.id || "—")}</td>
+      <td>${escapeHtml(report.seed ?? "—")}</td>
+      <td><span class="status-badge ${autopilotStatusClass(gateSummary.toLowerCase().startsWith("pass") ? "pass" : gateSummary.toLowerCase().startsWith("fail") ? "fail" : "unknown")}">${escapeHtml(gateSummary)}</span></td>
+      <td>${escapeHtml(autopilotFormatNumber(score.tracking_quality ?? score.command_tracking_score ?? report.command_tracking_score))}</td>
+      <td>${escapeHtml(autopilotFormatNumber(score.energy ?? score.energy_penalty ?? report.energy))}</td>
+      <td>${escapeHtml(Array.isArray(evidence) ? evidence.slice(0, 3).join(", ") : evidence || "—")}</td>
+    </tr>`;
+  }).join("");
+}
+
+function renderAutopilotEvents() {
+  const target = $("#autopilot-event-list");
+  if (!target) return;
+  if (!state.autopilotEvents.length) {
+    target.innerHTML = `<p class="muted-copy">No campaign events yet.</p>`;
+    return;
+  }
+  target.innerHTML = state.autopilotEvents.slice(0, 30).map((event) => `
+    <article class="autopilot-event">
+      <strong>${escapeHtml(event.summary || autopilotStatusLabel(event.event_type || event.type || "Campaign event"))}</strong>
+      <small>${escapeHtml(formatRelativeTime(event.created_at || event.timestamp) || "")}${event.actor ? ` · ${escapeHtml(event.actor)}` : ""}</small>
+    </article>
+  `).join("");
+}
+
+function renderAutopilotArtifacts() {
+  const target = $("#autopilot-artifact-list");
+  if (!target) return;
+  if (!state.autopilotArtifacts.length) {
+    target.innerHTML = `<p class="muted-copy">No immutable artifacts yet.</p>`;
+    return;
+  }
+  target.innerHTML = state.autopilotArtifacts.map((artifact) => {
+    const label = artifact.label || artifact.kind || artifact.type || artifact.id || "Artifact";
+    const url = artifact.url || artifact.href || artifact.download_url;
+    const title = url
+      ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`
+      : `<strong>${escapeHtml(label)}</strong>`;
+    return `<article class="autopilot-artifact">${title}<small>${escapeHtml(artifact.sha256 || artifact.artifact_id || artifact.id || "")}</small></article>`;
+  }).join("");
+}
+
+function renderAutopilotCampaignDetail() {
+  const campaign = state.autopilotSelectedCampaign;
+  const detail = $("#autopilot-campaign-detail");
+  const empty = $("#autopilot-no-selection");
+  if (!campaign) {
+    detail.hidden = true;
+    empty.hidden = false;
+    renderAutopilotHeartbeat(null);
+    return;
+  }
+  detail.hidden = false;
+  empty.hidden = true;
+  const id = autopilotCampaignId(campaign);
+  const status = autopilotCampaignState(campaign);
+  const goal = autopilotGoal(campaign);
+  const budget = autopilotBudgetValues(campaign);
+  $("#autopilot-campaign-title").textContent = goal.description || campaign.display_name || id;
+  $("#autopilot-campaign-subtitle").textContent = `${id} · revision ${autopilotCampaignRevision(campaign)} · simulation-only`;
+  const badge = $("#autopilot-campaign-badge");
+  badge.className = `status-badge ${autopilotStatusClass(status)}`;
+  badge.textContent = autopilotStatusLabel(status);
+  $("#autopilot-campaign-summary").innerHTML = [
+    autopilotSummaryItem("Task / stage / gait", `${goal.task || "—"} · ${goal.evaluation_profile || `stage${goal.stage || "—"}`} · ${goal.gait || "—"}`),
+    autopilotSummaryItem("Directions", Array.isArray(goal.directions) ? goal.directions.join(", ") : "—"),
+    autopilotSummaryItem("Command envelope", autopilotEnvelopeText(goal.command_envelope)),
+    autopilotSummaryItem("Training trials", `${autopilotFormatNumber(budget.usedTrials)} / ${autopilotFormatNumber(budget.maxTrials)}`),
+    autopilotSummaryItem("Active GPU hours", `${autopilotFormatNumber(budget.usedHours)} / ${autopilotFormatNumber(budget.maxHours)}`),
+    autopilotSummaryItem(
+      "Baseline",
+      goal.baseline_run_id
+        ? `${goal.baseline_run_id} · model_${goal.baseline_checkpoint_iteration}.pt · SHA ${autopilotIdentityText(goal.checkpoint_sha256)}`
+        : "Fresh initialization",
+    ),
+    autopilotSummaryItem("Leader", campaign.leader?.candidate_id || campaign.leader_candidate_id || campaign.leader_id || "Control"),
+    autopilotSummaryItem("Active process", campaign.active_process_id || campaign.active_process?.process_id || campaign.active_process?.id || "Idle"),
+    autopilotSummaryItem("Terminal reason", campaign.terminal_reason || "—"),
+    autopilotSummaryItem("physics_profile_sha256", autopilotIdentityText(goal.physics_profile_sha256)),
+    autopilotSummaryItem("spring_profile_sha256", autopilotIdentityText(goal.spring_profile_sha256)),
+    autopilotSummaryItem("code_sha256", autopilotIdentityText(goal.code_sha256)),
+    autopilotSummaryItem("config_sha256", autopilotIdentityText(goal.config_sha256)),
+    autopilotSummaryItem("command_profile_sha256", autopilotIdentityText(goal.command_profile_sha256)),
+  ].join("");
+  const activeStates = new Set(["armed", "control_training", "control_evaluating", "awaiting_advisor", "candidate_training", "candidate_evaluating", "confirming"]);
+  const resumeStates = new Set(["paused", "waiting_for_chatgpt"]);
+  const permitted = new Set(campaign.next_permitted_actions || []);
+  const actionButtons = $("#autopilot-campaign-actions").querySelectorAll("[data-autopilot-action]");
+  for (const button of actionButtons) {
+    const action = button.dataset.autopilotAction;
+    const permissionAction = action === "stop-after-current" ? "stop" : action;
+    const stateAllows = action === "arm" ? status === "draft" :
+      action === "pause" ? activeStates.has(status) :
+      action === "resume" ? resumeStates.has(status) :
+      (action === "stop" || action === "stop-after-current")
+        ? (activeStates.has(status) || resumeStates.has(status)) : false;
+    button.disabled = permitted.size
+      ? !(permitted.has(permissionAction) || permitted.has(`${permissionAction}_campaign`))
+      : !stateAllows;
+  }
+  $("#autopilot-patch-export").disabled = !(status === "patch_handoff" || campaign.patch_export_available === true);
+  renderAutopilotDecisionContext(state.autopilotDecisionContext || {});
+  renderAutopilotCandidates(campaign);
+  renderAutopilotEvaluations(campaign);
+  renderAutopilotEvents();
+  renderAutopilotArtifacts();
+  renderAutopilotHeartbeat(campaign);
+}
+
+async function loadAutopilotCampaignDetail(campaignId) {
+  if (!campaignId) {
+    state.autopilotSelectedCampaign = null;
+    renderAutopilotCampaignDetail();
+    return;
+  }
+  const encoded = encodeURIComponent(campaignId);
+  const [campaignResult, contextResult, eventsResult, artifactsResult] = await Promise.allSettled([
+    api(`/api/autopilot/campaigns/${encoded}`),
+    api(`/api/autopilot/campaigns/${encoded}/decision-context`),
+    api(`/api/autopilot/campaigns/${encoded}/events`),
+    api(`/api/autopilot/campaigns/${encoded}/artifacts`),
+  ]);
+  if (campaignResult.status === "rejected") throw campaignResult.reason;
+  const campaignData = campaignResult.value;
+  state.autopilotSelectedCampaign = campaignData.campaign || campaignData;
+  state.autopilotDecisionContext = contextResult.status === "fulfilled"
+    ? (contextResult.value.decision_context || contextResult.value.context || contextResult.value)
+    : null;
+  state.autopilotEvents = eventsResult.status === "fulfilled" ? autopilotList(eventsResult.value, "events") : [];
+  state.autopilotArtifacts = artifactsResult.status === "fulfilled" ? autopilotList(artifactsResult.value, "artifacts") : [];
+  renderAutopilotCampaignList();
+  renderAutopilotCampaignDetail();
+}
+
+async function loadAutopilotCampaigns({ refreshSelected = true } = {}) {
+  const data = await api("/api/autopilot/campaigns");
+  state.autopilotCampaigns = autopilotList(data, "campaigns");
+  const ids = new Set(state.autopilotCampaigns.map(autopilotCampaignId));
+  if (state.autopilotSelectedCampaignId && !ids.has(state.autopilotSelectedCampaignId)) {
+    state.autopilotSelectedCampaignId = "";
+    state.autopilotSelectedCampaign = null;
+  }
+  renderAutopilotCampaignList();
+  if (refreshSelected && state.autopilotSelectedCampaignId) {
+    await loadAutopilotCampaignDetail(state.autopilotSelectedCampaignId);
+  } else {
+    renderAutopilotCampaignDetail();
+  }
+}
+
+function scheduleAutopilotRefresh() {
+  if (state.autopilotRefreshTimer) clearTimeout(state.autopilotRefreshTimer);
+  if (!state.autopilotCapabilities?.enabled) return;
+  state.autopilotRefreshTimer = setTimeout(() => {
+    refreshAutopilot().catch(() => scheduleAutopilotRefresh());
+  }, AUTOPILOT_POLL_MS);
+}
+
+async function refreshAutopilot() {
+  if (state.autopilotRefreshInFlight) return state.autopilotRefreshInFlight;
+  state.autopilotRefreshInFlight = (async () => {
+    try {
+      const capability = await loadAutopilotCapabilities();
+      if (capability.enabled) await loadAutopilotCampaigns({ refreshSelected: true });
+    } finally {
+      state.autopilotRefreshInFlight = null;
+      scheduleAutopilotRefresh();
+    }
+  })();
+  return state.autopilotRefreshInFlight;
+}
+
+async function selectAutopilotCampaign(campaignId) {
+  state.autopilotSelectedCampaignId = campaignId;
+  renderAutopilotCampaignList();
+  await loadAutopilotCampaignDetail(campaignId);
+}
+
+async function runAutopilotAction(action) {
+  const campaign = state.autopilotSelectedCampaign;
+  const id = autopilotCampaignId(campaign);
+  if (!campaign || !id) return;
+  if (action === "arm") {
+    const budget = autopilotBudgetValues(campaign);
+    const goal = autopilotGoal(campaign);
+    const baseline = goal.baseline_run_id
+      ? `${goal.baseline_run_id} · model_${goal.baseline_checkpoint_iteration}.pt · SHA ${goal.checkpoint_sha256}`
+      : "Fresh initialization";
+    const confirmed = await confirmAction({
+      title: "Arm Autopilot Campaign",
+      body: `Command envelope: ${autopilotEnvelopeText(goal.command_envelope)}\nBaseline: ${baseline}\nIterations per trial: ${goal.per_trial_iteration_cap ?? "reviewed campaign value"}\nTraining trial budget: ${budget.maxTrials}\nActive GPU-hour budget: ${budget.maxHours}\n\nThe panel enforces deterministic gates and will not deploy a policy.`,
+      confirmLabel: "Arm Campaign",
+    });
+    if (!confirmed) return;
+  }
+  if (action === "stop") {
+    const confirmed = await confirmAction({
+      title: "Emergency Stop Campaign Work",
+      body: "Stop only queued or running work owned by this campaign and schedule no new trials. Unrelated Training Panel processes are never stopped.",
+      confirmLabel: "Stop Campaign Work",
+    });
+    if (!confirmed) return;
+  }
+  if (action === "stop-after-current") {
+    const confirmed = await confirmAction({
+      title: "Stop After Current Campaign Work",
+      body: "Let the campaign-owned training or evaluation currently in progress finish, then stop the campaign before any follow-up job is launched.",
+      confirmLabel: "Stop After Current",
+    });
+    if (!confirmed) return;
+  }
+  const button = $(`[data-autopilot-action="${action}"]`);
+  if (button) button.disabled = true;
+  try {
+    const payload = { expected_revision: autopilotCampaignRevision(campaign) };
+    if (action === "stop") payload.mode = "emergency";
+    if (action === "stop-after-current") payload.mode = "after_current";
+    const endpointAction = action === "stop-after-current" ? "stop" : action;
+    await api(
+      `/api/autopilot/campaigns/${encodeURIComponent(id)}/${endpointAction}`,
+      autopilotMutationOptions(action, payload),
+    );
+    await loadAutopilotCampaigns({ refreshSelected: true });
+    setStatus(`Autopilot campaign ${action} accepted.`);
+  } finally {
+    renderAutopilotCampaignDetail();
+  }
+}
+
+async function exportAutopilotPatch() {
+  const campaign = state.autopilotSelectedCampaign;
+  const id = autopilotCampaignId(campaign);
+  if (!id) return;
+  const response = await fetch(`/api/autopilot/campaigns/${encodeURIComponent(id)}/patch-export`);
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || response.statusText || "Patch handoff export failed.");
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename = disposition.match(/filename="?([^";]+)"?/i)?.[1] || `${id}-patch-handoff.json`;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  setStatus("Patch handoff exported. The panel did not apply it to the working tree.");
+}
+
 async function refreshAll() {
-  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadPhysicsPage(), loadActivity(), loadDeployDefaults()]);
+  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadPhysicsPage(), loadActivity(), loadDeployDefaults(), refreshAutopilot()]);
   await loadRuns();
+  renderAutopilotBaselineOptions();
   if (state.selectedRun) setDebugTarget({ type: "run", id: state.selectedRun.id });
 }
 
@@ -6219,6 +7306,33 @@ document.querySelectorAll(".nav-button").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
 
+const autopilotGoalForm = $("#autopilot-goal-form");
+if (autopilotGoalForm) autopilotGoalForm.addEventListener("submit", (event) => createAutopilotCampaign(event).catch(handleActionError));
+const autopilotTask = $("#autopilot-task");
+if (autopilotTask) autopilotTask.addEventListener("change", updateAutopilotGoalForm);
+const autopilotStage = $("#autopilot-stage");
+if (autopilotStage) autopilotStage.addEventListener("change", updateAutopilotGoalForm);
+const autopilotGait = $("#autopilot-gait");
+if (autopilotGait) autopilotGait.addEventListener("change", updateAutopilotGoalForm);
+const autopilotRefresh = $("#autopilot-refresh");
+if (autopilotRefresh) autopilotRefresh.addEventListener("click", () => refreshAutopilot().catch(handleActionError));
+const autopilotCampaignList = $("#autopilot-campaign-list");
+if (autopilotCampaignList) {
+  autopilotCampaignList.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-autopilot-campaign-id]");
+    if (button) selectAutopilotCampaign(button.dataset.autopilotCampaignId).catch(handleActionError);
+  });
+}
+const autopilotCampaignActions = $("#autopilot-campaign-actions");
+if (autopilotCampaignActions) {
+  autopilotCampaignActions.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-autopilot-action]");
+    if (button) runAutopilotAction(button.dataset.autopilotAction).catch(handleActionError);
+  });
+}
+const autopilotPatchExport = $("#autopilot-patch-export");
+if (autopilotPatchExport) autopilotPatchExport.addEventListener("click", () => exportAutopilotPatch().catch(handleActionError));
+
 applyTheme(preferredTheme());
 const headlessInput = $("#train-form input[name='headless']");
 if (headlessInput && IS_REMOTE_DESKTOP) {
@@ -6377,6 +7491,15 @@ if (exitComparisonBtn) exitComparisonBtn.addEventListener("click", exitCompariso
 $("#new-preset-btn").addEventListener("click", () => createNewPreset().catch(handleActionError));
 $("#new-terrain-preset-btn").addEventListener("click", () => createNewTerrainPreset().catch(handleActionError));
 $("#new-physics-preset-btn").addEventListener("click", () => createNewPhysicsPreset().catch(handleActionError));
+$("#physics-viewport-reset")?.addEventListener("click", () => robotViewer.api()?.resetView());
+$("#physics-viewport-toggle")?.addEventListener("click", (event) => {
+  const stage = $("#physics-viewport-stage") || document.querySelector(".physics-viewport-stage");
+  robotViewer.hidden = !robotViewer.hidden;
+  if (stage) stage.hidden = robotViewer.hidden;
+  event.currentTarget.textContent = robotViewer.hidden ? "Show" : "Hide";
+  if (robotViewer.hidden) robotViewer.suspend();
+  else robotViewer.ensure().catch(() => {});
+});
 const folderSelect = $("#run-folder-select");
 if (folderSelect) folderSelect.addEventListener("change", () => assignRunToFolder(folderSelect.value).catch(handleActionError));
 const selectVisibleBtn = $("#select-visible-runs");
@@ -6564,6 +7687,7 @@ updateBulkToolbar();
 startCurvesPolling();
 setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
 updateTrainingRouteForm();
+updateAutopilotGoalForm();
 refreshAll()
   .catch((error) => setStatusTone(error.message, "error"))
   .then(() => applyHashRoute().catch(handleActionError));

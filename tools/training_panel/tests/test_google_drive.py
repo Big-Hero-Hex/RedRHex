@@ -9,9 +9,12 @@ from unittest import mock
 from tools.training_panel.training_panel.config import PanelPaths
 from tools.training_panel.training_panel.google_drive import (
     EXPORT_FIELD,
+    GoogleDriveBusyError,
     GoogleDriveExporter,
     GoogleDrivePathError,
     GoogleDriveUnavailableError,
+    normalize_destination_folder,
+    parse_drive_destination,
 )
 from tools.training_panel.training_panel.history import HistoryStore
 from tools.training_panel.training_panel.server import PanelHandler
@@ -48,6 +51,35 @@ class GoogleDriveExporterTests(unittest.TestCase):
     @staticmethod
     def result(args, returncode=0, stdout="", stderr=""):
         return subprocess.CompletedProcess(args, returncode, stdout=stdout, stderr=stderr)
+
+    def test_destination_folder_validation_accepts_nested_paths_and_rejects_unsafe_values(self):
+        self.assertEqual(
+            normalize_destination_folder(" Robotics / Panel Exports "),
+            "Robotics/Panel Exports",
+        )
+        for value in ("", "/root", "root/", "root//child", "root/../child", "drive:path", "a\\b"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_destination_folder(value)
+
+    def test_destination_parser_accepts_a_drive_folder_link_and_rejects_other_urls(self):
+        destination = parse_drive_destination(
+            "https://drive.google.com/drive/u/0/folders/1AbCdEfGhIjKlMnOp?resourcekey=resource_Key-1&usp=sharing"
+        )
+
+        self.assertEqual(destination["destination_mode"], "folder_link")
+        self.assertEqual(destination["root_folder_id"], "1AbCdEfGhIjKlMnOp")
+        self.assertEqual(destination["resource_key"], "resource_Key-1")
+        self.assertEqual(
+            destination["folder_url"],
+            "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
+        )
+        for value in (
+            "https://example.com/drive/folders/1AbCdEfGhIjKlMnOp",
+            "https://drive.google.com/file/d/1AbCdEfGhIjKlMnOp/view",
+            "http://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_drive_destination(value)
 
     def test_status_reports_missing_rclone_without_exposing_configuration(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch(
@@ -123,6 +155,178 @@ class GoogleDriveExporterTests(unittest.TestCase):
             self.assertTrue(changed_started)
             self.assertFalse(changed_deduplicated)
             self.assertEqual(sum(command[1] == "copyto" for command in commands), 2)
+
+    def test_destination_change_is_persisted_and_invalidates_old_deduplication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, history, video = self.make_run(Path(tmp))
+            commands = []
+
+            def run_command(args, **_kwargs):
+                commands.append(args)
+                if args[1] == "listremotes":
+                    return self.result(args, stdout="redrhex-drive:\n")
+                if args[1] == "lsjson":
+                    return self.result(args, stdout=f'{{"ID":"drive-id","Size":{video.stat().st_size}}}')
+                return self.result(args)
+
+            exporter = GoogleDriveExporter(
+                paths,
+                history,
+                rclone_path="/usr/bin/rclone",
+                run_command=run_command,
+                start_background=lambda target: target(),
+            )
+            exporter.start_export("run fixture", video)
+            status = exporter.save_destination("Robotics/Panel Exports")
+            _record, started, reused = exporter.start_export("run fixture", video)
+
+            self.assertEqual(status["folder"], "Robotics/Panel Exports")
+            self.assertEqual(status["destination_revision"], 2)
+            self.assertTrue(started)
+            self.assertFalse(reused)
+            self.assertEqual(sum(command[1] == "copyto" for command in commands), 2)
+            self.assertIn(
+                "redrhex-drive:Robotics/Panel Exports/run_fixture/model_10_result.mp4",
+                commands[-2],
+            )
+            saved = json.loads(exporter.settings_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["destination_folder"], "Robotics/Panel Exports")
+            self.assertNotIn("token", str(saved).lower())
+
+    def test_pasted_folder_link_is_validated_and_used_as_the_private_export_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, history, video = self.make_run(Path(tmp))
+            commands = []
+            folder_link = (
+                "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp"
+                "?resourcekey=resource_Key-1&usp=sharing"
+            )
+
+            def run_command(args, **_kwargs):
+                commands.append(args)
+                if args[1] == "listremotes":
+                    return self.result(args, stdout="redrhex-drive:\n")
+                if args[1] == "lsjson" and args[3] == "redrhex-drive:":
+                    return self.result(args, stdout='{"IsDir":true}')
+                if args[1] == "lsjson":
+                    return self.result(args, stdout=f'{{"ID":"linked-id","Size":{video.stat().st_size}}}')
+                return self.result(args)
+
+            exporter = GoogleDriveExporter(
+                paths,
+                history,
+                rclone_path="/usr/bin/rclone",
+                run_command=run_command,
+                start_background=lambda target: target(),
+            )
+
+            status = exporter.save_destination(folder_link)
+            exporter.start_export("run fixture", video)
+
+            self.assertEqual(status["destination_mode"], "folder_link")
+            self.assertEqual(status["destination_display"], "Linked Google Drive folder")
+            self.assertEqual(
+                status["folder_url"],
+                "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOp",
+            )
+            self.assertNotIn("resource", str(status).lower())
+            validation = next(command for command in commands if command[1:4] == ["lsjson", "--stat", "redrhex-drive:"])
+            copy_command = next(command for command in commands if command[1] == "copyto")
+            self.assertIn("--drive-root-folder-id", validation)
+            self.assertIn("1AbCdEfGhIjKlMnOp", copy_command)
+            self.assertIn("--drive-resource-key", copy_command)
+            self.assertIn("redrhex-drive:run_fixture/model_10_result.mp4", copy_command)
+            record = history.get_run("run fixture")[EXPORT_FIELD]["videos/play/model 10 result.mp4"]
+            self.assertNotIn("resource", str(record).lower())
+            saved = json.loads(exporter.settings_file.read_text(encoding="utf-8"))
+            self.assertEqual(saved["resource_key"], "resource_Key-1")
+            self.assertEqual(exporter.settings_file.stat().st_mode & 0o777, 0o600)
+
+    def test_reconnect_uses_argument_array_and_versions_the_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, history, _video = self.make_run(Path(tmp))
+            popen_calls = []
+
+            class FakeProcess:
+                returncode = 0
+
+                def communicate(self, timeout=None):
+                    self.timeout = timeout
+                    return "", ""
+
+            def popen_factory(args, **kwargs):
+                popen_calls.append((args, kwargs))
+                return FakeProcess()
+
+            exporter = GoogleDriveExporter(
+                paths,
+                history,
+                rclone_path="/usr/bin/rclone",
+                run_command=lambda args, **kwargs: self.result(args, stdout="redrhex-drive:\n"),
+                popen_factory=popen_factory,
+                start_background=lambda target: target(),
+            )
+
+            reconnect, started = exporter.start_reconnect()
+
+            self.assertTrue(started)
+            self.assertEqual(reconnect["status"], "completed")
+            self.assertEqual(exporter.status()["destination_revision"], 2)
+            self.assertEqual(
+                popen_calls[0][0],
+                ["/usr/bin/rclone", "config", "reconnect", "redrhex-drive:", "--auto-confirm"],
+            )
+            self.assertIs(popen_calls[0][1]["shell"], False)
+            self.assertNotIn("token", str(exporter.status()).lower())
+
+    def test_destination_and_reconnect_refuse_to_change_during_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, history, video = self.make_run(Path(tmp))
+            callbacks = []
+            exporter = GoogleDriveExporter(
+                paths,
+                history,
+                rclone_path="/usr/bin/rclone",
+                run_command=lambda args, **kwargs: self.result(args, stdout="redrhex-drive:\n"),
+                start_background=callbacks.append,
+            )
+            exporter.start_export("run fixture", video)
+
+            with self.assertRaises(GoogleDriveBusyError):
+                exporter.save_destination("Other Folder")
+            with self.assertRaises(GoogleDriveBusyError):
+                exporter.start_reconnect()
+
+    def test_accepts_a_run_directory_under_another_rsl_rl_task_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            log_dir = paths.rsl_rl_log_root.parent / "redrhex_forward_fast" / "run_fast"
+            video = log_dir / "videos" / "play" / "result.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+            history = HistoryStore(paths)
+            history.add_run({"id": "run_fast", "created_at": "2026-08-14T10:00:00", "log_dir": str(log_dir)})
+
+            def run_command(args, **_kwargs):
+                if args[1] == "listremotes":
+                    return self.result(args, stdout="redrhex-drive:\n")
+                if args[1] == "lsjson":
+                    return self.result(args, stdout=f'{{"ID":"fast-id","Size":{video.stat().st_size}}}')
+                return self.result(args)
+
+            exporter = GoogleDriveExporter(
+                paths,
+                history,
+                rclone_path="/usr/bin/rclone",
+                run_command=run_command,
+                start_background=lambda target: target(),
+            )
+
+            exporter.start_export("run_fast", video)
+
+            record = history.get_run("run_fast")[EXPORT_FIELD]["videos/play/result.mp4"]
+            self.assertEqual(record["status"], "completed")
 
     def test_fake_rclone_executable_completes_copy_and_stat_flow(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,7 +417,11 @@ elif args[0] == "lsjson":
                 return self.result(
                     args,
                     returncode=1,
-                    stderr='{"detail":"' + ("x" * 3000) + '","access_token":"do-not-store"}',
+                    stderr=(
+                        '{"detail":"'
+                        + ("x" * 3000)
+                        + '","access_token":"do-not-store"} --drive-resource-key do-not-store-resource'
+                    ),
                 )
 
             exporter = GoogleDriveExporter(
@@ -230,6 +438,7 @@ elif args[0] == "lsjson":
             self.assertEqual(failed["status"], "failed")
             self.assertIn("<redacted>", failed["error"])
             self.assertNotIn("do-not-store", failed["error"])
+            self.assertNotIn("do-not-store-resource", failed["error"])
             self.assertLessEqual(len(failed["error"]), 2000)
 
     def test_reconcile_marks_unfinished_export_interrupted(self):
@@ -373,6 +582,92 @@ class GoogleDriveHandlerTests(unittest.TestCase):
             readiness = responses[0][0]["google_drive_export"]
             self.assertTrue(readiness["configured"])
             self.assertNotIn("token", str(readiness).lower())
+
+    def test_settings_routes_save_destination_and_start_secret_free_reconnect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+
+            class FakeExporter:
+                def __init__(self):
+                    self.saved = []
+
+                def status(self):
+                    return {
+                        "available": True,
+                        "configured": True,
+                        "remote": "redrhex-drive:",
+                        "folder": self.saved[-1] if self.saved else "RedRHex Videos",
+                        "destination_mode": "my_drive_path",
+                        "destination_display": self.saved[-1] if self.saved else "RedRHex Videos",
+                        "folder_url": "",
+                        "destination_revision": 2 if self.saved else 1,
+                        "reconnect": {"status": "authorizing"},
+                        "reconnect_command": "rclone config reconnect redrhex-drive:",
+                        "remediation": "",
+                    }
+
+                def save_destination(self, folder):
+                    self.saved.append(folder)
+                    return self.status()
+
+                def start_reconnect(self):
+                    return {"status": "authorizing", "error": ""}, True
+
+            exporter = FakeExporter()
+
+            def invoke(path, payload):
+                handler = object.__new__(PanelHandler)
+                handler.path = path
+                handler.state = type("FakeState", (), {"paths": paths, "google_drive": exporter})()
+                responses = []
+                activities = []
+                handler._payload = lambda: payload
+                handler._json = lambda body, status=200: responses.append((body, status))
+                handler._record_activity = lambda *args, **kwargs: activities.append((args, kwargs))
+                handler._do_POST()
+                return responses, activities
+
+            saved, saved_activity = invoke(
+                "/api/google-drive/settings",
+                {"destination": "Robotics/Panel Exports"},
+            )
+            reconnect, reconnect_activity = invoke("/api/google-drive/reconnect", {})
+
+            self.assertEqual(saved[0][1], 200)
+            self.assertEqual(saved[0][0]["google_drive_export"]["folder"], "Robotics/Panel Exports")
+            self.assertEqual(reconnect[0][1], 202)
+            self.assertEqual(reconnect[0][0]["reconnect"]["status"], "authorizing")
+            self.assertTrue(saved_activity)
+            self.assertTrue(reconnect_activity)
+            self.assertNotIn("token", str(saved + reconnect).lower())
+
+    def test_settings_routes_map_busy_and_unavailable_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+
+            class FakeExporter:
+                def save_destination(self, _folder):
+                    raise GoogleDriveUnavailableError("configure rclone")
+
+                def start_reconnect(self):
+                    raise GoogleDriveBusyError("upload active")
+
+            def invoke(path, payload):
+                handler = object.__new__(PanelHandler)
+                handler.path = path
+                handler.state = type("FakeState", (), {"paths": paths, "google_drive": FakeExporter()})()
+                responses = []
+                handler._payload = lambda: payload
+                handler._json = lambda body, status=200: responses.append((body, status))
+                handler._record_activity = lambda *args, **kwargs: None
+                handler._do_POST()
+                return responses
+
+            unavailable = invoke("/api/google-drive/settings", {"destination": "Exports"})
+            busy = invoke("/api/google-drive/reconnect", {})
+
+            self.assertEqual(unavailable, [({"error": "configure rclone"}, 503)])
+            self.assertEqual(busy, [({"error": "upload active"}, 409)])
 
     def test_route_exports_latest_or_selected_checkpoint(self):
         with tempfile.TemporaryDirectory() as tmp:

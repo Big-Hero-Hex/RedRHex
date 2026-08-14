@@ -474,7 +474,7 @@ class HistoryTests(unittest.TestCase):
     def test_route_id_decodes_encoded_ids(self):
         self.assertEqual(route_id("/api/runs/run%20one/notes"), "run one")
 
-    def test_runs_payload_includes_folders_for_coalesced_refresh(self):
+    def test_runs_payload_is_read_only_and_includes_folders_for_coalesced_refresh(self):
         class FakeProcesses:
             def __init__(self):
                 self.reconciled = False
@@ -495,7 +495,7 @@ class HistoryTests(unittest.TestCase):
 
             payload = handler._runs_payload()
 
-            self.assertTrue(processes.reconciled)
+            self.assertFalse(processes.reconciled)
             self.assertIn("runs", payload)
             self.assertIn("folders", payload)
             self.assertIn("Good Runs", payload["folders"])

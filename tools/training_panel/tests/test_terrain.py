@@ -289,3 +289,22 @@ def test_apply_terrain_overrides_adjusts_exact_box_grid_divisor():
     assert applied == [
         "terrain.terrain_generator.sub_terrains.boxes.grid_width=0.396 (adjusted from 0.4)",
     ]
+
+
+def test_immutable_terrain_profile_rejects_automatic_resolution_adjustment():
+    env_cfg = SimpleNamespace(
+        terrain=SimpleNamespace(
+            terrain_type="generator",
+            terrain_generator=SimpleNamespace(
+                size=(6.0, 6.0),
+                sub_terrains={"boxes": SimpleNamespace(grid_width=0.45)},
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="would resolve"):
+        apply_terrain_overrides(
+            env_cfg,
+            {"terrain.terrain_generator.sub_terrains.boxes.grid_width": 0.4},
+            require_exact=True,
+        )

@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
+import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -15,6 +18,14 @@ from urllib.parse import parse_qs, unquote, urlparse
 from tools.training_panel import __version__
 
 from .activity import ActivityStore
+from .autopilot import GOAL_SCHEMA_VERSION, AutopilotValidationError, autopilot_capabilities
+from .autopilot_service import AutopilotService
+from .autopilot_store import (
+    AutopilotBudgetError,
+    AutopilotConflictError,
+    AutopilotStoreError,
+    CampaignNotFoundError,
+)
 from .commands import (
     DEFAULT_TRAINING_TASK,
     DEFAULT_VIDEO_PRESET,
@@ -25,10 +36,16 @@ from .commands import (
 )
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
-from .google_drive import GoogleDriveExporter, GoogleDrivePathError, GoogleDriveUnavailableError
+from .google_drive import (
+    GoogleDriveBusyError,
+    GoogleDriveExporter,
+    GoogleDrivePathError,
+    GoogleDriveUnavailableError,
+)
 from .history import HistoryStore, checkpoint_inventory
 from .physics import PhysicsPresetStore, physics_catalog
 from .presets import PresetStore
+from .robot_geometry import robot_geometry
 from .processes import CudaPreflightError, ProcessRegistry, ProcessStartError
 from .remote_config import RemoteStateStore
 from .remote_manager import RemoteWorkerManager
@@ -38,8 +55,52 @@ from .tweaks import build_tweak_payload, newest_finished_tweak_run
 
 
 STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
+
+# Browsers refuse to execute an ES module served under a non-JavaScript MIME type, and
+# the system mimetypes database does not reliably cover .mjs. Pin the types we serve.
+_STATIC_CONTENT_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".html": "text/html; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
 _PRESET_FILE = Path(__file__).resolve().parents[1] / "reward_presets.json"
 _TERRAIN_PRESET_FILE = Path(__file__).resolve().parents[1] / "terrain_presets.json"
+_AUTOPILOT_ERROR_SCHEMA_VERSION = "redrhex.autopilot.error.v1"
+_AUTOPILOT_ADVISOR_METADATA_SCHEMA_VERSION = "redrhex.autopilot.advisor-metadata.v1"
+_AUTOPILOT_SKILL_VERSION = "redrhex-autopilot/0.1.0"
+_AUTOPILOT_PROMPT_VERSION = "scheduled-advisor.v1"
+_AUTOPILOT_MAX_REQUEST_BYTES = 1024 * 1024
+_AUTOPILOT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_AUTOPILOT_IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_AUTOPILOT_IF_MATCH_RE = re.compile(r'^"(0|[1-9][0-9]*)"$')
+_AUTOPILOT_DRAFT_FIELDS = {
+    "schema_version",
+    "description",
+    "task",
+    "stage",
+    "evaluation_profile",
+    "gait",
+    "directions",
+    "command_envelope",
+    "skill_gates",
+    "baseline_run_id",
+    "baseline_checkpoint_iteration",
+    "checkpoint_sha256",
+    "initialization_mode",
+    "training_seeds",
+    "per_trial_iteration_cap",
+    "budget",
+    "tunable_reward_keys",
+    "reward_bounds",
+    "physics_profile_sha256",
+    "spring_profile_sha256",
+    "code_sha256",
+    "config_sha256",
+    "command_profile_sha256",
+}
 
 
 def route_id(path: str) -> str:
@@ -61,6 +122,20 @@ class RunVideoError(ValueError):
     def __init__(self, message: str, status: int):
         super().__init__(message)
         self.status = status
+
+
+class AutopilotRouteError(ValueError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status: int = 400,
+        details: object | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.details = details
 
 
 def _sync_active_terrain_override_file(paths: PanelPaths, values: dict) -> None:
@@ -85,6 +160,24 @@ class PanelState:
         self.activity = ActivityStore(paths)
         self.remote_state = RemoteStateStore(paths.remote_state_file)
         self.remote_worker = RemoteWorkerManager(paths, self.remote_state)
+        # Reconciliation is a startup mutation. GET endpoints remain observational and
+        # cannot advance queues merely because a browser or connector polls them.
+        self.processes.reconcile_stale_history()
+        self.processes.start_next_queued_training()
+        # This is the only Autopilot service instance in the panel process. Start its
+        # worker only after the process registry has reconciled persisted work.
+        self.autopilot = None
+        try:
+            self.autopilot = AutopilotService(
+                paths,
+                self.history,
+                self.processes,
+                self.activity,
+            )
+        except Exception:
+            # Keep the ordinary panel usable when campaign storage cannot start;
+            # Autopilot capabilities then advertise unavailable and writes fail closed.
+            traceback.print_exc()
         self.remote_worker.autostart_if_enabled()
 
 
@@ -128,6 +221,8 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if self._is_autopilot_path(parsed.path):
+            return self._handle_autopilot_get(parsed)
         if parsed.path == "/":
             return self._send_static("index.html")
         if parsed.path.startswith("/static/"):
@@ -296,6 +391,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             })
         if parsed.path == "/api/physics":
             return self._json(physics_catalog())
+        if parsed.path == "/api/physics/robot-geometry":
+            return self._json(robot_geometry(self.state.paths))
         if parsed.path == "/api/physics/presets":
             return self._json({
                 "presets": self.state.physics_presets.list_presets(),
@@ -344,6 +441,8 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def _do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if self._is_autopilot_path(parsed.path):
+            return self._handle_autopilot_write(parsed, method="POST")
         try:
             payload = self._payload()
             if parsed.path == "/api/training/start":
@@ -373,6 +472,44 @@ class PanelHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/remote/settings":
                 state = self.state.remote_worker.save_settings(payload)
                 return self._json({"saved": True, "remote_state": state, "status": self.state.remote_worker.status()})
+            if parsed.path == "/api/google-drive/settings":
+                try:
+                    status = self.state.google_drive.save_destination(
+                        str(payload.get("destination") or payload.get("destination_folder") or "")
+                    )
+                except GoogleDriveBusyError as exc:
+                    return self._json({"error": str(exc)}, status=409)
+                except GoogleDriveUnavailableError as exc:
+                    return self._json({"error": str(exc)}, status=503)
+                self._record_activity(
+                    "google_drive_settings_update",
+                    summary="Updated the private Google Drive export destination",
+                    payload={
+                        "destination_mode": status.get("destination_mode"),
+                        "destination_display": status.get("destination_display"),
+                    },
+                )
+                return self._json({"saved": True, "google_drive_export": status})
+            if parsed.path == "/api/google-drive/reconnect":
+                try:
+                    reconnect, started = self.state.google_drive.start_reconnect()
+                except GoogleDriveBusyError as exc:
+                    return self._json({"error": str(exc)}, status=409)
+                except GoogleDriveUnavailableError as exc:
+                    return self._json({"error": str(exc)}, status=503)
+                if started:
+                    self._record_activity(
+                        "google_drive_reconnect_start",
+                        summary="Started Google Drive account reconnection on the training PC",
+                    )
+                return self._json(
+                    {
+                        "started": started,
+                        "reconnect": reconnect,
+                        "google_drive_export": self.state.google_drive.status(),
+                    },
+                    status=202 if reconnect.get("status") == "authorizing" else 200,
+                )
             if parsed.path == "/api/remote/worker/start":
                 return self._json(self.state.remote_worker.start(str(payload.get("mode") or "")))
             if parsed.path == "/api/remote/worker/stop":
@@ -666,6 +803,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                     return self._json({"error": str(exc)}, status=exc.status)
                 except GoogleDriveUnavailableError as exc:
                     return self._json({"error": str(exc)}, status=503)
+                except GoogleDriveBusyError as exc:
+                    return self._json({"error": str(exc)}, status=409)
                 except GoogleDrivePathError as exc:
                     status = 403 if "outside" in str(exc).lower() else 404
                     return self._json({"error": str(exc)}, status=status)
@@ -936,6 +1075,692 @@ class PanelHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._json({"error": str(exc)}, status=400)
         self._not_found()
+
+    def do_PATCH(self) -> None:
+        return self._handle_request(self._do_PATCH)
+
+    def _do_PATCH(self) -> None:
+        parsed = urlparse(self.path)
+        if self._is_autopilot_path(parsed.path):
+            return self._handle_autopilot_write(parsed, method="PATCH")
+        self._not_found()
+
+    @staticmethod
+    def _is_autopilot_path(path: str) -> bool:
+        return path == "/api/autopilot" or path.startswith("/api/autopilot/")
+
+    def _handle_autopilot_get(self, parsed) -> None:
+        try:
+            self._require_autopilot_auth()
+            segments = self._autopilot_segments(parsed.path)
+            if segments == ["capabilities"]:
+                self._reject_autopilot_query(parsed.query)
+                service = getattr(self.state, "autopilot", None)
+                if service is None:
+                    payload = autopilot_capabilities(enabled=False)
+                    payload["service_state"] = "unavailable"
+                    return self._json(payload)
+                method = self._autopilot_method(service, "capabilities")
+                return self._json(self._autopilot_value(method()))
+
+            service = self._require_autopilot_service()
+            if segments == ["campaigns"]:
+                query = self._autopilot_query(parsed.query, allowed={"state", "limit"})
+                state = query.get("state", [""])[0].strip() or None
+                if state is not None and (len(state) > 64 or not re.fullmatch(r"[a-z_]+", state)):
+                    raise AutopilotRouteError("invalid_query", "state is invalid")
+                try:
+                    limit = int(query.get("limit", ["100"])[0])
+                except (TypeError, ValueError) as exc:
+                    raise AutopilotRouteError("invalid_query", "limit must be an integer") from exc
+                if not 1 <= limit <= 100:
+                    raise AutopilotRouteError("invalid_query", "limit must be within 1..100")
+                campaigns = self._autopilot_method(service, "list_campaigns")(
+                    state=state,
+                    limit=limit,
+                )
+                if isinstance(campaigns, dict) and "campaigns" in campaigns:
+                    return self._json(self._autopilot_value(campaigns))
+                return self._json({"campaigns": self._autopilot_value(campaigns or [])})
+
+            if len(segments) < 2 or segments[0] != "campaigns":
+                raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+            campaign_id = self._autopilot_identifier(segments[1], "campaign_id")
+            if len(segments) == 2:
+                self._reject_autopilot_query(parsed.query)
+                campaign = self._autopilot_method(service, "get_campaign")(campaign_id)
+                if campaign is None:
+                    raise AutopilotRouteError("campaign_not_found", "Campaign not found", 404)
+                return self._json(self._wrap_autopilot("campaign", campaign))
+            if len(segments) == 3 and segments[2] == "decision-context":
+                self._reject_autopilot_query(parsed.query)
+                context = self._autopilot_method(
+                    service,
+                    "get_decision_context",
+                    "decision_context",
+                )(campaign_id)
+                if context is None:
+                    raise AutopilotRouteError("campaign_not_found", "Campaign not found", 404)
+                return self._json(self._autopilot_value(context))
+            if len(segments) == 3 and segments[2] == "events":
+                query = self._autopilot_query(parsed.query, allowed={"after", "limit"})
+                try:
+                    after = int(query.get("after", ["0"])[0])
+                    limit = int(query.get("limit", ["500"])[0])
+                except (TypeError, ValueError) as exc:
+                    raise AutopilotRouteError(
+                        "invalid_query", "after and limit must be integers"
+                    ) from exc
+                if after < 0:
+                    raise AutopilotRouteError(
+                        "invalid_query", "after must be non-negative"
+                    )
+                if not 1 <= limit <= 500:
+                    raise AutopilotRouteError(
+                        "invalid_query", "limit must be within 1..500"
+                    )
+                events = self._autopilot_method(service, "list_events")(
+                    campaign_id,
+                    after=after,
+                    limit=limit,
+                )
+                if isinstance(events, dict) and "events" in events:
+                    return self._json(self._autopilot_value(events))
+                return self._json({"events": self._autopilot_value(events or [])})
+            if len(segments) == 3 and segments[2] == "artifacts":
+                self._reject_autopilot_query(parsed.query)
+                artifacts = self._autopilot_method(service, "list_artifacts")(campaign_id)
+                if isinstance(artifacts, dict) and "artifacts" in artifacts:
+                    return self._json(self._autopilot_value(artifacts))
+                return self._json({"artifacts": self._autopilot_value(artifacts or [])})
+            if len(segments) == 4 and segments[2] == "artifacts":
+                self._reject_autopilot_query(parsed.query)
+                artifact_id = self._autopilot_identifier(segments[3], "artifact_id")
+                artifact = self._autopilot_method(
+                    service,
+                    "get_artifact",
+                )(campaign_id, artifact_id)
+                if artifact is None:
+                    raise AutopilotRouteError("artifact_not_found", "Artifact not found", 404)
+                metadata, _content = self._autopilot_artifact_parts(artifact)
+                normalized = self._autopilot_value(metadata)
+                if not isinstance(normalized, dict):
+                    raise AutopilotRouteError(
+                        "autopilot_service_contract_error",
+                        "Autopilot artifact metadata is invalid",
+                        503,
+                    )
+                normalized = dict(normalized)
+                normalized["download_url"] = (
+                    f"/api/autopilot/campaigns/{campaign_id}/artifacts/{artifact_id}/download"
+                )
+                return self._json({"artifact": normalized})
+            if len(segments) == 5 and segments[2] == "artifacts" and segments[4] == "download":
+                self._reject_autopilot_query(parsed.query)
+                artifact_id = self._autopilot_identifier(segments[3], "artifact_id")
+                artifact = self._autopilot_method(service, "get_artifact")(
+                    campaign_id,
+                    artifact_id,
+                )
+                metadata, content = self._autopilot_artifact_parts(artifact)
+                return self._send_autopilot_artifact(metadata, content)
+            if len(segments) == 3 and segments[2] == "compare":
+                query = self._autopilot_query(parsed.query, allowed={"trial_ids"})
+                raw_ids = []
+                for value in query.get("trial_ids", []):
+                    raw_ids.extend(value.split(","))
+                trial_ids = [
+                    self._autopilot_identifier(value.strip(), "trial_id")
+                    for value in raw_ids
+                    if value.strip()
+                ]
+                if not 2 <= len(trial_ids) <= 12 or len(set(trial_ids)) != len(trial_ids):
+                    raise AutopilotRouteError(
+                        "invalid_query",
+                        "trial_ids must contain 2..12 unique identifiers",
+                    )
+                comparison = self._autopilot_method(service, "compare_trials")(
+                    campaign_id,
+                    trial_ids,
+                )
+                return self._json(self._autopilot_value(comparison))
+            if len(segments) == 3 and segments[2] == "patch-export":
+                self._reject_autopilot_query(parsed.query)
+                export = self._autopilot_method(service, "export_patch", "patch_export")(
+                    campaign_id
+                )
+                if export is None:
+                    raise AutopilotRouteError("patch_export_not_found", "Patch handoff not found", 404)
+                return self._send_autopilot_patch_export(campaign_id, export)
+            raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+        except Exception as exc:
+            return self._handle_autopilot_exception(exc)
+
+    def _handle_autopilot_write(self, parsed, *, method: str) -> None:
+        try:
+            self._require_autopilot_auth()
+            payload = self._autopilot_payload()
+            idempotency_key, expected_revision = self._autopilot_mutation_metadata(payload)
+            segments = self._autopilot_segments(parsed.path)
+            self._reject_autopilot_query(parsed.query)
+            service = self._require_autopilot_service()
+            request_payload = dict(payload)
+            request_payload.pop("expected_revision", None)
+
+            if method == "POST" and segments == ["campaigns"]:
+                if expected_revision != 0:
+                    raise AutopilotRouteError(
+                        "invalid_expected_revision",
+                        "new campaigns require expected_revision=0",
+                    )
+                self._validate_autopilot_draft_wrapper(request_payload)
+                result = self._autopilot_method(service, "create_campaign")(
+                    request_payload,
+                    idempotency_key=idempotency_key,
+                )
+                return self._json(self._wrap_autopilot("campaign", result), status=201)
+
+            if len(segments) < 2 or segments[0] != "campaigns":
+                raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+            campaign_id = self._autopilot_identifier(segments[1], "campaign_id")
+            if method == "PATCH" and len(segments) == 2:
+                self._validate_autopilot_draft_wrapper(request_payload)
+                result = self._autopilot_method(service, "update_draft")(
+                    campaign_id,
+                    request_payload,
+                    idempotency_key=idempotency_key,
+                    expected_revision=expected_revision,
+                )
+                return self._json(self._wrap_autopilot("campaign", result))
+            if method != "POST" or len(segments) != 3:
+                raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+            action = segments[2]
+            if action == "heartbeat":
+                self._require_autopilot_keys(
+                    request_payload,
+                    allowed={"advisor_metadata"},
+                )
+                metadata = self._autopilot_advisor_metadata(
+                    request_payload.get("advisor_metadata")
+                )
+                result = self._autopilot_method(service, "advisor_heartbeat")(
+                    campaign_id,
+                    advisor_metadata=metadata,
+                    idempotency_key=idempotency_key,
+                    expected_revision=expected_revision,
+                )
+                return self._json(self._wrap_autopilot("campaign", result))
+            if action == "arm":
+                self._require_autopilot_keys(request_payload, allowed=set())
+                result = self._autopilot_method(service, "arm_campaign")(
+                    campaign_id,
+                    idempotency_key=idempotency_key,
+                    expected_revision=expected_revision,
+                )
+                return self._json(self._wrap_autopilot("campaign", result))
+            if action == "pause":
+                self._require_autopilot_keys(
+                    request_payload,
+                    allowed={"reason", "advisor_metadata"},
+                )
+                kwargs = {}
+                if "reason" in request_payload:
+                    kwargs["reason"] = self._autopilot_reason(request_payload["reason"])
+                if "advisor_metadata" in request_payload:
+                    kwargs["advisor_metadata"] = self._autopilot_advisor_metadata(
+                        request_payload["advisor_metadata"]
+                    )
+                result = self._autopilot_method(service, "pause_campaign")(
+                    campaign_id,
+                    idempotency_key=idempotency_key,
+                    expected_revision=expected_revision,
+                    **kwargs,
+                )
+                return self._json(self._wrap_autopilot("campaign", result))
+            if action == "resume":
+                self._require_autopilot_keys(request_payload, allowed=set())
+                result = self._autopilot_method(service, "resume_campaign")(
+                    campaign_id,
+                    idempotency_key=idempotency_key,
+                    expected_revision=expected_revision,
+                )
+                return self._json(self._wrap_autopilot("campaign", result))
+            if action == "stop":
+                self._require_autopilot_keys(
+                    request_payload,
+                    allowed={"mode", "reason", "advisor_metadata"},
+                )
+                mode = request_payload.get("mode", "after_current")
+                if mode not in {"after_current", "emergency"}:
+                    raise AutopilotRouteError(
+                        "invalid_stop_mode",
+                        "stop mode must be after_current or emergency",
+                    )
+                kwargs = {"after_current": mode == "after_current"}
+                if "reason" in request_payload:
+                    kwargs["reason"] = self._autopilot_reason(request_payload["reason"])
+                if "advisor_metadata" in request_payload:
+                    kwargs["advisor_metadata"] = self._autopilot_advisor_metadata(
+                        request_payload["advisor_metadata"]
+                    )
+                result = self._autopilot_method(service, "stop_campaign")(
+                    campaign_id,
+                    idempotency_key=idempotency_key,
+                    expected_revision=expected_revision,
+                    **kwargs,
+                )
+                return self._json(self._wrap_autopilot("campaign", result))
+            if action == "decisions":
+                metadata = self._autopilot_advisor_metadata(
+                    request_payload.get("advisor_metadata")
+                )
+                if "patch_proposal" in request_payload:
+                    if set(request_payload) != {
+                        "decision",
+                        "patch_proposal",
+                        "advisor_metadata",
+                    }:
+                        raise AutopilotRouteError(
+                            "invalid_patch_wrapper",
+                            "patch proposal requests require only decision and patch_proposal",
+                        )
+                    result = self._autopilot_method(service, "submit_patch_proposal")(
+                        campaign_id,
+                        request_payload["decision"],
+                        request_payload["patch_proposal"],
+                        advisor_metadata=metadata,
+                        idempotency_key=idempotency_key,
+                        expected_revision=expected_revision,
+                    )
+                else:
+                    if set(request_payload) != {"decision", "advisor_metadata"}:
+                        raise AutopilotRouteError(
+                            "invalid_decision_wrapper",
+                            "advisor decisions require only decision and advisor_metadata",
+                        )
+                    result = self._autopilot_method(service, "submit_decision")(
+                        campaign_id,
+                        {
+                            "decision": request_payload["decision"],
+                            "advisor_metadata": metadata,
+                        },
+                        idempotency_key=idempotency_key,
+                        expected_revision=expected_revision,
+                    )
+                return self._json(self._wrap_autopilot("campaign", result), status=201)
+            raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+        except Exception as exc:
+            return self._handle_autopilot_exception(exc)
+
+    def _require_autopilot_auth(self) -> None:
+        expected = os.environ.get("REDRHEX_AUTOPILOT_BEARER_TOKEN", "").strip()
+        if not expected:
+            return
+        values = self._header_values("Authorization")
+        supplied = values[0] if len(values) == 1 else ""
+        if not secrets.compare_digest(supplied, f"Bearer {expected}"):
+            raise AutopilotRouteError(
+                "unauthorized",
+                "Autopilot bearer authentication failed",
+                401,
+            )
+
+    def _require_autopilot_service(self):
+        service = getattr(self.state, "autopilot", None)
+        if service is None:
+            raise AutopilotRouteError(
+                "autopilot_unavailable",
+                "Autopilot service is disabled or unavailable",
+                503,
+            )
+        return service
+
+    @staticmethod
+    def _require_autopilot_keys(payload: dict, *, allowed: set[str]) -> None:
+        unknown = sorted(set(payload) - allowed)
+        if unknown:
+            raise AutopilotRouteError(
+                "invalid_payload",
+                f"unknown request field(s): {', '.join(unknown)}",
+            )
+
+    @staticmethod
+    def _autopilot_reason(value: object) -> str:
+        if not isinstance(value, str) or not value.strip() or len(value) > 1000:
+            raise AutopilotRouteError(
+                "invalid_reason",
+                "reason must be a non-empty string of at most 1000 characters",
+            )
+        return value.strip()
+
+    @staticmethod
+    def _autopilot_advisor_metadata(value: object) -> dict[str, str]:
+        if not isinstance(value, dict):
+            raise AutopilotRouteError(
+                "invalid_advisor_metadata",
+                "advisor_metadata must be an object",
+            )
+        required = {
+            "schema_version",
+            "skill_version",
+            "prompt_version",
+            "declared_model",
+            "reasoning_effort",
+        }
+        if set(value) != required:
+            raise AutopilotRouteError(
+                "invalid_advisor_metadata",
+                "advisor_metadata fields do not match the V1 contract",
+            )
+        if value.get("schema_version") != _AUTOPILOT_ADVISOR_METADATA_SCHEMA_VERSION:
+            raise AutopilotRouteError(
+                "unsupported_schema_version",
+                "advisor_metadata schema_version is unsupported",
+            )
+        if value.get("skill_version") != _AUTOPILOT_SKILL_VERSION:
+            raise AutopilotRouteError(
+                "invalid_advisor_metadata",
+                "advisor_metadata skill_version is unsupported",
+            )
+        if value.get("prompt_version") != _AUTOPILOT_PROMPT_VERSION:
+            raise AutopilotRouteError(
+                "invalid_advisor_metadata",
+                "advisor_metadata prompt_version is unsupported",
+            )
+        model = value.get("declared_model")
+        if (
+            not isinstance(model, str)
+            or not model
+            or len(model) > 128
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", model) is None
+        ):
+            raise AutopilotRouteError(
+                "invalid_advisor_metadata",
+                "advisor_metadata declared_model is invalid",
+            )
+        if value.get("reasoning_effort") != "medium":
+            raise AutopilotRouteError(
+                "invalid_advisor_metadata",
+                "advisor_metadata reasoning_effort must be medium",
+            )
+        return dict(value)
+
+    @staticmethod
+    def _validate_autopilot_draft_wrapper(payload: dict) -> None:
+        PanelHandler._require_autopilot_keys(payload, allowed=_AUTOPILOT_DRAFT_FIELDS)
+        if payload.get("schema_version") != GOAL_SCHEMA_VERSION:
+            raise AutopilotRouteError(
+                "unsupported_schema_version",
+                f"draft schema_version must be {GOAL_SCHEMA_VERSION}",
+            )
+
+    @staticmethod
+    def _autopilot_method(service, *names: str):
+        for name in names:
+            method = getattr(service, name, None)
+            if callable(method):
+                return method
+        raise AutopilotRouteError(
+            "autopilot_service_contract_error",
+            f"Autopilot service does not implement {names[0]}",
+            503,
+        )
+
+    @staticmethod
+    def _autopilot_segments(path: str) -> list[str]:
+        prefix = "/api/autopilot"
+        suffix = path[len(prefix):]
+        if not suffix.startswith("/"):
+            raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+        raw_segments = suffix[1:].split("/")
+        if not raw_segments or any(not segment for segment in raw_segments):
+            raise AutopilotRouteError("not_found", "Autopilot endpoint not found", 404)
+        segments = [unquote(segment) for segment in raw_segments]
+        if any("/" in segment or "\\" in segment for segment in segments):
+            raise AutopilotRouteError("invalid_identifier", "Encoded path separators are forbidden")
+        return segments
+
+    @staticmethod
+    def _autopilot_identifier(value: str, name: str) -> str:
+        if not isinstance(value, str) or _AUTOPILOT_ID_RE.fullmatch(value) is None:
+            raise AutopilotRouteError("invalid_identifier", f"{name} is invalid")
+        return value
+
+    @staticmethod
+    def _autopilot_query(query: str, *, allowed: set[str]) -> dict[str, list[str]]:
+        parsed = parse_qs(query, keep_blank_values=True)
+        unknown = sorted(set(parsed) - allowed)
+        if unknown:
+            raise AutopilotRouteError(
+                "invalid_query",
+                f"unknown query parameter(s): {', '.join(unknown)}",
+            )
+        return parsed
+
+    @classmethod
+    def _reject_autopilot_query(cls, query: str) -> None:
+        cls._autopilot_query(query, allowed=set())
+
+    def _autopilot_payload(self) -> dict:
+        content_types = self._header_values("Content-Type")
+        if len(content_types) != 1 or content_types[0].split(";", 1)[0].strip().lower() != "application/json":
+            raise AutopilotRouteError(
+                "invalid_content_type",
+                "Content-Type must be application/json",
+                415,
+            )
+        lengths = self._header_values("Content-Length")
+        if len(lengths) != 1:
+            raise AutopilotRouteError(
+                "content_length_required",
+                "one Content-Length header is required",
+                411,
+            )
+        try:
+            length = int(lengths[0])
+        except (TypeError, ValueError) as exc:
+            raise AutopilotRouteError(
+                "invalid_content_length",
+                "Content-Length must be an integer",
+            ) from exc
+        if length < 0 or length > _AUTOPILOT_MAX_REQUEST_BYTES:
+            raise AutopilotRouteError(
+                "request_too_large" if length > _AUTOPILOT_MAX_REQUEST_BYTES else "invalid_content_length",
+                "Autopilot request body is too large" if length > _AUTOPILOT_MAX_REQUEST_BYTES else "Content-Length is invalid",
+                413 if length > _AUTOPILOT_MAX_REQUEST_BYTES else 400,
+            )
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise AutopilotRouteError("incomplete_request", "Request body is incomplete")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AutopilotRouteError("invalid_json", "Request body must be valid UTF-8 JSON") from exc
+        if not isinstance(payload, dict):
+            raise AutopilotRouteError("invalid_payload", "Request body must be a JSON object")
+        return payload
+
+    def _autopilot_mutation_metadata(self, payload: dict) -> tuple[str, int]:
+        keys = self._header_values("Idempotency-Key")
+        if len(keys) != 1 or _AUTOPILOT_IDEMPOTENCY_RE.fullmatch(keys[0]) is None:
+            raise AutopilotRouteError(
+                "invalid_idempotency_key",
+                "Idempotency-Key must be a safe 8..128 character identifier",
+            )
+        matches = self._header_values("If-Match")
+        match = _AUTOPILOT_IF_MATCH_RE.fullmatch(matches[0]) if len(matches) == 1 else None
+        if match is None:
+            raise AutopilotRouteError(
+                "invalid_if_match",
+                'If-Match must contain one quoted non-negative revision, for example "3"',
+            )
+        header_revision = int(match.group(1))
+        body_revision = payload.get("expected_revision")
+        if isinstance(body_revision, bool) or not isinstance(body_revision, int) or body_revision < 0:
+            raise AutopilotRouteError(
+                "invalid_expected_revision",
+                "expected_revision must be a non-negative integer",
+            )
+        secondary = self._header_values("X-Expected-Revision")
+        if len(secondary) > 1:
+            raise AutopilotRouteError(
+                "invalid_expected_revision_header",
+                "X-Expected-Revision may appear at most once",
+            )
+        if secondary:
+            try:
+                secondary_revision = int(secondary[0])
+            except ValueError as exc:
+                raise AutopilotRouteError(
+                    "invalid_expected_revision_header",
+                    "X-Expected-Revision must be a non-negative integer",
+                ) from exc
+            if secondary_revision < 0 or secondary_revision != header_revision:
+                raise AutopilotRouteError(
+                    "revision_header_mismatch",
+                    "revision headers disagree",
+                )
+        if body_revision != header_revision:
+            raise AutopilotRouteError(
+                "revision_header_mismatch",
+                "expected_revision does not match If-Match",
+            )
+        return keys[0], body_revision
+
+    def _header_values(self, name: str) -> list[str]:
+        getter = getattr(self.headers, "get_all", None)
+        if callable(getter):
+            return [str(value) for value in (getter(name) or [])]
+        value = self.headers.get(name)
+        return [] if value is None else [str(value)]
+
+    @staticmethod
+    def _autopilot_value(value):
+        serializer = getattr(value, "to_dict", None)
+        if callable(serializer):
+            return serializer()
+        if isinstance(value, tuple):
+            return [PanelHandler._autopilot_value(item) for item in value]
+        if isinstance(value, list):
+            return [PanelHandler._autopilot_value(item) for item in value]
+        return value
+
+    @staticmethod
+    def _autopilot_artifact_parts(value) -> tuple[object, bytes]:
+        if (
+            not isinstance(value, tuple)
+            or len(value) != 2
+            or not isinstance(value[1], bytes)
+        ):
+            raise AutopilotRouteError(
+                "autopilot_service_contract_error",
+                "Autopilot artifact service returned an invalid record",
+                503,
+            )
+        return value[0], value[1]
+
+    @classmethod
+    def _wrap_autopilot(cls, key: str, value) -> dict:
+        normalized = cls._autopilot_value(value)
+        if isinstance(normalized, dict) and key in normalized:
+            return normalized
+        return {key: normalized}
+
+    def _send_autopilot_patch_export(self, campaign_id: str, export) -> None:
+        metadata, body = self._autopilot_artifact_parts(export)
+        normalized = self._autopilot_value(metadata)
+        media_type = (
+            str(normalized.get("media_type") or "application/json")
+            if isinstance(normalized, dict)
+            else "application/json"
+        )
+        filename = f"{campaign_id}-patch-handoff.json"
+        self.send_response(200)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_autopilot_artifact(self, metadata, body: bytes) -> None:
+        normalized = self._autopilot_value(metadata)
+        if not isinstance(normalized, dict):
+            raise AutopilotRouteError(
+                "autopilot_service_contract_error",
+                "Autopilot artifact metadata is invalid",
+                503,
+            )
+        media_type = str(normalized.get("media_type") or "application/octet-stream")
+        artifact_id = self._autopilot_identifier(
+            str(normalized.get("id") or "artifact"),
+            "artifact_id",
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Disposition", f'attachment; filename="{artifact_id}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_autopilot_exception(self, exc: Exception) -> None:
+        if isinstance(exc, AutopilotRouteError):
+            return self._autopilot_error(exc.code, str(exc), exc.status, exc.details)
+        if isinstance(exc, AutopilotValidationError):
+            return self._autopilot_error("validation_error", str(exc), 400)
+        if isinstance(exc, CampaignNotFoundError):
+            return self._autopilot_error(exc.code, str(exc), 404)
+        if isinstance(exc, AutopilotConflictError):
+            details = None
+            if exc.current_revision is not None:
+                details = {"current_revision": exc.current_revision}
+            return self._autopilot_error(exc.code, str(exc), 409, details)
+        if isinstance(exc, AutopilotBudgetError):
+            return self._autopilot_error(exc.code, str(exc), 409)
+        if isinstance(exc, AutopilotStoreError):
+            traceback.print_exc()
+            return self._autopilot_error(
+                exc.code,
+                "Autopilot storage request failed safely",
+                500,
+            )
+        if isinstance(exc, KeyError):
+            return self._autopilot_error("not_found", "Autopilot record not found", 404)
+        if isinstance(exc, ValueError):
+            return self._autopilot_error("validation_error", str(exc), 400)
+        status = getattr(exc, "status", None)
+        code = getattr(exc, "code", None)
+        if isinstance(status, int) and 400 <= status <= 599 and isinstance(code, str):
+            return self._autopilot_error(
+                code,
+                str(exc) or "Autopilot request failed",
+                status,
+                getattr(exc, "details", None),
+            )
+        traceback.print_exc()
+        return self._autopilot_error(
+            "internal_error",
+            "Autopilot request failed safely",
+            500,
+        )
+
+    def _autopilot_error(
+        self,
+        code: str,
+        message: str,
+        status: int,
+        details: object | None = None,
+    ) -> None:
+        payload = {
+            "schema_version": _AUTOPILOT_ERROR_SCHEMA_VERSION,
+            "error": message,
+            "code": code,
+            "message": message,
+        }
+        if details is not None:
+            payload["details"] = details
+        self._json(payload, status=status)
 
     def _handle_request(self, handler) -> None:
         try:
@@ -1251,7 +2076,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not path.is_file() or STATIC_DIR not in path.parents:
             return self._not_found()
         body = path.read_bytes()
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        content_type = _STATIC_CONTENT_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -1262,7 +2087,6 @@ class PanelHandler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, status=404)
 
     def _runs_payload(self) -> dict:
-        self.state.processes.reconcile_stale_history()
         runs = self.state.history.list_runs()
         for run in runs:
             run["effective_spring_backend"] = resolve_spring_backend(run)
@@ -1282,6 +2106,16 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080, help="Bind port.")
     args = parser.parse_args()
 
+    autopilot_enabled = os.environ.get("REDRHEX_AUTOPILOT_ENABLED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+    autopilot_token = os.environ.get("REDRHEX_AUTOPILOT_BEARER_TOKEN", "").strip()
+    if autopilot_enabled and args.host not in loopback_hosts and len(autopilot_token) < 16:
+        parser.error(
+            "non-loopback Autopilot requires REDRHEX_AUTOPILOT_BEARER_TOKEN with at least 16 characters"
+        )
+
     paths = PanelPaths.from_env()
     paths.ensure_dirs()
     PanelHandler.state = PanelState(paths)
@@ -1293,4 +2127,6 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopping RedRHex training panel.")
     finally:
+        if PanelHandler.state.autopilot is not None:
+            PanelHandler.state.autopilot.close()
         server.server_close()

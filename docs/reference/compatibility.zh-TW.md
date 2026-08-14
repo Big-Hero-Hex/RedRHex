@@ -17,7 +17,7 @@ last_reviewed: 2026-08-14
 <a id="panel"></a>
 ## Training Panel
 
-獨立版本化的 Training Panel 目前為 `3.7.0-remote-parity`。Mother package/UI、remote worker、Child web asset/cache key、heartbeat、capability row、sync summary 與 schema label 必須保持一致。3.7 migration 為 additive，既有 3.4.10 row 仍可讀取；但它不會讓舊 worker 具備 mutation compatibility。Worker 或 schema 任一較舊時，Child 會刻意保留 sign-in 與 inspection，同時停用 mutation 並顯示 migration/restart 指引。
+獨立版本化的 Mother package 目前為 `3.8.0-autopilot-preview`。其 Autopilot campaign feature 為 local、simulation-only 且預設關閉。Remote worker、Child web asset/cache key、heartbeat compatibility signal、capability row、sync summary 與 schema label 仍對齊獨立 protocol `3.7.0-remote-parity`；3.8 不新增 remote campaign control。3.7 migration 為 additive，既有 3.4.10 row 仍可讀取；但它不會讓舊 worker 具備 mutation compatibility。Worker 或 schema 任一較舊時，Child 會刻意保留 sign-in 與 inspection，同時停用 mutation 並顯示 migration/restart 指引。
 
 不可推測不存在的 3.4.4 至 3.4.9 release；合併的 3.4.10 release record 只描述該段有證據的變更範圍。3.6.4 Drive exporter 維持 prerequisite baseline，credential 與 sharing policy 都留在 Mother。
 

@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="approved-designs"></a>
 ## 已核准設計
 
+- [AI 引導的 Autopilot Campaign](active/2026-08-14-ai-guided-autopilot-campaigns.zh-TW.md)
 - [Child Panel 3.7 遠端同等升級](active/2026-08-14-child-panel-remote-parity.zh-TW.md)
 - [純感測器學生蒸餾 V2](active/2026-08-13-student-distillation-v2.zh-TW.md)
 - [macOS 遠端啟動器](active/2026-08-13-macos-remote-launcher.zh-TW.md)

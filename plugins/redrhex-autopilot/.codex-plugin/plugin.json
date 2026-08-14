@@ -1,0 +1,35 @@
+{
+  "name": "redrhex-autopilot",
+  "version": "0.1.0",
+  "description": "Safely inspect and advance bounded RedRHex training campaigns through a loopback Training Panel.",
+  "author": {
+    "name": "RedRHex Contributors",
+    "url": "https://github.com/Big-Hero-Hex/RedRHex"
+  },
+  "homepage": "https://github.com/Big-Hero-Hex/RedRHex",
+  "repository": "https://github.com/Big-Hero-Hex/RedRHex",
+  "keywords": [
+    "reinforcement-learning",
+    "training",
+    "robotics",
+    "autopilot"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "RedRHex Autopilot",
+    "shortDescription": "Guide bounded robot training campaigns",
+    "longDescription": "Inspect RedRHex campaign evidence and submit narrowly validated reward proposals while the local Training Panel retains authority over safety, budgets, execution, evaluation, and success.",
+    "developerName": "RedRHex Contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/Big-Hero-Hex/RedRHex",
+    "defaultPrompt": [
+      "Inspect my armed RedRHex campaign and safely advance it by one decision."
+    ],
+    "brandColor": "#C53B2D"
+  },
+  "mcpServers": "./.mcp.json"
+}

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.7.0-remote-parity" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.8.0-drive-folder-links" />
   </head>
   <body>
     <aside class="sidebar">
@@ -17,6 +17,7 @@
       </div>
       <nav>
         <button class="nav-button active" data-view="train">Train</button>
+        <button id="autopilot-nav" class="nav-button" data-view="autopilot" hidden>Autopilot</button>
         <button class="nav-button" data-view="rewards">Rewards</button>
         <button class="nav-button" data-view="terrain">Terrain</button>
         <button class="nav-button" data-view="physics">Physics</button>
@@ -24,10 +25,10 @@
         <button class="nav-button" data-view="deploy">Deploy</button>
         <button class="nav-button" data-view="convergence">Convergence</button>
         <button class="nav-button" data-view="activity">Activity</button>
-        <button class="nav-button" data-view="access">Control Center</button>
+        <button class="nav-button" data-view="access">Settings</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.7.0 Remote Parity</span>
+        <span class="release-version">Version 3.8.0 Autopilot Preview</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -40,7 +41,7 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.7.0 Remote Parity</span>
+          <span class="release-chip">Training Panel V3.8.0 Autopilot Preview</span>
           <span id="freshness" class="freshness" data-state="stale"
             data-tooltip="How recently the panel last heard from the training PC">
             <span class="freshness-dot" aria-hidden="true"></span>
@@ -151,6 +152,192 @@
         </form>
         <div id="gpu-lock-status" class="status-line gpu-lock-status" hidden></div>
         <div id="train-status" class="status-line"></div>
+      </section>
+
+      <section id="autopilot" class="view">
+        <article id="autopilot-unavailable" class="empty-panel" hidden>
+          <h2>Autopilot is unavailable</h2>
+          <p class="muted-copy">Enable the local Autopilot capability, then refresh the panel. Existing training controls are unaffected.</p>
+        </article>
+
+        <div id="autopilot-workspace" class="autopilot-workspace" hidden>
+          <div class="autopilot-status-strip" aria-live="polite">
+            <div>
+              <span>Campaign service</span>
+              <strong id="autopilot-service-state">Checking</strong>
+            </div>
+            <div>
+              <span>ChatGPT connector</span>
+              <strong id="autopilot-connector-state">No heartbeat</strong>
+            </div>
+            <div>
+              <span>Host limit</span>
+              <strong id="autopilot-host-limit">One armed campaign</strong>
+            </div>
+            <button type="button" id="autopilot-refresh" class="ghost-button small-button">Refresh</button>
+          </div>
+
+          <div class="autopilot-layout">
+            <div class="autopilot-main-stack">
+              <article class="control-card autopilot-goal-card">
+                <div class="card-head">
+                  <div>
+                    <h2>New Goal Draft</h2>
+                    <p class="muted-copy">Describe the behavior, review its exact command envelope, then create a draft. Creating a draft does not start GPU work.</p>
+                  </div>
+                  <span class="status-badge muted-pill">Human arms</span>
+                </div>
+
+                <form id="autopilot-goal-form" class="autopilot-goal-form">
+                  <label class="autopilot-wide-field">
+                    Goal
+                    <textarea id="autopilot-goal-description" name="description" rows="3" maxlength="1000" required placeholder="Example: Run diagonally while staying stable and keeping energy below the existing safety cap."></textarea>
+                  </label>
+                  <label>
+                    Task
+                    <select id="autopilot-task" name="task">
+                      <option value="Template-Redrhex-ForwardFast-Direct-v0">ForwardFast</option>
+                      <option value="Template-Redrhex-Direct-v0">Direct curriculum</option>
+                    </select>
+                  </label>
+                  <label>
+                    Stage / Evaluation Profile
+                    <select id="autopilot-stage" name="stage">
+                      <option value="1">Stage 1 · forward</option>
+                      <option value="2">Stage 2 · lateral</option>
+                      <option value="3">Stage 3 · diagonal</option>
+                      <option value="4">Stage 4 · yaw</option>
+                      <option value="5">Stage 5 · mixed</option>
+                    </select>
+                  </label>
+                  <label>
+                    Gait
+                    <select id="autopilot-gait" name="gait">
+                      <option value="walk">Walk · lower half</option>
+                      <option value="run">Run · upper half</option>
+                    </select>
+                  </label>
+
+                  <fieldset id="autopilot-command-fields" class="autopilot-command-fields">
+                    <legend>Exact Numeric Command Envelope</legend>
+                    <div id="autopilot-command-intervals" class="autopilot-command-intervals"></div>
+                  </fieldset>
+                  <div id="autopilot-command-preview" class="training-route-summary autopilot-command-preview" role="status" aria-live="polite">
+                    <strong>Command preview</strong>
+                    <span>Waiting for the server command profile.</span>
+                  </div>
+                  <fieldset class="autopilot-skill-gates autopilot-wide-field">
+                    <legend>Deterministic Skill Gates</legend>
+                    <p class="muted-copy">These are the server safety defaults. A campaign may tighten them, never relax them.</p>
+                    <div id="autopilot-skill-gate-list" class="autopilot-skill-gate-list"></div>
+                  </fieldset>
+
+                  <label>
+                    Baseline
+                    <select id="autopilot-baseline" name="baseline_run_id">
+                      <option value="">Fresh initialization</option>
+                    </select>
+                    <small>Only runs with an exact checkpoint are selectable.</small>
+                  </label>
+                  <label>
+                    Iterations per trial
+                    <input id="autopilot-iterations" name="max_iterations" type="number" min="1" required placeholder="Review before arming" />
+                  </label>
+                  <label>
+                    Training trial budget
+                    <input id="autopilot-trial-budget" name="max_training_trials" type="number" min="5" max="24" value="24" required />
+                  </label>
+                  <label>
+                    Active GPU-hour budget
+                    <input id="autopilot-hour-budget" name="max_gpu_hours" type="number" min="1" max="72" step="0.5" value="72" required />
+                  </label>
+                  <fieldset class="autopilot-tunables autopilot-wide-field">
+                    <legend>Allowed Reward Tunables</legend>
+                    <p class="muted-copy">Only checked, server-allowlisted shaping weights may be proposed. You may narrow the displayed hard bounds; signs remain fixed.</p>
+                    <div id="autopilot-tunable-list" class="autopilot-tunable-list"></div>
+                  </fieldset>
+                  <div class="form-actions compact-actions autopilot-wide-field">
+                    <button id="autopilot-create" type="submit" class="primary-button">Create Draft</button>
+                    <span id="autopilot-form-status" class="muted-copy" role="status" aria-live="polite"></span>
+                  </div>
+                </form>
+              </article>
+
+              <article id="autopilot-campaign-detail" class="control-card" hidden>
+                <div class="card-head">
+                  <div>
+                    <h2 id="autopilot-campaign-title">Campaign</h2>
+                    <p id="autopilot-campaign-subtitle" class="muted-copy"></p>
+                  </div>
+                  <span id="autopilot-campaign-badge" class="status-badge muted-pill">Draft</span>
+                </div>
+                <div id="autopilot-campaign-actions" class="form-actions compact-actions">
+                  <button type="button" data-autopilot-action="arm" class="primary-button">Arm Campaign</button>
+                  <button type="button" data-autopilot-action="pause" class="ghost-button">Pause After Current</button>
+                  <button type="button" data-autopilot-action="resume" class="ghost-button">Resume</button>
+                  <button type="button" data-autopilot-action="stop-after-current" class="ghost-button">Stop After Current</button>
+                  <button type="button" data-autopilot-action="stop" class="danger-button">Emergency Stop Campaign Work</button>
+                  <button type="button" id="autopilot-patch-export" class="ghost-button">Export Patch Handoff</button>
+                </div>
+                <div id="autopilot-campaign-summary" class="autopilot-summary-grid"></div>
+
+                <section class="autopilot-detail-section">
+                  <div class="section-header compact-section-header">
+                    <h3>Decision Context</h3>
+                    <span id="autopilot-next-action" class="status-badge muted-pill">Waiting</span>
+                  </div>
+                  <div id="autopilot-decision-context" class="autopilot-decision-context"></div>
+                </section>
+
+                <section class="autopilot-detail-section">
+                  <div class="section-header compact-section-header"><h3>Candidates</h3></div>
+                  <div class="autopilot-table-wrap">
+                    <table class="autopilot-table">
+                      <thead><tr><th>Candidate</th><th>Reward change</th><th>State</th><th>Seed</th><th>Rank</th></tr></thead>
+                      <tbody id="autopilot-candidate-rows"></tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section class="autopilot-detail-section">
+                  <div class="section-header compact-section-header"><h3>Deterministic Evaluations</h3></div>
+                  <div class="autopilot-table-wrap">
+                    <table class="autopilot-table">
+                      <thead><tr><th>Trial</th><th>Seed</th><th>Hard gates</th><th>Tracking</th><th>Energy</th><th>Evidence</th></tr></thead>
+                      <tbody id="autopilot-evaluation-rows"></tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <div class="autopilot-evidence-grid">
+                  <section class="autopilot-detail-section">
+                    <div class="section-header compact-section-header"><h3>Campaign Events</h3></div>
+                    <div id="autopilot-event-list" class="autopilot-event-list"></div>
+                  </section>
+                  <section class="autopilot-detail-section">
+                    <div class="section-header compact-section-header"><h3>Artifacts</h3></div>
+                    <div id="autopilot-artifact-list" class="autopilot-artifact-list"></div>
+                  </section>
+                </div>
+              </article>
+              <article id="autopilot-no-selection" class="empty-panel">
+                <h2>Select a campaign</h2>
+                <p class="muted-copy">Choose a draft or active campaign to inspect its exact budget, evidence, and next permitted action.</p>
+              </article>
+            </div>
+
+            <aside class="control-card autopilot-campaign-sidebar">
+              <div class="card-head simple-card-head">
+                <div>
+                  <h2>Campaigns</h2>
+                  <p class="muted-copy">Only one campaign can be armed on this host.</p>
+                </div>
+                <span id="autopilot-campaign-count" class="status-badge muted-pill">0</span>
+              </div>
+              <div id="autopilot-campaign-list" class="autopilot-campaign-list"></div>
+            </aside>
+          </div>
+        </div>
       </section>
 
       <section id="rewards" class="view">
@@ -321,6 +508,33 @@
           <div class="safety-note physics-note">
             These values affect simulation and policy behavior, not hardware safety authorization. The exact
             CalibrationProfileV1 is snapshotted with each run and reused for play, video, and export.
+          </div>
+          <div id="physics-viewport-anchor" aria-hidden="true"></div>
+          <div class="physics-viewport" id="physics-viewport" hidden>
+            <div class="physics-viewport-head">
+              <div>
+                <h3>Robot preview</h3>
+                <p class="muted-copy">
+                  Shows the values in this preset, not live robot state. Click a leg to filter the fields below.
+                </p>
+              </div>
+              <div class="physics-viewport-actions">
+                <span id="physics-viewport-mode" class="status-badge muted-pill">3D</span>
+                <button type="button" id="physics-viewport-reset" class="ghost-button small-button">Reset view</button>
+                <button type="button" id="physics-viewport-toggle" class="ghost-button small-button">Hide</button>
+              </div>
+            </div>
+            <div id="physics-viewport-warning" class="safety-note physics-label-warning" hidden></div>
+            <div class="physics-viewport-stage" id="physics-viewport-stage">
+              <div id="physics-viewport-canvas" class="physics-viewport-canvas"></div>
+              <ul id="physics-viewport-legend" class="physics-viewport-legend">
+                <li><span class="joint-key joint-key-main"></span>Main drive &mdash; velocity-controlled motor</li>
+                <li><span class="joint-key joint-key-abad"></span>ABAD &mdash; position-controlled hinge</li>
+                <li><span class="joint-key joint-key-damper"></span>Torsion spring &mdash; passive</li>
+              </ul>
+              <div id="physics-viewport-hint" class="physics-viewport-hint">Drag to orbit &middot; scroll to zoom &middot; shift-drag to pan</div>
+            </div>
+            <div id="physics-viewport-readout" class="physics-viewport-readout"></div>
           </div>
           <div id="physics-categories" class="reward-categories physics-categories"></div>
         </div>
@@ -805,133 +1019,262 @@
       </section>
 
       <section id="access" class="view">
-        <div class="control-center-head">
+        <div class="settings-page-head">
           <div>
-            <h2>Remote Control Center</h2>
-            <p class="muted-copy">Run the training PC as the mother station and control what RedRHex To Go can do from outside the lab.</p>
+            <span class="settings-eyebrow">Machine administration</span>
+            <h2>Settings</h2>
+            <p class="muted-copy">Manage remote operations, private exports, external access, and host diagnostics from one place.</p>
           </div>
-          <span id="remote-config-badge" class="status-badge muted-pill">Checking</span>
+          <div class="settings-page-actions">
+            <span id="remote-config-badge" class="status-badge muted-pill">Checking</span>
+            <button type="button" id="settings-refresh" class="ghost-button small-button">Refresh status</button>
+          </div>
         </div>
 
         <div id="remote-status-strip" class="remote-status-strip"></div>
 
-        <div class="control-center-layout">
-          <div class="control-main-stack">
-            <article class="control-card worker-card">
-              <div class="card-head">
+        <div class="settings-workspace">
+          <nav class="settings-section-nav" aria-label="Settings sections" role="tablist" aria-orientation="vertical">
+            <button type="button" id="settings-tab-remote" class="settings-section-button active"
+              data-settings-section="remote" role="tab" aria-selected="true" aria-controls="settings-panel-remote">
+              <strong>Remote operations</strong>
+              <span>Worker and job acceptance</span>
+            </button>
+            <button type="button" id="settings-tab-drive" class="settings-section-button"
+              data-settings-section="drive" role="tab" aria-selected="false" aria-controls="settings-panel-drive">
+              <strong>Google Drive</strong>
+              <span>Account and export location</span>
+            </button>
+            <button type="button" id="settings-tab-connections" class="settings-section-button"
+              data-settings-section="connections" role="tab" aria-selected="false" aria-controls="settings-panel-connections">
+              <strong>Connections</strong>
+              <span>To Go, tunnel, notifications</span>
+            </button>
+            <button type="button" id="settings-tab-advanced" class="settings-section-button"
+              data-settings-section="advanced" role="tab" aria-selected="false" aria-controls="settings-panel-advanced">
+              <strong>Advanced</strong>
+              <span>Runtime and diagnostics</span>
+            </button>
+          </nav>
+
+          <div class="settings-content">
+            <section id="settings-panel-remote" class="settings-panel" data-settings-panel="remote" role="tabpanel" aria-labelledby="settings-tab-remote">
+              <div class="settings-section-head">
                 <div>
-                  <h2>Remote Connection</h2>
-                  <p id="remote-worker-summary" class="muted-copy">Checking connection state...</p>
+                  <span class="settings-eyebrow">Mother station</span>
+                  <h2>Remote operations</h2>
+                  <p class="muted-copy">Control when this training PC accepts work from RedRHex To Go.</p>
                 </div>
-                <span id="remote-worker-badge" class="status-badge muted-pill">Unknown</span>
+              </div>
+              <div class="settings-card-grid settings-card-grid-primary">
+                <article class="control-card worker-card settings-feature-card">
+                  <div class="card-head">
+                    <div>
+                      <h2>Remote worker</h2>
+                      <p id="remote-worker-summary" class="muted-copy">Checking connection state...</p>
+                    </div>
+                    <span id="remote-worker-badge" class="status-badge muted-pill">Unknown</span>
+                  </div>
+                  <div class="form-actions compact-actions">
+                    <button type="button" id="remote-worker-start" class="primary-button small-button"
+                      data-tooltip="Start the remote connection so teammates can control this machine from RedRHex Go.">Connect</button>
+                    <button type="button" id="remote-worker-stop" class="danger-button small-button"
+                      data-tooltip="Disconnect. Any job already running will finish before stopping.">Disconnect</button>
+                    <button type="button" id="remote-worker-restart" class="ghost-button small-button"
+                      data-tooltip="Disconnect and immediately reconnect. Use this after changing environment variables.">Restart</button>
+                  </div>
+                  <div class="settings-toggle-surface">
+                    <label class="toggle-row"
+                      data-tooltip="When on, teammates can start training, record videos, and export models from RedRHex Go.">
+                      <input type="checkbox" id="remote-accept-toggle" />
+                      <span>Allow remote training &amp; control</span>
+                    </label>
+                    <p class="muted-copy">Pause this without disconnecting when the machine needs local-only control.</p>
+                  </div>
+                </article>
+
+                <article class="control-card">
+                  <div class="card-head simple-card-head">
+                    <div>
+                      <h2>Setup readiness</h2>
+                      <p class="muted-copy">Every check must pass before the worker can connect safely.</p>
+                    </div>
+                  </div>
+                  <div id="remote-setup-list" class="setup-list"></div>
+                  <div class="copy-row">
+                    <code id="remote-env-path"></code>
+                    <button type="button" id="copy-env-path" class="ghost-button small-button"
+                      data-tooltip="Copy the path to the .env file where you set REDRHEX_* environment variables.">Copy path</button>
+                  </div>
+                </article>
+              </div>
+            </section>
+
+            <section id="settings-panel-drive" class="settings-panel" data-settings-panel="drive" role="tabpanel" aria-labelledby="settings-tab-drive" hidden>
+              <div class="settings-section-head">
+                <div>
+                  <span class="settings-eyebrow">Private integration</span>
+                  <h2>Google Drive exports</h2>
+                  <p class="muted-copy">Choose the training-PC account and the folder used by one-touch History exports.</p>
+                </div>
+                <span id="drive-settings-badge" class="status-badge muted-pill">Checking</span>
+              </div>
+              <div class="settings-card-grid settings-card-grid-primary">
+                <article class="control-card settings-feature-card">
+                  <div class="card-head">
+                    <div>
+                      <span class="settings-card-kicker">Where videos go</span>
+                      <h2>Choose a Drive folder</h2>
+                      <p id="drive-settings-summary" class="muted-copy">Checking the local rclone connection...</p>
+                    </div>
+                  </div>
+
+                  <label class="settings-field" for="drive-destination-folder">
+                    <span>Google Drive folder</span>
+                    <input id="drive-destination-folder" maxlength="2048" value="RedRHex Videos"
+                      placeholder="Paste a Google Drive folder link" />
+                    <small>Paste a folder URL the connected account can access. You can also type a My Drive path such as <strong>RedRHex Videos</strong>.</small>
+                  </label>
+                  <div class="drive-path-preview" aria-live="polite">
+                    <span>Selected destination</span>
+                    <strong id="drive-destination-preview">My Drive › RedRHex Videos</strong>
+                    <small>History will create one subfolder per training run.</small>
+                  </div>
+                  <div class="form-actions compact-actions">
+                    <button type="button" id="drive-save-location" class="primary-button small-button">Use this folder</button>
+                    <a id="drive-open-folder" class="ghost-button small-button" href="#" target="_blank" rel="noopener noreferrer" hidden>Open folder</a>
+                  </div>
+                  <p class="drive-privacy-note"><span aria-hidden="true">✓</span> Uploads stay private unless you change sharing in Google Drive.</p>
+                </article>
+
+                <article class="control-card drive-account-card">
+                  <div class="card-head">
+                    <div>
+                      <span class="settings-card-kicker">Who owns new uploads</span>
+                      <h2>Google account</h2>
+                    </div>
+                  </div>
+                  <div class="drive-account-summary">
+                    <span class="drive-account-mark" aria-hidden="true">G</span>
+                    <div>
+                      <strong id="drive-account-title">Checking connection…</strong>
+                      <span>Connected on this training PC</span>
+                    </div>
+                  </div>
+                  <div id="drive-reconnect-state" class="settings-callout" role="status" aria-live="polite">
+                    Checking which connection History exports will use.
+                  </div>
+                  <div class="form-actions compact-actions">
+                    <button type="button" id="drive-reconnect-account" class="primary-button small-button">Change Google account</button>
+                    <button type="button" id="drive-check-connection" class="ghost-button small-button">Check connection</button>
+                  </div>
+                  <p class="muted-copy drive-account-caveat">Changing accounts affects new exports only. Existing files stay in the previous account.</p>
+                  <details class="settings-technical-details">
+                    <summary>Connection troubleshooting</summary>
+                    <p>Authorization opens on the training PC. If it does not appear, run this command there.</p>
+                    <div class="copy-row">
+                      <code id="drive-reconnect-command">rclone config reconnect redrhex-drive:</code>
+                      <button type="button" id="copy-drive-reconnect" class="ghost-button small-button">Copy command</button>
+                    </div>
+                    <p class="settings-technical-label">Local connection: <code id="drive-settings-remote">redrhex-drive:</code></p>
+                  </details>
+                </article>
+              </div>
+            </section>
+
+            <section id="settings-panel-connections" class="settings-panel" data-settings-panel="connections" role="tabpanel" aria-labelledby="settings-tab-connections" hidden>
+              <div class="settings-section-head">
+                <div>
+                  <span class="settings-eyebrow">Team connectivity</span>
+                  <h2>Connections</h2>
+                  <p class="muted-copy">Find the team interface, tunnel command, and integration state without opening diagnostics.</p>
+                </div>
+              </div>
+              <div class="settings-card-grid">
+                <article class="control-card">
+                  <h2>RedRHex To Go</h2>
+                  <p class="muted-copy">Use the team UI on trusted networks. Use the configured Cloudflare tunnel outside the lab.</p>
+                  <div id="remote-access-grid" class="run-info-grid compact-info-grid"></div>
+                  <div class="copy-row">
+                    <code id="remote-phone-url"></code>
+                    <button type="button" id="copy-phone-url" class="ghost-button small-button"
+                      data-tooltip="Copy the RedRHex To Go URL.">Copy URL</button>
+                  </div>
+                  <div class="drive-path-preview"
+                    data-tooltip="Run this command on the training PC to expose the panel over the internet via Cloudflare Tunnel.">
+                    <span>Cloudflare tunnel command</span>
+                    <code id="remote-tunnel-command">cloudflared tunnel --url http://127.0.0.1:8080</code>
+                  </div>
+                </article>
+
+                <article class="control-card">
+                  <h2>Integration health</h2>
+                  <p class="muted-copy">A concise view of notifications and machine state used by remote workflows.</p>
+                  <div id="remote-integrations-grid" class="run-info-grid compact-info-grid"></div>
+                </article>
+              </div>
+            </section>
+
+            <section id="settings-panel-advanced" class="settings-panel" data-settings-panel="advanced" role="tabpanel" aria-labelledby="settings-tab-advanced" hidden>
+              <div class="settings-section-head">
+                <div>
+                  <span class="settings-eyebrow">Host administration</span>
+                  <h2>Advanced</h2>
+                  <p class="muted-copy">Change worker lifecycle behavior and inspect technical state when troubleshooting.</p>
+                </div>
+              </div>
+              <div class="settings-card-grid settings-card-grid-primary">
+                <article class="control-card" id="worker-advanced">
+                  <h2>Worker behavior</h2>
+                  <div class="worker-settings-grid">
+                    <section class="setting-panel">
+                      <h3>Launch mode</h3>
+                      <div class="segmented-control" aria-label="Remote worker launch mode">
+                        <button type="button" id="remote-mode-tmux" class="segment-button active" data-mode="tmux"
+                          data-tooltip="Recommended. Keeps running in the background even if you close the browser tab.">Keep running in background</button>
+                        <button type="button" id="remote-mode-child" class="segment-button" data-mode="child"
+                          data-tooltip="Stops automatically when you close this panel. Good for quick testing.">Stop when panel closes</button>
+                      </div>
+                      <p id="remote-mode-note" class="muted-copy"></p>
+                    </section>
+                    <section class="setting-panel">
+                      <h3>Startup</h3>
+                      <label class="toggle-row">
+                        <input type="checkbox" id="remote-autostart" />
+                        <span>Auto-connect when panel opens</span>
+                      </label>
+                      <p class="muted-copy">Enable only after the remote setup checklist passes.</p>
+                    </section>
+                  </div>
+                </article>
+
+                <article class="control-card">
+                  <h2>Runtime details</h2>
+                  <div id="remote-worker-grid" class="run-info-grid compact-info-grid"></div>
+                  <div id="remote-worker-attach-wrap" class="copy-row" hidden>
+                    <code id="remote-worker-attach"></code>
+                    <button type="button" id="copy-worker-attach" class="ghost-button small-button"
+                      data-tooltip="Copy a tmux command you can paste in a terminal to watch the connection output live.">Copy attach</button>
+                  </div>
+                </article>
               </div>
 
-              <!-- 3 lifecycle buttons -->
-              <div class="form-actions compact-actions">
-                <button type="button" id="remote-worker-start" class="primary-button small-button"
-                  data-tooltip="Start the remote connection so teammates can control this machine from RedRHex Go.">Connect</button>
-                <button type="button" id="remote-worker-stop" class="danger-button small-button"
-                  data-tooltip="Disconnect. Any job already running will finish before stopping.">Disconnect</button>
-                <button type="button" id="remote-worker-restart" class="ghost-button small-button"
-                  data-tooltip="Disconnect and immediately reconnect. Use this after changing environment variables.">Restart</button>
-              </div>
-
-              <!-- Accept / pause as a single toggle (simpler than two buttons) -->
-              <label class="toggle-row"
-                data-tooltip="When on, teammates can start training, record videos, and export models from RedRHex Go.">
-                <input type="checkbox" id="remote-accept-toggle" />
-                <span>Allow remote training &amp; control</span>
-              </label>
-
-              <div id="remote-worker-grid" class="run-info-grid compact-info-grid"></div>
-              <div id="remote-worker-attach-wrap" class="copy-row" hidden>
-                <code id="remote-worker-attach"></code>
-                <button type="button" id="copy-worker-attach" class="ghost-button small-button"
-                  data-tooltip="Copy a tmux command you can paste in a terminal to watch the connection output live.">Copy Attach</button>
-              </div>
-
-              <!-- Connection output — collapsed so it's out of the way -->
-              <details class="worker-output-panel">
-                <summary>Connection Output</summary>
+              <details class="worker-output-panel settings-diagnostics">
+                <summary>Connection output</summary>
                 <div class="section-header compact-section-header">
-                  <h3>Recent Log Tail</h3>
+                  <h3>Recent log tail</h3>
                   <button type="button" id="copy-worker-output" class="ghost-button small-button"
-                    data-tooltip="Copy the recent log text to clipboard.">Copy Output</button>
+                    data-tooltip="Copy the recent log text to clipboard.">Copy output</button>
                 </div>
                 <pre id="remote-worker-output"></pre>
               </details>
-
-              <!-- Launch mode + auto-start hidden behind Advanced — most users never need to touch this -->
-              <details class="advanced-panel" id="worker-advanced">
-                <summary>⚙ Connection Settings</summary>
-                <div class="worker-settings-grid" style="margin-top:10px">
-                  <section class="setting-panel">
-                    <h3>Launch Mode</h3>
-                    <div class="segmented-control" aria-label="Remote worker launch mode">
-                      <button type="button" id="remote-mode-tmux" class="segment-button active" data-mode="tmux"
-                        data-tooltip="Recommended. Keeps running in the background even if you close the browser tab.">Keep running in background</button>
-                      <button type="button" id="remote-mode-child" class="segment-button" data-mode="child"
-                        data-tooltip="Stops automatically when you close this panel. Good for quick testing.">Stop when panel closes</button>
-                    </div>
-                    <p id="remote-mode-note" class="muted-copy"></p>
-                  </section>
-
-                  <section class="setting-panel">
-                    <h3>Startup</h3>
-                    <label class="toggle-row">
-                      <input type="checkbox" id="remote-autostart" />
-                      <span>Auto-connect when panel opens</span>
-                    </label>
-                    <p class="muted-copy">Enable after completing the Setup Checklist.</p>
-                  </section>
-                </div>
+              <details class="worker-output-panel settings-diagnostics">
+                <summary>Raw system status</summary>
+                <pre id="system-info"></pre>
+                <pre id="remote-status-raw"></pre>
               </details>
-            </article>
-
-            <details class="advanced-panel">
-              <summary>Advanced Status</summary>
-              <pre id="system-info"></pre>
-              <pre id="remote-status-raw"></pre>
-            </details>
+            </section>
           </div>
-
-          <aside class="control-side-stack">
-            <article class="control-card">
-              <div class="card-head simple-card-head">
-                <div>
-                  <h2>Setup Checklist</h2>
-                  <p class="muted-copy">Remote access works when every item is complete.</p>
-                </div>
-              </div>
-              <div id="remote-setup-list" class="setup-list"></div>
-              <div class="copy-row">
-                <code id="remote-env-path"></code>
-                <button type="button" id="copy-env-path" class="ghost-button small-button"
-                  data-tooltip="Copy the path to the .env file where you set REDRHEX_* environment variables.">Copy Path</button>
-              </div>
-            </article>
-
-            <article class="control-card">
-              <h2>Remote Access</h2>
-              <p class="muted-copy">Use RedRHex To Go for the team UI. Use Cloudflare when outside the lab network.</p>
-              <div id="remote-access-grid" class="run-info-grid compact-info-grid"></div>
-              <div class="copy-row">
-                <code id="remote-phone-url"></code>
-                <button type="button" id="copy-phone-url" class="ghost-button small-button"
-                  data-tooltip="Copy the RedRHex To Go URL.">Copy URL</button>
-              </div>
-              <div class="copy-row"
-                data-tooltip="Run this command on the training PC to expose the panel over the internet via Cloudflare Tunnel.">
-                <code id="remote-tunnel-command">cloudflared tunnel --url http://127.0.0.1:8080</code>
-              </div>
-            </article>
-
-            <article class="control-card">
-              <h2>Integrations</h2>
-              <p class="muted-copy">Notifications and machine state used by the remote workflow.</p>
-              <div id="remote-integrations-grid" class="run-info-grid compact-info-grid"></div>
-            </article>
-          </aside>
         </div>
       </section>
     </main>
@@ -953,8 +1296,13 @@
 
     <div id="panel-status" class="panel-status" role="status" aria-live="polite" aria-atomic="false"></div>
 
-    <script src="/static/status_catalog.js?v=3.7.0-remote-parity"></script>
-    <script src="/static/api_adapters.js?v=3.7.0-remote-parity"></script>
-    <script src="/static/app.js?v=3.7.0-remote-parity"></script>
+    <script type="importmap">
+      { "imports": { "three": "/static/vendor/three.module.min.js?v=3.8.0-autopilot-preview" } }
+    </script>
+    <script type="module" src="/static/robot_view.js?v=3.8.0-autopilot-preview"></script>
+    <script src="/static/status_catalog.js?v=3.8.0-autopilot-preview"></script>
+    <script src="/static/api_adapters.js?v=3.8.0-autopilot-preview"></script>
+    <script src="/static/app.js?v=3.8.0-autopilot-preview"></script>
+    <script type="module" src="/static/settings.js?v=3.8.0-drive-folder-links"></script>
   </body>
 </html>

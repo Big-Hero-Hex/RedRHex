@@ -1,0 +1,14 @@
+interface:
+  display_name: "RedRHex Autopilot"
+  short_description: "Guide bounded AI training campaigns"
+  default_prompt: "Use $redrhex-autopilot to inspect and advance my armed RedRHex campaign safely."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "redrhex-autopilot"
+      description: "Narrow loopback adapter for the RedRHex Training Panel Autopilot API"
+      transport: "stdio"
+
+policy:
+  allow_implicit_invocation: true

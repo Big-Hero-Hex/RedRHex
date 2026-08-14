@@ -511,7 +511,12 @@ def terrain_diff(yaml_values: dict[str, Any], defaults: dict[str, Any]) -> dict[
     return {"changed": changed, "same": same}
 
 
-def apply_terrain_overrides(env_cfg: Any, overrides: dict[str, Any]) -> list[str]:
+def apply_terrain_overrides(
+    env_cfg: Any,
+    overrides: dict[str, Any],
+    *,
+    require_exact: bool = False,
+) -> list[str]:
     """Apply flattened terrain override keys to an Isaac env config object."""
     applied: list[str] = []
     normalized = _normalize_values(overrides)
@@ -531,6 +536,11 @@ def apply_terrain_overrides(env_cfg: Any, overrides: dict[str, Any]) -> list[str
         adjusted = False
         if key == BOX_GRID_WIDTH_KEY:
             value, adjusted = _safe_box_grid_width(env_cfg, raw_value, normalized)
+            if adjusted and require_exact:
+                raise ValueError(
+                    f"Terrain override {key} would resolve to {value!r}, "
+                    f"not the requested {raw_value!r}"
+                )
         if key in TUPLE_FIELDS and isinstance(value, list):
             value = tuple(value)
         if isinstance(target, dict):

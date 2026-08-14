@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.7.0 Operator Guide
+title: Training Panel 3.8.0 Operator Guide
 lang: en
 audience: operator
 type: how-to
@@ -42,6 +42,23 @@ Use the advanced **F1 — Teacher only**, **F2 — Distillation only**, or **F3 
 
 History attaches the completed full pipeline to its final F3 PPO directory. Open **Process Console** to see the active stage and exact checkpoint handoff; open **TensorBoard** to inspect the final F3 metrics. The F1 and F2 stage directories remain under `logs/rsl_rl/redrhex_forward_v2_teacher` and `logs/rsl_rl/redrhex_forward_v2_distillation`. A completed run is one seed of training, not the three-seed, recorded-sensor, or hardware promotion evidence.
 
+<a id="autopilot"></a>
+### Run a bounded Autopilot campaign
+
+Autopilot is a preview and is disabled by default. Stop Mother, enable it only for a reviewed local pilot, and keep the bind on loopback:
+
+```bash
+REDRHEX_AUTOPILOT_ENABLED=1 python -m tools.training_panel --host 127.0.0.1 --port 8080
+```
+
+Open **Autopilot** and create a draft. Select ForwardFast or Direct, its supported stage, walk/run label, and directions. Read the generated `{vx, vy, wz}` intervals: the labels are only shortcuts for the lower or upper half of the stage range, and the displayed numbers are the contract. Select fresh initialization or one recorded baseline choice identified by run, exact `model_<iteration>.pt` iteration, and checkpoint SHA-256. The panel does not scan the run directory to choose a latest file. V1 rejects a selected baseline that carries any terrain override; use a default-terrain baseline or fresh initialization. Review the immutable reward checklist and 80–120% hard bounds, and disable a key or narrow its absolute minimum/maximum when required. A narrowed interval must contain the campaign-start value and cannot exceed the displayed hard range. Advisor candidates can use only the finite 80%, 90%, 100%, 110%, and 120% campaign-start lattice after that narrowing—not arbitrary values inside the interval. Set an explicit per-trial iteration cap, and approve no more than 24 training trials and 72 active GPU-hours. Only one campaign can be armed; drafts do not reserve the slot.
+
+Arming is a human-only operation. Once armed, the panel runs an unchanged seed-42 control, exact-checkpoint command evaluation, bounded candidate screens, and—when eligible—paired confirmation at seeds 43 and 44. It applies fall, health, tracking, direction, leakage, stability, energy, identity, and evidence gates before ranking. Each evaluated trial binds four immutable artifacts: command rows, episode rows, summary rows, and the evaluated report. The panel rechecks those bindings after restart and before final confirmation. Training reward and TensorBoard curves cannot establish success. If the control already passes, tuning stops; otherwise the panel waits for an external advisor when it needs one bounded next decision.
+
+The repository includes the local `redrhex-autopilot` MCP adapter and its recurring-task prompt, but it does not create a ChatGPT Scheduled task, Secure MCP Tunnel, Platform tunnel ID/permissions, or runtime credential. Configure those external pieces separately and keep credentials outside the repository. Until they are configured, local training/evaluation still finishes and persists; the campaign then enters `waiting_for_chatgpt`.
+
+Use **Pause after current** to preserve the current job and stop before the next transition, **Resume** only after reviewing state, and **Stop after current** for graceful termination. **Emergency stop** targets only campaign-owned work. If the controller itself fails while a campaign job is active, the panel records a durable campaign-owned stop intent before signaling it; a restart continues that stop and GPU accounting before the campaign becomes `blocked_safety` or `failed`. On `patch_handoff`, download the stored review artifact; the panel never applies it. Any reviewed source change starts a new campaign. `simulation_goal_met` means only that the simulator gate passed—it is not policy export, deployment readiness, or hardware authorization.
+
 <a id="physics-presets"></a>
 ### Tune physical quantities
 
@@ -50,6 +67,10 @@ Open **Physics** and select **Baseline** to inherit every repository and USD phy
 The editor exposes 113 independently adjustable simulation quantities: rigid-body damping; mass scale, added root mass, and root center-of-mass offsets; contact friction and restitution; aggregate command delay; stiffness, damping, effort limit, velocity limit, armature, and friction for each actuator group; static, dynamic, and viscous friction for all 18 joints; six passive springs; and six ABAD target scales and offsets. Ground static and dynamic friction are a coupled contract. Invalid values are rejected before launch.
 
 Torsion-spring damping defaults to zero. `damper_0` through `damper_5` remain stable profile aliases. The large torsion-spring actuator effort and velocity limits are nonbinding; they are not spring torque clipping or an artificial velocity brake. Do not use arbitrary armature or uniform mass scaling as an instability fix without reviewed physical evidence.
+
+**Robot preview** sits above the field list and shows the preset you are editing, not the robot's live state. Drag to orbit, scroll to zoom, and shift-drag to pan; **Reset view** restores the framing and **Hide** collapses it. Changing a torsion-spring rest position turns that leg, the center-of-mass marker tracks the three offset fields, and the ground tint follows contact friction. Each joint is drawn as what it does, with a legend on the model: the blue barrel is the main drive that spins the leg, the green hinge is the ABAD that swings it out sideways, and the bare metal coil is the passive torsion spring. Focusing or hovering a field highlights the part it affects, and clicking a leg fills the search box with that leg's name so the list narrows to it. Damping and command delay have no honest spatial depiction, so they are shown as text under the model. As you scroll into the field list the preview pins itself to the top of the window and collapses to a compact bar, so the model stays visible while you edit; it returns to full size when you scroll back up, and it does not pin at all on a short screen.
+
+The preview warns when a leg's name does not match the model. Legs are drawn where the URDF mounts them, and the fields named right front, right middle, and right rear currently address the right middle, right rear, and right front legs. The leg indices themselves are correct, so training is unaffected; read the warning before deciding which leg a field belongs to. If the browser cannot render 3D, the preview becomes a top-down schematic that still supports clicking a leg.
 
 Save the preset to keep it for later. The selected draft is included in the next run even before saving, and the Train page shows its name. Training snapshots the exact `CalibrationProfileV1` into the run. Play, Record Video, and Export ONNX reuse that snapshot rather than the currently selected preset. These settings change simulation behavior only; hardware calibration, E-stop preparation, and motor-enable authorization remain separate gates.
 
@@ -88,7 +109,7 @@ Turning off a master switch disables the controls it governs instead of leaving 
 <a id="navigation"></a>
 ## Navigate and diagnose the UI
 
-The current view and selected run are stored in the URL, so refresh and shared links preserve context. The top bar reports backend freshness; a stale indicator means operators should stop issuing new actions until connectivity is understood. Initial loading uses skeletons instead of reporting empty data, and action failures from Rewards, Terrain, Convergence, Activity, and Control Center appear in their current view.
+The current view and selected run are stored in the URL, so refresh and shared links preserve context. The top bar reports backend freshness; a stale indicator means operators should stop issuing new actions until connectivity is understood. Initial loading uses skeletons instead of reporting empty data, and action failures from Rewards, Terrain, Convergence, Activity, and Settings appear in their current view. Settings separates Remote operations, Google Drive, Connections, and Advanced diagnostics so routine controls do not compete with raw status.
 
 <a id="child"></a>
 ## Use Child safely
@@ -111,7 +132,11 @@ Export ONNX produces `exported/policy.pt` and `exported/policy.onnx` from the se
 
 For one-touch Google Drive export, install `rclone` on the training PC and use `rclone config` to create a Google Drive remote named exactly `redrhex-drive`. Prefer the `drive.file` scope for a personal My Drive. Confirm `rclone listremotes` includes `redrhex-drive:` and `rclone lsd redrhex-drive:` succeeds, then restart Mother so `/api/system` reports the integration as configured.
 
-In History, display the latest or checkpoint video and click **Export to Drive**. Upload continues in the background without taking the Isaac/GPU lock and writes `RedRHex Videos/<run-id>/<video-filename>`. The same unchanged source is not uploaded twice. **Open in Drive** uses the returned Drive file ID to open the private file; it does not create an anyone-with-link permission. A failed or restart-interrupted export retains its error and becomes retryable.
+Use **Settings → Google Drive** to choose the account and video folder independently. Copy an existing Google Drive folder URL, paste it into **Google Drive folder**, and click **Use this folder**. Settings validates the folder through the connected rclone account and keeps the parsed folder ID and any legacy resource key local. It never changes sharing. A relative My Drive path also remains valid and is created privately when needed. With `drive.file`, an unrelated manually created folder may remain invisible; use a Settings-created path or deliberately reconfigure the rclone scope.
+
+To switch accounts, wait for active exports to finish, click **Change Google account**, and approve the new Google account in the training PC browser. Existing private links are not moved. Account and folder changes advance a destination revision, so a completed export from the previous destination is not reused.
+
+In History, display the latest or checkpoint video and click **Export to Drive**. Upload continues in the background without taking the Isaac/GPU lock and writes `<configured-folder>/<run-id>/<video-filename>`. The same unchanged source in the same destination is not uploaded twice. **Open in Drive** uses the returned Drive file ID to open the private file; it does not create an anyone-with-link permission. A failed or restart-interrupted export retains its error and becomes retryable.
 
 <a id="next"></a>
 ## Next steps

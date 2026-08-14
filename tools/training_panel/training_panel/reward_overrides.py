@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 
@@ -9,10 +10,15 @@ class RewardOverrideError(ValueError):
 
 
 def _to_float(key: str, value: Any) -> float:
+    if isinstance(value, bool):
+        raise RewardOverrideError(f"Reward override {key!r} must be numeric, not boolean")
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise RewardOverrideError(f"Reward override {key!r} must be numeric") from exc
+    if not math.isfinite(parsed):
+        raise RewardOverrideError(f"Reward override {key!r} must be finite")
+    return parsed
 
 
 def normalize_reward_overrides(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -43,13 +49,21 @@ def _iter_overrides(overrides: Mapping[str, Any]) -> list[tuple[str, float]]:
     return flattened
 
 
-def apply_reward_overrides(env_cfg: object, overrides: Mapping[str, Any] | None) -> list[str]:
+def apply_reward_overrides(
+    env_cfg: object,
+    overrides: Mapping[str, Any] | None,
+    *,
+    require_all: bool = False,
+) -> list[str]:
     applied: list[str] = []
-    for key, value in _iter_overrides(overrides or {}):
+    unknown: list[str] = []
+    requested = _iter_overrides(overrides or {})
+    for key, value in requested:
         if key.startswith("v2_reward_scales."):
             scale_name = key.split(".", 1)[1]
             current = getattr(env_cfg, "v2_reward_scales", None)
-            if not isinstance(current, Mapping):
+            if not isinstance(current, Mapping) or scale_name not in current:
+                unknown.append(key)
                 continue
             merged = dict(current)
             merged[scale_name] = value
@@ -59,4 +73,33 @@ def apply_reward_overrides(env_cfg: object, overrides: Mapping[str, Any] | None)
         if hasattr(env_cfg, key):
             setattr(env_cfg, key, value)
             applied.append(f"{key}={value}")
+        else:
+            unknown.append(key)
+    if require_all and unknown:
+        raise RewardOverrideError(
+            "Unknown or unavailable reward override keys: " + ", ".join(sorted(unknown))
+        )
+    if require_all:
+        mismatched: list[str] = []
+        for key, requested_value in requested:
+            if key.startswith("v2_reward_scales."):
+                scale_name = key.split(".", 1)[1]
+                current = getattr(env_cfg, "v2_reward_scales", None)
+                resolved = current.get(scale_name) if isinstance(current, Mapping) else None
+            else:
+                resolved = getattr(env_cfg, key, None)
+            if isinstance(resolved, bool):
+                mismatched.append(key)
+                continue
+            try:
+                resolved_value = float(resolved)
+            except (TypeError, ValueError):
+                mismatched.append(key)
+                continue
+            if not math.isfinite(resolved_value) or resolved_value != requested_value:
+                mismatched.append(key)
+        if mismatched:
+            raise RewardOverrideError(
+                "Reward overrides did not resolve exactly: " + ", ".join(sorted(mismatched))
+            )
     return applied
