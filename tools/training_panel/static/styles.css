@@ -565,12 +565,28 @@ html[data-theme="dark"] .status-unknown {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 7px 10px;
+  gap: 4px;
+  padding: 0 6px 0 0;
   border-radius: 7px;
-  cursor: pointer;
   font-size: 13px;
   transition: background-color 120ms;
+}
+
+.folder-select {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 4px 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .folder-item:hover {
@@ -580,8 +596,21 @@ html[data-theme="dark"] .status-unknown {
 .folder-item.active {
   background: var(--surface-2);
   border-left: 3px solid var(--red);
-  padding-left: 7px;
   font-weight: 700;
+}
+
+/* The rename/remove buttons are secondary: reveal them on hover or keyboard
+   focus so a column of folders reads as a list of folders, not of controls. */
+.folder-rename-button,
+.folder-delete-button {
+  opacity: 0;
+}
+
+.folder-item:hover .folder-rename-button,
+.folder-item:hover .folder-delete-button,
+.folder-rename-button:focus-visible,
+.folder-delete-button:focus-visible {
+  opacity: 0.75;
 }
 
 .folder-name {
@@ -613,7 +642,6 @@ html[data-theme="dark"] .status-unknown {
   color: var(--muted);
   font-size: 16px;
   line-height: 1;
-  opacity: 0.65;
   flex-shrink: 0;
 }
 
@@ -630,7 +658,6 @@ html[data-theme="dark"] .status-unknown {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
-  opacity: 0.75;
   flex-shrink: 0;
 }
 
@@ -815,6 +842,18 @@ html[data-theme="dark"] .status-unknown {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  position: sticky;
+  top: 96px;
+  max-height: calc(100vh - 112px);
+}
+
+/* Without this the search and filter row scrolls out of reach as soon as the
+   list is long enough to need it. */
+.run-list-col .run-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .history-toolbar {
@@ -1628,9 +1667,21 @@ html[data-theme="dark"] .comparison-diff {
   padding: 0 10px 10px;
 }
 
+.video-record-hint {
+  margin: -4px 0 10px;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .checkpoint-timeline {
   display: grid;
   gap: 4px;
+  max-height: min(46vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
 }
 
 .checkpoint-point,
@@ -2164,6 +2215,16 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .run-list-col {
+    position: static;
+    max-height: none;
+  }
+
+  .run-list-col .run-list {
+    overflow-y: visible;
+    padding-right: 0;
+  }
+
   .details-panel-wrap {
     position: static;
     min-width: 0;
@@ -2182,6 +2243,49 @@ pre {
     flex-wrap: wrap;
     position: static;
   }
+}
+
+.filtered-pill {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+}
+
+.bulk-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.draft-flag {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.comparison-pill {
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px dashed var(--line-strong);
+}
+
+.run-card.comparing {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(49, 94, 159, 0.14);
+}
+
+.empty-panel p {
+  margin-bottom: 10px;
+}
+
+.toast-success {
+  border-left-color: var(--green);
 }
 
 /* ==============================

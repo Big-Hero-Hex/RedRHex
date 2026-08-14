@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.6.2-route-clarity-evolution" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.6.3-history-clarity-evolution-polish" />
   </head>
   <body>
     <aside class="sidebar">
@@ -27,7 +27,7 @@
         <button class="nav-button" data-view="access">Control Center</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.6.2 Route Clarity</span>
+        <span class="release-version">Version 3.6.3 History Clarity</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -40,7 +40,7 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.6.2 Route Clarity</span>
+          <span class="release-chip">Training Panel V3.6.3 History Clarity</span>
           <span id="freshness" class="freshness" data-state="stale"
             data-tooltip="How recently the panel last heard from the training PC">
             <span class="freshness-dot" aria-hidden="true"></span>
@@ -346,22 +346,27 @@
               <select id="sort-runs">
                 <option value="newest">Newest first</option>
                 <option value="oldest">Oldest first</option>
-                <option value="status">Status (A–Z)</option>
+                <option value="status">Status (active first)</option>
                 <option value="iters-desc">Most iterations</option>
                 <option value="duration-asc">Shortest first</option>
               </select>
               <span id="run-count-badge" class="status-badge muted-pill"></span>
+              <button type="button" id="clear-run-filters" class="ghost-button small-button" hidden
+                data-tooltip="Clear search, status, and folder filters">Clear filters</button>
             </div>
             <div class="bulk-toolbar">
               <span id="bulk-selected-count" class="status-badge muted-pill">0 selected</span>
-              <button type="button" id="select-visible-runs" class="ghost-button small-button" data-tooltip="Select visible runs">Select visible</button>
-              <button type="button" id="clear-selected-runs" class="ghost-button small-button" data-tooltip="Clear selection">Clear</button>
-              <button type="button" id="delete-selected-runs" class="danger-button small-button" data-tooltip="Delete selected runs and repo-owned log files">Delete selected</button>
-              <div class="bulk-move-group">
-                <select id="bulk-folder-select" aria-label="Folder for selected runs">
-                  <option value="">— Uncategorized —</option>
-                </select>
-                <button type="button" id="move-selected-runs" class="primary-button small-button" data-tooltip="Move selected runs">Move selected</button>
+              <button type="button" id="select-visible-runs" class="ghost-button small-button" data-tooltip="Select every run currently listed">Select visible</button>
+              <small id="bulk-hint" class="bulk-hint">Tick a run to move or delete in bulk. Shift-click selects a range.</small>
+              <div id="bulk-actions" class="bulk-actions" hidden>
+                <button type="button" id="clear-selected-runs" class="ghost-button small-button" data-tooltip="Clear selection">Clear</button>
+                <div class="bulk-move-group">
+                  <select id="bulk-folder-select" aria-label="Folder for selected runs">
+                    <option value="">— Uncategorized —</option>
+                  </select>
+                  <button type="button" id="move-selected-runs" class="primary-button small-button" data-tooltip="Move selected runs">Move selected</button>
+                </div>
+                <button type="button" id="delete-selected-runs" class="danger-button small-button" data-tooltip="Delete selected runs and repo-owned log files">Delete selected</button>
               </div>
             </div>
             <div id="runs" class="run-list"></div>
@@ -436,6 +441,7 @@
             <textarea id="notes-editor" placeholder="Add observations, hyperparameter rationale, or results…"></textarea>
             <div class="form-actions compact-actions">
               <button type="button" id="save-notes" class="primary-button small-button" data-tooltip="Save your notes for this run">Save Notes</button>
+              <span id="notes-dirty-flag" class="draft-flag" hidden>Unsaved draft kept for this run</span>
             </div>
 
             <!-- ── Reward Config (Module D) ── -->
@@ -462,11 +468,12 @@
                 <span id="video-state" class="status-badge muted-pill">No Video</span>
               </div>
               <div class="form-actions compact-actions" style="margin-bottom:10px">
-                <button type="button" id="record-video" class="primary-button small-button" data-tooltip="Run the checkpoint headlessly and save a video file">Record Video</button>
+                <button type="button" id="record-video" class="primary-button small-button" aria-describedby="record-video-hint">Record Video</button>
                 <button type="button" id="stop-recording" class="ghost-button small-button" hidden data-tooltip="Stop the video recording process">Stop Recording</button>
                 <button type="button" id="open-video-folder" class="ghost-button small-button" hidden data-tooltip="Open the folder containing recorded videos (local only)">Open Folder</button>
                 <button type="button" id="copy-video-path" class="ghost-button small-button" hidden data-tooltip="Copy the video file path to clipboard">Copy Path</button>
               </div>
+              <p id="record-video-hint" class="video-record-hint" role="status" hidden></p>
               <details id="checkpoint-evolution" class="checkpoint-evolution" hidden>
                 <summary>
                   <span>
@@ -519,6 +526,19 @@
               <pre id="debug-log"></pre>
             </div>
           </div>
+
+            <!-- Comparison renders into its own panel. It must never overwrite
+                 .details-panel, whose child ids the rest of the app holds. -->
+            <div id="comparison-panel" class="details-panel comparison-panel" hidden>
+              <div class="comparison-header">
+                <div>
+                  <h2>Comparing Runs</h2>
+                  <p class="muted-copy">Pick <strong>Compare</strong> on another run to swap the right column.</p>
+                </div>
+                <button type="button" id="exit-comparison-btn" class="ghost-button small-button">Close Comparison</button>
+              </div>
+              <div id="comparison-grid" class="comparison-grid"></div>
+            </div>
           </div><!-- /details-panel-wrap -->
         </div>
       </section>
@@ -874,8 +894,8 @@
 
     <div id="panel-status" class="panel-status" role="status" aria-live="polite" aria-atomic="false"></div>
 
-    <script src="/static/status_catalog.js?v=3.6.2-route-clarity"></script>
-    <script src="/static/api_adapters.js?v=3.6.2-route-clarity"></script>
-    <script src="/static/app.js?v=3.6.2-route-clarity-evolution"></script>
+    <script src="/static/status_catalog.js?v=3.6.3-history-clarity"></script>
+    <script src="/static/api_adapters.js?v=3.6.3-history-clarity"></script>
+    <script src="/static/app.js?v=3.6.3-history-clarity-evolution-polish"></script>
   </body>
 </html>

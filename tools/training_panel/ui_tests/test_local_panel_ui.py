@@ -295,7 +295,9 @@ def test_training_route_only_shows_relevant_controls(panel, page):
 def test_history_defaults_to_all_runs_and_filters(panel, page):
     open_history(page, panel["url"])
 
-    all_class = page.locator('.folder-item[data-folder="__all__"]').get_attribute("class") or ""
+    all_class = (
+        page.locator('.folder-item:has(.folder-select[data-folder="__all__"])').get_attribute("class") or ""
+    )
     assert "active" in all_class
     expect(page.locator("#runs")).to_contain_text("run_alpha")
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
@@ -311,11 +313,11 @@ def test_history_defaults_to_all_runs_and_filters(panel, page):
     expect(page.locator("#runs")).not_to_contain_text("queued_run")
 
     page.select_option("#status-filter", "")
-    page.locator('.folder-item[data-folder="Good Runs"] .folder-name').click()
+    page.locator('.folder-select[data-folder="Good Runs"]').click()
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
     expect(page.locator("#runs")).not_to_contain_text("run_alpha")
 
-    page.locator('.folder-item[data-folder="__all__"]').click()
+    page.locator('.folder-select[data-folder="__all__"]').click()
     expect(page.locator("#runs")).to_contain_text("run_alpha")
 
 
@@ -370,6 +372,52 @@ def test_history_shows_evolution_entry_for_a_single_checkpoint(panel, page):
     expect(page.locator("#checkpoint-evolution")).to_be_visible()
     expect(page.locator("#checkpoint-evolution-count")).to_have_text("1 save point")
     expect(page.locator("#checkpoint-evolution-help")).to_contain_text("One checkpoint is saved")
+
+
+def test_history_evolution_explains_gpu_lock_and_keeps_long_list_position(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    page.locator("#checkpoint-evolution summary").click()
+
+    scroll = page.evaluate(
+        """
+        () => {
+        const run = state.selectedRun;
+        run.checkpoint_history = Array.from({ length: 51 }, (_, index) => ({
+          iteration: index * 50,
+          created_at: '2026-05-20T10:00:00',
+          is_latest: index === 50,
+          video: null,
+        }));
+        renderVideoPanel(run);
+        const timeline = document.querySelector('#checkpoint-timeline');
+        const target = timeline.querySelector('[data-checkpoint-iteration="2000"]');
+        timeline.scrollTop = target.offsetTop - timeline.offsetTop - 40;
+        const before = timeline.scrollTop;
+        selectCheckpointForVideo(2000);
+        return {
+          before,
+          after: timeline.scrollTop,
+          overflowY: getComputedStyle(timeline).overflowY,
+        };
+        }
+        """
+    )
+    assert scroll["before"] > 0
+    assert abs(scroll["after"] - scroll["before"]) <= 1
+    assert scroll["overflowY"] == "auto"
+    expect(page.locator('[data-checkpoint-iteration="2000"]')).to_have_class(re.compile("active"))
+
+    page.evaluate(
+        """
+        state.activeProcesses = [{ kind: 'training', run_id: 'active_training' }];
+        renderVideoPanel(state.selectedRun);
+        """
+    )
+    expect(page.locator("#record-video")).to_be_disabled()
+    expect(page.locator("#record-video-hint")).to_be_visible()
+    expect(page.locator("#record-video-hint")).to_contain_text("GPU busy with training")
+    assert page.locator("#record-video").get_attribute("data-tooltip") is None
 
 
 def test_physics_preset_is_searchable_sparse_and_persistent(panel, page):
@@ -993,3 +1041,162 @@ def test_freshness_reports_failed_when_the_backend_stops(panel, page):
         "document.querySelector('#freshness')?.dataset.state === 'failed'",
         timeout=45000,
     )
+
+
+def test_closing_a_comparison_leaves_the_details_panel_usable(panel, page):
+    # Comparison used to overwrite .details-panel's innerHTML, which destroyed the
+    # element ids renderRunDetails() writes to. Closing the comparison then threw
+    # on every later render, including the one inside the runs poll, so History
+    # stopped refreshing with no visible error.
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#details-title")).to_have_text("Beta Foldered")
+
+    alpha_card = page.locator(".run-card", has_text="run_alpha")
+    alpha_card.locator(".run-menu-trigger").click()
+    alpha_card.locator("[data-action='compare']").click()
+    expect(page.locator("#comparison-panel")).to_be_visible()
+    expect(page.locator("#comparison-grid")).to_contain_text("run_alpha")
+
+    page.locator("#exit-comparison-btn").click()
+    expect(page.locator("#comparison-panel")).to_be_hidden()
+    expect(page.locator("#details-title")).to_have_text("Beta Foldered")
+    expect(page.locator("#notes-editor")).to_be_visible()
+
+    # The details pane must still respond to a fresh selection.
+    page.locator(".run-card", has_text="run_alpha").click()
+    expect(page.locator("#details-title")).to_have_text("run_alpha")
+
+    # The runs poll keeps calling renderRunDetails(); it must not be throwing.
+    page.wait_for_timeout(1200)
+    assert page_errors == []
+
+
+def test_escape_closes_a_comparison(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    alpha_card = page.locator(".run-card", has_text="run_alpha")
+    alpha_card.locator(".run-menu-trigger").click()
+    alpha_card.locator("[data-action='compare']").click()
+    expect(page.locator("#comparison-panel")).to_be_visible()
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#comparison-panel")).to_be_hidden()
+
+
+def test_running_run_card_renders_a_single_progress_bar(panel, page):
+    open_history(page, panel["url"])
+    page.evaluate(
+        """
+        const run = state.runs.find((item) => item.id === 'panel_run_beta');
+        run.status = 'running';
+        run.progress = {
+          iteration: 5,
+          total_iterations: 10,
+          percent: 50,
+          updated_at: new Date().toISOString(),
+        };
+        renderRuns();
+        """
+    )
+    beta_card = page.locator(".run-card", has_text="Beta Foldered")
+    expect(beta_card.locator(".run-progress")).to_have_count(1)
+
+
+def test_status_sort_puts_active_runs_first(panel, page):
+    open_history(page, panel["url"])
+    page.select_option("#sort-runs", "status")
+    first_status = page.locator(".run-card").first.locator(".status-pill")
+    expect(first_status).to_have_text("queued")
+
+
+def test_history_filters_survive_a_reload(panel, page):
+    open_history(page, panel["url"])
+    page.fill("#run-search", "beta")
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+    expect(page.locator("#run-count-badge")).to_contain_text("of")
+
+    page.reload()
+    page.wait_for_selector(".run-card")
+    expect(page.locator("#run-search")).to_have_value("beta")
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+
+    page.locator("#clear-run-filters").click()
+    expect(page.locator("#runs")).to_contain_text("run_alpha")
+    expect(page.locator("#run-search")).to_have_value("")
+
+
+def test_search_matches_folder_and_notes(panel, page):
+    open_history(page, panel["url"])
+    page.fill("#run-search", "Good Runs")
+    expect(page.locator("#runs")).to_contain_text("Beta Foldered")
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+
+
+def test_unsaved_notes_survive_switching_runs(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#notes-editor")).to_be_enabled()
+    page.fill("#notes-editor", "half-written observation")
+
+    page.locator(".run-card", has_text="run_alpha").click()
+    expect(page.locator("#details-title")).to_have_text("run_alpha")
+
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#notes-editor")).to_have_value("half-written observation")
+    expect(page.locator("#notes-dirty-flag")).to_be_visible()
+
+
+def test_slash_focuses_search_and_j_k_move_the_selection(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card").first.click()
+    first_title = page.locator("#details-title").inner_text()
+
+    page.keyboard.press("j")
+    expect(page.locator("#details-title")).not_to_have_text(first_title)
+    page.keyboard.press("k")
+    expect(page.locator("#details-title")).to_have_text(first_title)
+
+    page.keyboard.press("/")
+    assert page.evaluate("document.activeElement.id") == "run-search"
+
+
+def test_bulk_actions_appear_only_with_a_selection(panel, page):
+    open_history(page, panel["url"])
+    expect(page.locator("#bulk-actions")).to_be_hidden()
+    expect(page.locator("#bulk-hint")).to_be_visible()
+
+    page.locator(".run-card", has_text="Beta Foldered").locator(".run-select-checkbox").check()
+    expect(page.locator("#bulk-actions")).to_be_visible()
+    expect(page.locator("#bulk-selected-count")).to_have_text("1 selected")
+
+
+def test_bulk_delete_requires_a_typed_acknowledgement(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").locator(".run-select-checkbox").check()
+    page.locator("#delete-selected-runs").click()
+
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    expect(page.locator("#confirm-dialog-input-wrap")).to_be_visible()
+    expect(page.locator("#confirm-dialog-confirm")).to_be_disabled()
+    # Nothing is marked as deleting while the operator is still deciding.
+    expect(page.locator(".run-card.deleting")).to_have_count(0)
+
+    page.fill("#confirm-dialog-input", "DELETE")
+    expect(page.locator("#confirm-dialog-confirm")).to_be_enabled()
+    page.locator("#confirm-dialog-cancel").click()
+    expect(page.locator("#runs")).to_contain_text("Beta Foldered")
+
+
+def test_folder_creation_uses_the_in_app_dialog(panel, page):
+    open_history(page, panel["url"])
+    page.locator("#create-folder-btn").click()
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    expect(page.locator("#confirm-dialog-title")).to_have_text("New Folder")
+
+    page.fill("#confirm-dialog-input", "Sweep A")
+    page.locator("#confirm-dialog-confirm").click()
+    expect(page.locator("#folder-sidebar")).to_contain_text("Sweep A")
+    assert page.locator('.folder-select[data-folder="Sweep A"]').count() == 1

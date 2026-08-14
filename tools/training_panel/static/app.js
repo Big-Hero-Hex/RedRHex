@@ -28,6 +28,12 @@ const state = {
   openMenuRunId: null,
   renameDirty: false,
   renameDraftRunId: null,
+  // Per-run unsaved notes, keyed by run id. Switching runs must not silently
+  // discard typed text the way an unconditional editor overwrite would.
+  notesDrafts: {},
+  notesSavedText: "",
+  lastSelectedRunId: null,   // anchor for shift-click range selection
+  runStatuses: {},           // run id -> last seen status, for finish notices
   // Search / filter / sort (Module 5)
   searchQuery: "",
   statusFilter: "",
@@ -157,6 +163,7 @@ async function applyHashRoute() {
 const $ = (selector) => document.querySelector(selector);
 const THEME_KEY = "redrhex-training-panel-theme";
 const NOTIFICATIONS_KEY = "redrhex-training-panel-notifications-v1";
+const HISTORY_FILTERS_KEY = "redrhex-training-panel-history-filters-v1";
 
 function preferredTheme() {
   const stored = localStorage.getItem(THEME_KEY);
@@ -185,6 +192,53 @@ function loadNotificationState() {
     state.notifications.knownRunIds = new Set();
     state.notifications.unreadRunIds = new Set();
   }
+}
+
+function loadHistoryFilters() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_FILTERS_KEY) || "{}");
+    if (typeof parsed.searchQuery === "string") state.searchQuery = parsed.searchQuery;
+    if (typeof parsed.statusFilter === "string") state.statusFilter = parsed.statusFilter;
+    if (typeof parsed.sortKey === "string") state.sortKey = parsed.sortKey;
+    if (parsed.activeFolder === null || typeof parsed.activeFolder === "string") {
+      state.activeFolder = parsed.activeFolder;
+    }
+  } catch {
+    // A corrupt filter blob must never keep History from rendering.
+  }
+}
+
+function saveHistoryFilters() {
+  try {
+    localStorage.setItem(
+      HISTORY_FILTERS_KEY,
+      JSON.stringify({
+        searchQuery: state.searchQuery,
+        statusFilter: state.statusFilter,
+        sortKey: state.sortKey,
+        activeFolder: state.activeFolder,
+      })
+    );
+  } catch {
+    // Filter memory is a convenience; storage failures should not block the panel.
+  }
+}
+
+function historyFiltersActive() {
+  return Boolean(state.searchQuery) || Boolean(state.statusFilter) || state.activeFolder !== null;
+}
+
+function clearHistoryFilters() {
+  state.searchQuery = "";
+  state.statusFilter = "";
+  state.activeFolder = null;
+  const search = $("#run-search");
+  const status = $("#status-filter");
+  if (search) search.value = "";
+  if (status) status.value = "";
+  saveHistoryFilters();
+  renderFolderSidebar();
+  renderRuns();
 }
 
 function saveNotificationState() {
@@ -222,6 +276,28 @@ function markHistoryRead(runId) {
   state.notifications.unreadRunIds.delete(runId);
   saveNotificationState();
   renderNotificationBadges();
+}
+
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "interrupted", "cancelled"];
+
+// A new run id is not the event operators wait hours for — the finish is. Seed
+// the status map on the first poll so a reload never replays old completions.
+function noticeFinishedRuns(runs) {
+  const seeded = Object.keys(state.runStatuses).length > 0;
+  for (const run of runs) {
+    const status = String(run.status || "").toLowerCase();
+    const previous = state.runStatuses[run.id];
+    state.runStatuses[run.id] = status;
+    if (!seeded || previous === undefined || previous === status) continue;
+    if (!TERMINAL_RUN_STATUSES.includes(status)) continue;
+    const label = run.display_name || run.id;
+    markHistoryUnread(run.id);
+    setStatusTone(`Run ${label} ${status}.`, status === "completed" ? "success" : "error");
+  }
+  const ids = new Set(runs.map((run) => run.id));
+  for (const runId of Object.keys(state.runStatuses)) {
+    if (!ids.has(runId)) delete state.runStatuses[runId];
+  }
 }
 
 function reconcileHistoryNotifications(runs) {
@@ -405,6 +481,9 @@ function restoreHistoryScroll(scrollState) {
   });
 }
 
+// `requiredText` gates the confirm button on an exact match (destructive work).
+// `textInput` instead collects a free value — the styled replacement for
+// window.prompt, so folder naming looks like the rest of the panel.
 function confirmAction({
   title,
   body,
@@ -412,9 +491,16 @@ function confirmAction({
   cancelLabel = "Cancel",
   requiredText = "",
   inputLabel = "",
+  textInput = false,
+  initialValue = "",
+  placeholder = "",
 } = {}) {
   const dialog = $("#confirm-dialog");
   if (!dialog || typeof dialog.showModal !== "function") {
+    if (textInput) {
+      const typed = window.prompt(body || title || "", initialValue);
+      return Promise.resolve(typed && typed.trim() ? typed.trim() : null);
+    }
     if (!requiredText) return Promise.resolve(window.confirm(body || title || "") ? true : null);
     const value = window.prompt(`${body || title || ""}\n\nType ${requiredText} to confirm:`, "");
     return Promise.resolve(value === requiredText ? value : null);
@@ -446,7 +532,8 @@ function confirmAction({
       resolve(value);
     };
     function updateConfirmState() {
-      confirmButton.disabled = Boolean(requiredText) && input.value !== requiredText;
+      if (textInput) confirmButton.disabled = !input.value.trim();
+      else confirmButton.disabled = Boolean(requiredText) && input.value !== requiredText;
     }
     function handleInputKeydown(event) {
       if (event.key === "Enter" && !confirmButton.disabled) {
@@ -455,7 +542,8 @@ function confirmAction({
       }
     }
     function handleConfirm() {
-      finish(requiredText ? input.value : true);
+      if (textInput) finish(input.value.trim() || null);
+      else finish(requiredText ? input.value : true);
     }
     function handleCancel(event) {
       if (event) event.preventDefault();
@@ -469,8 +557,9 @@ function confirmAction({
     bodyEl.textContent = body || "";
     confirmButton.textContent = confirmLabel;
     cancelButton.textContent = cancelLabel;
-    input.value = "";
-    inputWrap.hidden = !requiredText;
+    input.value = textInput ? initialValue : "";
+    input.placeholder = placeholder;
+    inputWrap.hidden = !requiredText && !textInput;
     inputHint.textContent = inputLabel || (requiredText ? `Type ${requiredText} to confirm.` : "");
     updateConfirmState();
 
@@ -481,8 +570,12 @@ function confirmAction({
     dialog.addEventListener("cancel", handleCancel);
     dialog.addEventListener("close", handleClose);
     dialog.showModal();
-    if (requiredText) input.focus();
-    else confirmButton.focus();
+    if (requiredText || textInput) {
+      input.focus();
+      if (textInput) input.select();
+    } else {
+      confirmButton.focus();
+    }
   });
 }
 
@@ -948,6 +1041,14 @@ function formatRelativeTime(iso) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// "3d ago" is the readable form; the exact stamp is what you cite in a report.
+function absoluteTime(iso) {
+  if (!iso) return "";
+  const timestamp = Date.parse(iso);
+  if (Number.isNaN(timestamp)) return String(iso);
+  return new Date(timestamp).toLocaleString();
+}
+
 function checkpointIteration(path) {
   const match = String(path || "").match(/model_(\d+)\.pt$/);
   return match ? Number(match[1]) : null;
@@ -1000,6 +1101,8 @@ function runParamSummary(run) {
   } else if (params.max_iterations !== undefined) {
     parts.push(`iters: ${params.max_iterations}`);
   }
+  // Kept on every card, default included: the Explicit quarantine makes the
+  // backend a safety-relevant field, not decoration.
   parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
 }
@@ -1044,8 +1147,10 @@ function onnxSummary(run) {
   return "";
 }
 
+// Only the abnormal case carries information: a run without a log cannot be
+// opened in TensorBoard, compacted, or inspected.
 function runLogSummary(run) {
-  return run.log_dir ? "training log saved" : "no training log";
+  return run.log_dir ? "" : "no training log";
 }
 
 function runStatusDetail(run) {
@@ -1149,6 +1254,16 @@ function visibleRunIds() {
   return filteredRuns().map((run) => run.id);
 }
 
+const STATUS_SORT_ORDER = [
+  "running",
+  "stopping",
+  "queued",
+  "failed",
+  "interrupted",
+  "cancelled",
+  "completed",
+];
+
 function filteredRuns() {
   let runs = [...state.runs];
   // Folder filter
@@ -1160,12 +1275,22 @@ function filteredRuns() {
   // Search
   if (state.searchQuery) {
     const q = state.searchQuery.toLowerCase();
-    runs = runs.filter(
-      (r) =>
-        (r.display_name || r.id).toLowerCase().includes(q) ||
-        r.id.toLowerCase().includes(q) ||
-        (r.params?.task || "").toLowerCase().includes(q) ||
-        (r.status || "").toLowerCase().includes(q)
+    // Operators search for the words they themselves typed, so folder names and
+    // note bodies matter as much as ids. `notes` ships in the /api/runs payload.
+    runs = runs.filter((r) =>
+      [
+        r.display_name || r.id,
+        r.id,
+        r.params?.task,
+        r.status,
+        r.folder,
+        r.notes,
+        r.reward_preset_id,
+        r.terrain_preset_id,
+        r.physics_preset_id,
+      ]
+        .filter(Boolean)
+        .some((field) => String(field).toLowerCase().includes(q))
     );
   }
   // Status filter
@@ -1177,8 +1302,14 @@ function filteredRuns() {
     switch (state.sortKey) {
       case "oldest":
         return (a.created_at || "").localeCompare(b.created_at || "");
-      case "status":
-        return (a.status || "").localeCompare(b.status || "");
+      case "status": {
+        // Alphabetical order buries a running run under "completed"/"failed".
+        const rank = (run) => {
+          const index = STATUS_SORT_ORDER.indexOf(String(run.status || "").toLowerCase());
+          return index === -1 ? STATUS_SORT_ORDER.length : index;
+        };
+        return rank(a) - rank(b) || (b.created_at || "").localeCompare(a.created_at || "");
+      }
       case "iters-desc": {
         const ai = a.params?.max_iterations ?? 0;
         const bi = b.params?.max_iterations ?? 0;
@@ -1390,16 +1521,44 @@ function syncRunMenuState() {
   trigger.setAttribute("aria-expanded", "true");
 }
 
+// A bare "12 runs" reads the same whether 12 of 12 or 12 of 400 are listed.
+function updateRunCountBadge(visibleCount) {
+  const badge = $("#run-count-badge");
+  const clearButton = $("#clear-run-filters");
+  const total = state.runs.length;
+  const filtered = historyFiltersActive();
+  if (badge) {
+    badge.textContent = filtered
+      ? `${visibleCount} of ${total} run${total !== 1 ? "s" : ""}`
+      : `${visibleCount} run${visibleCount !== 1 ? "s" : ""}`;
+    badge.classList.toggle("filtered-pill", filtered);
+  }
+  if (clearButton) clearButton.hidden = !filtered;
+}
+
 function renderRuns() {
   const runs = filteredRuns();
-  const badge = $("#run-count-badge");
-  if (badge) badge.textContent = `${runs.length} run${runs.length !== 1 ? "s" : ""}`;
+  updateRunCountBadge(runs.length);
   if (!runs.length) {
     $("#runs").innerHTML = isLoading("runs") && !state.runs.length
       ? skeletonHtml(4)
       : state.runs.length
-        ? `<article class="empty-panel">No runs match your search or filter.</article>`
-        : `<article class="empty-panel">No training history found yet.</article>`;
+        ? `<article class="empty-panel">
+             <p>No runs match your search or filter.</p>
+             <button type="button" class="ghost-button small-button" data-empty-action="clear-filters">Clear filters</button>
+           </article>`
+        : `<article class="empty-panel">
+             <p>No training history found yet.</p>
+             <button type="button" class="ghost-button small-button" data-empty-action="go-train">Start your first run</button>
+           </article>`;
+    const emptyAction = $("#runs [data-empty-action]");
+    if (emptyAction) {
+      emptyAction.addEventListener("click", () => {
+        if (emptyAction.dataset.emptyAction === "clear-filters") clearHistoryFilters();
+        else setView("train");
+      });
+    }
+    updateRunCountBadge(0);
     updateBulkToolbar();
     return;
   }
@@ -1421,6 +1580,8 @@ function renderRuns() {
       const trainingProcessId = activeProcessIdForRun(run.id, "training");
       const paramSummary = runParamSummary(run);
       const timeSummary = runTimeSummary(run);
+      const logSummary = runLogSummary(run);
+      const comparing = state.comparisonMode && state.comparisonRun?.id === run.id;
       const videoText = videoProcessId ? "recording video" : videoSummary(run);
       const onnxText = onnxProcessId ? "exporting ONNX" : onnxSummary(run);
       const selected = state.selectedRunIds.has(run.id) || deleting ? "checked" : "";
@@ -1436,18 +1597,19 @@ function renderRuns() {
       const canTweak = !["running", "stopping"].includes(String(run.status || "").toLowerCase());
       const unread = state.notifications.unreadRunIds.has(run.id);
       return `
-        <article class="run-card ${active} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? 'aria-busy="true"' : ""}>
+        <article class="run-card ${active} ${comparing ? "comparing" : ""} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? 'aria-busy="true"' : ""}>
           <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${busy ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for folder move" data-tooltip="Select for folder move">
           <div class="run-top">
             <div class="run-title">
               ${unread ? `<span class="unread-dot" data-tooltip="Unread history update"></span>` : ""}
               <strong>${escapeHtml(title)}</strong>
             </div>
+            ${comparing ? `<span class="pill comparison-pill">comparing</span>` : ""}
             <span class="pill status-pill ${deleting ? statusClass("deleting") : statusClass(run.status)}">${deleting ? "deleting" : escapeHtml(statusLabel("run", run.status))}</span>
           </div>
           ${paramSummary ? `<small>${escapeHtml(paramSummary)}</small>` : ""}
-          ${timeSummary ? `<small>${escapeHtml(timeSummary)}</small>` : ""}
-          <small>${escapeHtml(runLogSummary(run))}</small>
+          ${timeSummary ? `<small title="Created ${escapeHtml(absoluteTime(run.created_at))}">${escapeHtml(timeSummary)}</small>` : ""}
+          ${logSummary ? `<small>${escapeHtml(logSummary)}</small>` : ""}
           ${run.reward_preset_id && run.reward_preset_id !== "baseline"
             ? `<small><span class="reward-diff-badge">preset: ${escapeHtml(run.reward_preset_id)}</span></small>`
             : run.reward_diff_count > 0
@@ -1464,7 +1626,6 @@ function renderRuns() {
             : Object.keys(run.physics_overrides || run.params?.physics_overrides || {}).length > 0
               ? `<small><span class="terrain-diff-badge">${escapeHtml(String(Object.keys(run.physics_overrides || run.params?.physics_overrides || {}).length))} physics overrides</span></small>`
               : ""}
-          ${progressBarHtml(run)}
           ${queued ? `<small>waiting for GPU queue</small>` : ""}
           ${moving ? `<small>moving to folder...</small>` : ""}
           ${compacting ? `<small>compacting checkpoints...</small>` : ""}
@@ -1504,7 +1665,12 @@ function renderRuns() {
       const checkbox = event.target.closest(".run-select-checkbox");
       if (checkbox) {
         event.stopPropagation();
-        toggleRunSelection(checkbox.dataset.runId, checkbox.checked);
+        if (event.shiftKey && state.lastSelectedRunId) {
+          selectRunRange(state.lastSelectedRunId, checkbox.dataset.runId, checkbox.checked);
+        } else {
+          toggleRunSelection(checkbox.dataset.runId, checkbox.checked);
+        }
+        state.lastSelectedRunId = checkbox.dataset.runId;
         return;
       }
       const menuTrigger = event.target.closest(".run-menu-trigger");
@@ -1593,6 +1759,7 @@ function renderCheckpointEvolution(run) {
     return;
   }
   details.hidden = false;
+  const previousScrollTop = details.open ? timeline.scrollTop : 0;
   count.textContent = `${checkpoints.length} save point${checkpoints.length === 1 ? "" : "s"}`;
   help.textContent = checkpoints.length === 1
     ? "One checkpoint is saved. Open it to record or review this point."
@@ -1622,6 +1789,7 @@ function renderCheckpointEvolution(run) {
       `;
     })
     .join("");
+  timeline.scrollTop = previousScrollTop;
 }
 
 function selectCheckpointForVideo(iteration) {
@@ -1635,12 +1803,17 @@ function renderVideoPanel(run) {
   const video = $("#result-video");
   const message = $("#video-message");
   const recordButton = $("#record-video");
+  const recordHint = $("#record-video-hint");
   const hasCheckpoint = Boolean(run && run.latest_checkpoint);
   if (!run || (!run.latest_video && !run.video_status && !hasCheckpoint)) {
     panel.hidden = true;
     renderCheckpointEvolution(null);
     clearVideoPlayer();
     message.textContent = "";
+    if (recordHint) {
+      recordHint.hidden = true;
+      recordHint.textContent = "";
+    }
     return;
   }
   panel.hidden = false;
@@ -1651,9 +1824,22 @@ function renderVideoPanel(run) {
   const videoPath = displayedVideoPath(run);
   recordButton.disabled = !hasCheckpoint || Boolean(gpuProcess);
   recordButton.textContent = checkpoint ? `Record Iter ${checkpoint.iteration}` : "Record Latest";
-  recordButton.dataset.tooltip = checkpoint
-    ? `Record a high-quality video from checkpoint iteration ${checkpoint.iteration}`
-    : "Record a high-quality video from the latest checkpoint";
+  recordButton.removeAttribute("data-tooltip");
+  if (recordHint) {
+    const busyLabel = {
+      training: "training",
+      video: "another recording",
+      onnx: "an ONNX export",
+      deploy: "deployment validation",
+      play: "playback",
+    }[gpuProcess?.kind] || "another GPU process";
+    recordHint.textContent = !hasCheckpoint
+      ? "This run has no checkpoint available to record."
+      : gpuProcess
+        ? `GPU busy with ${busyLabel}. Wait for it to finish or stop it before recording this checkpoint.`
+        : "";
+    recordHint.hidden = !recordHint.textContent;
+  }
   $("#stop-recording").hidden = !videoProcessId;
   $("#open-video-folder").hidden = !videoPath;
   setLocalOnlyButtonState(
@@ -1716,7 +1902,12 @@ function renderVideoPanel(run) {
 }
 
 function renderRunDetails() {
-  if (state.comparisonMode && state.selectedRun && state.comparisonRun) {
+  const detailsPanel = document.querySelector(".details-panel:not(.comparison-panel)");
+  const comparisonPanel = $("#comparison-panel");
+  const comparing = Boolean(state.comparisonMode && state.selectedRun && state.comparisonRun);
+  if (comparisonPanel) comparisonPanel.hidden = !comparing;
+  if (detailsPanel) detailsPanel.hidden = comparing;
+  if (comparing) {
     renderComparisonPanel(state.selectedRun, state.comparisonRun);
     return;
   }
@@ -1816,6 +2007,8 @@ function renderRunDetails() {
   const notesEditor = $("#notes-editor");
   notesEditor.disabled = !run || savingNotes || deleting;
   if (!run) notesEditor.value = "";
+  const draftFlag = $("#notes-dirty-flag");
+  if (draftFlag) draftFlag.hidden = !run || !(run.id in state.notesDrafts);
   $("#save-name").disabled = !run || renaming || deleting;
   $("#save-name").textContent = renaming ? "Saving..." : "Save";
   $("#save-notes").disabled = !run || savingNotes || deleting;
@@ -2419,6 +2612,7 @@ async function loadRuns() {
     renderFreshness();
     state.runs = runsData.runs;
     if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
+    noticeFinishedRuns(state.runs);
     reconcileHistoryNotifications(state.runs);
     state.activeProcessMap = {};
     state.activeProcesses = [];
@@ -2429,6 +2623,10 @@ async function loadRuns() {
       state.activeProcesses.push(process);
       rememberActiveProcess(process.run_id, process);
       rememberActiveProcess(process.source_run_id, process);
+    }
+    if (state.activeFolder && !state.folders.includes(state.activeFolder)) {
+      state.activeFolder = null;
+      saveHistoryFilters();
     }
     const validRunIds = new Set(state.runs.map((run) => run.id));
     state.selectedRunIds = new Set([...state.selectedRunIds].filter((runId) => validRunIds.has(runId)));
@@ -2469,6 +2667,24 @@ async function loadRuns() {
   }
 }
 
+// Notes are the one History field with no autosave, so a run switch would
+// otherwise drop whatever was typed. Park it against the run it belongs to.
+function stashNotesDraft() {
+  const run = state.selectedRun;
+  const editor = $("#notes-editor");
+  if (!run || !editor) return;
+  if (editor.value === (state.notesSavedText ?? "")) delete state.notesDrafts[run.id];
+  else state.notesDrafts[run.id] = editor.value;
+}
+
+function hasUnsavedHistoryEdits() {
+  const editor = $("#notes-editor");
+  const dirtyEditor = Boolean(
+    state.selectedRun && editor && editor.value !== (state.notesSavedText ?? "")
+  );
+  return dirtyEditor || Object.keys(state.notesDrafts).length > 0 || state.renameDirty;
+}
+
 async function selectRun(runId) {
   const run = findRun(runId);
   if (!run) {
@@ -2476,6 +2692,7 @@ async function selectRun(runId) {
     return;
   }
   if (!state.selectedRun || state.selectedRun.id !== runId) {
+    stashNotesDraft();
     state.renameDirty = false;
     state.renameDraftRunId = null;
     state.selectedCheckpointIteration = null;
@@ -2499,7 +2716,10 @@ async function selectRun(runId) {
     run.log_dir ? loadTerrainConfigForRun(runId) : Promise.resolve(),
   ]);
   if (!state.selectedRun || state.selectedRun.id !== runId) return;
-  $("#notes-editor").value = notesData.notes;
+  // A draft the operator typed but never saved outranks the stored text.
+  $("#notes-editor").value = runId in state.notesDrafts ? state.notesDrafts[runId] : notesData.notes;
+  state.notesSavedText = notesData.notes;
+  renderRunDetails();
   // No toast here: checkpoint state is metadata, not an event, and the details
   // pane already reports it ("Checkpoint: iter N" / "no checkpoint"). A toast on
   // every run click would evict unread errors three clicks later.
@@ -2767,6 +2987,7 @@ function hideRunConfigPanels() {
 function clearRunDetailState({ render = true } = {}) {
   state.selectedRun = null;
   state.selectedCheckpointIteration = null;
+  state.notesSavedText = "";
   state.comparisonRun = null;
   state.comparisonMode = false;
   state.debugTarget = null;
@@ -2830,12 +3051,15 @@ async function saveNotes() {
     return;
   }
   const runId = state.selectedRun.id;
+  const text = $("#notes-editor").value;
   setPending("notes", runId, true);
   try {
     await api(`/api/runs/${encodeURIComponent(runId)}/notes`, {
       method: "POST",
-      body: JSON.stringify({ notes: $("#notes-editor").value }),
+      body: JSON.stringify({ notes: text }),
     });
+    state.notesSavedText = text;
+    delete state.notesDrafts[runId];
     await loadRuns();
     setStatus("Notes saved.");
   } finally {
@@ -3162,22 +3386,24 @@ async function deleteSelectedRun() {
     return;
   }
   const runId = state.selectedRun.id;
+  const preview = await api(`/api/runs/${encodeURIComponent(runId)}/delete-preview`);
+  const confirmation = await confirmAction({
+    title: "Delete Run",
+    body: formatDeletePreview(preview),
+    confirmLabel: "Delete Run",
+    requiredText: preview.requires_confirmation || runId,
+    inputLabel: `Type ${preview.requires_confirmation || runId} to permanently delete this run.`,
+  });
+  if (!confirmation) {
+    setStatus("Delete cancelled.");
+    return;
+  }
+  // Marked only now: before this point nothing is being deleted, and the card
+  // must not grey itself out and claim otherwise while the dialog is open.
   state.pendingDeleteRunIds.add(runId);
   renderRuns();
   renderRunDetails();
   try {
-    const preview = await api(`/api/runs/${encodeURIComponent(runId)}/delete-preview`);
-    const confirmation = await confirmAction({
-      title: "Delete Run",
-      body: formatDeletePreview(preview),
-      confirmLabel: "Delete Run",
-      requiredText: preview.requires_confirmation || runId,
-      inputLabel: `Type ${preview.requires_confirmation || runId} to permanently delete this run.`,
-    });
-    if (!confirmation) {
-      setStatus("Delete cancelled.");
-      return;
-    }
     const result = await api(`/api/runs/${encodeURIComponent(runId)}/delete`, {
       method: "POST",
       body: JSON.stringify({ confirmation, delete_logs: true }),
@@ -3187,8 +3413,6 @@ async function deleteSelectedRun() {
     await loadRuns();
     await loadActivity();
     setStatus(`Deleted ${deletedRunId}. Removed ${result.deleted_paths.length} log/note path(s).`);
-  } catch (error) {
-    throw error;
   } finally {
     state.pendingDeleteRunIds.delete(runId);
     renderRuns();
@@ -3221,28 +3445,32 @@ async function deleteSelectedRuns() {
     setStatus("Select one or more runs first.");
     return;
   }
+  const preview = await api("/api/runs/delete-preview", {
+    method: "POST",
+    body: JSON.stringify({ run_ids: runIds, delete_logs: true }),
+  });
+  if (!preview.run_count) {
+    setStatus("No selected runs can be deleted.");
+    return;
+  }
+  // Deleting many runs must not be easier than deleting one, which requires the
+  // exact run id. A typed acknowledgement keeps the two in proportion.
+  const confirmed = await confirmAction({
+    title: "Delete Selected Runs",
+    body: formatBulkDeletePreview(preview),
+    confirmLabel: "Delete Selected",
+    requiredText: "DELETE",
+    inputLabel: `Type DELETE to permanently remove ${preview.run_count} run(s) and their log files.`,
+  });
+  if (!confirmed) {
+    setStatus("Bulk delete cancelled.");
+    return;
+  }
   state.isBulkDeleting = true;
   runIds.forEach((runId) => state.pendingDeleteRunIds.add(runId));
   updateBulkToolbar();
   renderRuns();
   try {
-    const preview = await api("/api/runs/delete-preview", {
-      method: "POST",
-      body: JSON.stringify({ run_ids: runIds, delete_logs: true }),
-    });
-    if (!preview.run_count) {
-      setStatus("No selected runs can be deleted.");
-      return;
-    }
-    const confirmed = await confirmAction({
-      title: "Delete Selected Runs",
-      body: formatBulkDeletePreview(preview),
-      confirmLabel: "Delete Selected",
-    });
-    if (!confirmed) {
-      setStatus("Bulk delete cancelled.");
-      return;
-    }
     const result = await api("/api/runs/delete", {
       method: "POST",
       body: JSON.stringify({ run_ids: runIds, delete_logs: true, confirm: true }),
@@ -4580,6 +4808,7 @@ function startComparison(runId) {
 }
 
 function exitComparison() {
+  if (!state.comparisonMode && !state.comparisonRun) return;
   state.comparisonRun = null;
   state.comparisonMode = false;
   renderRunDetails();
@@ -4619,22 +4848,16 @@ function renderComparisonPanel(runA, runB) {
     comparisonRowHtml("Has notes", runA.has_notes ? "Yes" : "No", runB.has_notes ? "Yes" : "No"),
     comparisonRowHtml("Has video", runA.has_video ? "Yes" : "No", runB.has_video ? "Yes" : "No"),
   ];
-  const panel = document.querySelector(".details-panel");
-  if (!panel) return;
-  panel.innerHTML = `
-    <div class="comparison-header">
-      <h2>Comparing Runs</h2>
-      <button type="button" id="exit-comparison-btn" class="ghost-button small-button">✕ Close Comparison</button>
-    </div>
-    <div class="comparison-grid">
-      <div class="comparison-label comparison-col-header"></div>
-      <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runA.display_name || runA.id)}</strong></div>
-      <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runB.display_name || runB.id)}</strong></div>
-      ${rows.join("")}
-    </div>
+  // Only the grid is replaced. The comparison panel is a sibling of
+  // .details-panel precisely so this never destroys ids the app still holds.
+  const grid = $("#comparison-grid");
+  if (!grid) return;
+  grid.innerHTML = `
+    <div class="comparison-label comparison-col-header"></div>
+    <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runA.display_name || runA.id)}</strong></div>
+    <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runB.display_name || runB.id)}</strong></div>
+    ${rows.join("")}
   `;
-  const exitBtn = $("#exit-comparison-btn");
-  if (exitBtn) exitBtn.addEventListener("click", exitComparison);
 }
 
 // ============================================================
@@ -4654,9 +4877,15 @@ function updateBulkToolbar() {
   const move = $("#move-selected-runs");
   const clear = $("#clear-selected-runs");
   const deleteButton = $("#delete-selected-runs");
+  const actions = $("#bulk-actions");
+  const hint = $("#bulk-hint");
+  const selectVisible = $("#select-visible-runs");
   const selectedCount = state.selectedRunIds.size;
   const bulkBusy = state.isBulkDeleting || isPending("folder", "bulk");
   if (count) count.textContent = `${selectedCount} selected`;
+  if (actions) actions.hidden = selectedCount === 0;
+  if (hint) hint.hidden = selectedCount > 0;
+  if (selectVisible) selectVisible.disabled = bulkBusy || !state.runs.length;
   if (move) {
     move.disabled = selectedCount === 0 || bulkBusy;
     move.textContent = isPending("folder", "bulk") ? "Moving..." : "Move selected";
@@ -4672,7 +4901,26 @@ function toggleRunSelection(runId, checked) {
   if (!runId) return;
   if (checked) state.selectedRunIds.add(runId);
   else state.selectedRunIds.delete(runId);
+  state.lastSelectedRunId = runId;
   updateBulkToolbar();
+}
+
+// Shift-click applies the clicked checkbox's new state across the visible span
+// between the anchor and the clicked run, matching every other list UI.
+function selectRunRange(anchorRunId, runId, checked) {
+  const visible = visibleRunIds();
+  const from = visible.indexOf(anchorRunId);
+  const to = visible.indexOf(runId);
+  if (from === -1 || to === -1) {
+    toggleRunSelection(runId, checked);
+    return;
+  }
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  for (const id of visible.slice(start, end + 1)) {
+    if (checked) state.selectedRunIds.add(id);
+    else state.selectedRunIds.delete(id);
+  }
+  renderRuns();
 }
 
 function selectVisibleRuns() {
@@ -4741,32 +4989,34 @@ function renderFolderSidebar() {
   for (const folder of state.folders) {
     folderCounts[folder] = state.runs.filter((r) => r.folder === folder).length;
   }
-  const uncatActive = state.activeFolder === "" ? "active" : "";
-  const allActive = state.activeFolder === null ? "active" : "";
+  const folderRow = (key, label, count, extras = "") => {
+    const active = state.activeFolder === (key === "__all__" ? null : key === "__uncategorized__" ? "" : key);
+    return `<div class="folder-item ${active ? "active" : ""}">
+      <button type="button" class="folder-select" data-folder="${escapeHtml(key)}" aria-pressed="${active}">
+        <span class="folder-name">${escapeHtml(label)}</span>
+        <span class="folder-count">${escapeHtml(String(count))}</span>
+      </button>
+      ${extras}
+    </div>`;
+  };
   const folderItems = state.folders
-    .map((f) => {
-      const active = state.activeFolder === f ? "active" : "";
-      return `<div class="folder-item ${active}" data-folder="${escapeHtml(f)}">
-        <span class="folder-name">${escapeHtml(f)}</span>
-        <span class="folder-count">${folderCounts[f] || 0}</span>
-        <button type="button" class="folder-rename-button" data-folder="${escapeHtml(f)}" data-tooltip="Rename folder">Rename</button>
-        <button type="button" class="folder-delete-button" data-folder="${escapeHtml(f)}" data-tooltip="Remove folder">×</button>
-      </div>`;
-    })
+    .map((f) =>
+      folderRow(
+        f,
+        f,
+        folderCounts[f] || 0,
+        `<button type="button" class="folder-rename-button" data-folder="${escapeHtml(f)}" aria-label="Rename folder ${escapeHtml(f)}" data-tooltip="Rename folder">Rename</button>
+         <button type="button" class="folder-delete-button" data-folder="${escapeHtml(f)}" aria-label="Remove folder ${escapeHtml(f)}" data-tooltip="Remove folder">×</button>`
+      )
+    )
     .join("");
   sidebar.innerHTML = `
     <button type="button" id="create-folder-btn" class="folder-create-button" data-tooltip="Create empty folder">
       <span class="folder-create-symbol">+</span>
       <span>New Folder</span>
     </button>
-    <div class="folder-item ${uncatActive}" data-folder="__uncategorized__">
-      <span class="folder-name">Uncategorized</span>
-      <span class="folder-count">${uncategorized}</span>
-    </div>
-    <div class="folder-item ${allActive}" data-folder="__all__">
-      <span class="folder-name">All Runs</span>
-      <span class="folder-count">${total}</span>
-    </div>
+    ${folderRow("__all__", "All Runs", total)}
+    ${folderRow("__uncategorized__", "Uncategorized", uncategorized)}
     ${folderItems}
   `;
   const createButton = sidebar.querySelector("#create-folder-btn");
@@ -4788,12 +5038,13 @@ function renderFolderSidebar() {
       promptRenameFolder(button.dataset.folder).catch(handleActionError);
     });
   });
-  sidebar.querySelectorAll(".folder-item").forEach((item) => {
+  sidebar.querySelectorAll(".folder-select").forEach((item) => {
     item.addEventListener("click", () => {
       const raw = item.dataset.folder;
       if (raw === "__all__") state.activeFolder = null;
       else if (raw === "__uncategorized__") state.activeFolder = "";
       else state.activeFolder = raw;
+      saveHistoryFilters();
       renderFolderSidebar();
       renderRuns();
     });
@@ -4805,15 +5056,23 @@ async function deleteFolder(folderName) {
   if (!folder) return;
   const count = state.runs.filter((run) => run.folder === folder).length;
   const message = count
-    ? `Remove folder "${folder}"? ${count} run${count !== 1 ? "s" : ""} will move to Uncategorized.`
+    ? `Remove folder "${folder}"? ${count} run${count !== 1 ? "s" : ""} will move to Uncategorized. The runs themselves are kept.`
     : `Remove empty folder "${folder}"?`;
-  if (!window.confirm(message)) return;
+  const confirmed = await confirmAction({
+    title: "Remove Folder",
+    body: message,
+    confirmLabel: "Remove Folder",
+  });
+  if (!confirmed) return;
   const data = await api("/api/folders/delete", {
     method: "POST",
     body: JSON.stringify({ folder }),
   });
   state.folders = data.folders || state.folders.filter((item) => item !== folder);
-  if (state.activeFolder === folder) state.activeFolder = "";
+  if (state.activeFolder === folder) {
+    state.activeFolder = null;
+    saveHistoryFilters();
+  }
   await loadRuns();
   await loadActivity();
   setStatus(`Removed folder ${folder}. Moved ${data.moved_count || 0} run${data.moved_count === 1 ? "" : "s"} to Uncategorized.`);
@@ -4835,9 +5094,16 @@ async function renameFolder(oldName, newName) {
 async function promptRenameFolder(folderName) {
   const oldName = String(folderName || "").trim();
   if (!oldName) return;
-  const nextName = window.prompt("Rename folder:", oldName);
-  if (!nextName || !nextName.trim() || nextName.trim() === oldName) return;
-  await renameFolder(oldName, nextName.trim());
+  const nextName = await confirmAction({
+    title: "Rename Folder",
+    body: `Rename "${oldName}". Runs stay in the folder.`,
+    confirmLabel: "Rename",
+    textInput: true,
+    initialValue: oldName,
+    inputLabel: "Folder name",
+  });
+  if (!nextName || nextName === oldName) return;
+  await renameFolder(oldName, nextName);
 }
 
 function renderFolderOptions() {
@@ -4881,9 +5147,16 @@ async function createFolder(folderName) {
 }
 
 async function promptCreateFolder() {
-  const name = window.prompt("New folder name:");
-  if (!name || !name.trim()) return;
-  const folder = await createFolder(name.trim());
+  const name = await confirmAction({
+    title: "New Folder",
+    body: "Folders group runs in History. They do not move anything on disk.",
+    confirmLabel: "Create Folder",
+    textInput: true,
+    placeholder: "e.g. forward-fast-sweep",
+    inputLabel: "Folder name",
+  });
+  if (!name) return;
+  const folder = await createFolder(name);
   const bulkSelect = $("#bulk-folder-select");
   if (bulkSelect) bulkSelect.value = folder;
 }
@@ -5583,15 +5856,17 @@ $("#physics-changed-only").addEventListener("change", (event) => {
 const runSearch = $("#run-search");
 const statusFilterEl = $("#status-filter");
 const sortRunsEl = $("#sort-runs");
-if (runSearch) runSearch.addEventListener("input", () => { state.searchQuery = runSearch.value; renderRuns(); });
-if (statusFilterEl) statusFilterEl.addEventListener("change", () => { state.statusFilter = statusFilterEl.value; renderRuns(); });
-if (sortRunsEl) sortRunsEl.addEventListener("change", () => { state.sortKey = sortRunsEl.value; renderRuns(); });
+if (runSearch) runSearch.addEventListener("input", () => { state.searchQuery = runSearch.value; saveHistoryFilters(); renderRuns(); });
+if (statusFilterEl) statusFilterEl.addEventListener("change", () => { state.statusFilter = statusFilterEl.value; saveHistoryFilters(); renderRuns(); });
+if (sortRunsEl) sortRunsEl.addEventListener("change", () => { state.sortKey = sortRunsEl.value; saveHistoryFilters(); renderRuns(); });
+const clearFiltersBtn = $("#clear-run-filters");
+if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", clearHistoryFilters);
+const exitComparisonBtn = $("#exit-comparison-btn");
+if (exitComparisonBtn) exitComparisonBtn.addEventListener("click", exitComparison);
 
 $("#new-preset-btn").addEventListener("click", () => createNewPreset().catch(handleActionError));
 $("#new-terrain-preset-btn").addEventListener("click", () => createNewTerrainPreset().catch(handleActionError));
 $("#new-physics-preset-btn").addEventListener("click", () => createNewPhysicsPreset().catch(handleActionError));
-const newFolderBtn = $("#new-folder-btn");
-if (newFolderBtn) newFolderBtn.addEventListener("click", () => promptCreateFolder().catch(handleActionError));
 const folderSelect = $("#run-folder-select");
 if (folderSelect) folderSelect.addEventListener("change", () => assignRunToFolder(folderSelect.value).catch(handleActionError));
 const selectVisibleBtn = $("#select-visible-runs");
@@ -5676,8 +5951,76 @@ document.querySelectorAll("#convergence-presets .segment-button").forEach((btn) 
   });
 });
 
+function isTypingTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+// Move the History selection by one visible run. Wraps at neither end: running
+// off the list should feel like a wall, not a jump back to the other side.
+function stepRunSelection(delta) {
+  const visible = visibleRunIds();
+  if (!visible.length) return;
+  const current = state.selectedRun ? visible.indexOf(state.selectedRun.id) : -1;
+  const next = current === -1
+    ? (delta > 0 ? 0 : visible.length - 1)
+    : Math.min(visible.length - 1, Math.max(0, current + delta));
+  const runId = visible[next];
+  if (!runId || (state.selectedRun && runId === state.selectedRun.id)) return;
+  selectRun(runId).catch(handleActionError);
+  requestAnimationFrame(() => {
+    document
+      .querySelector(`.run-card[data-run-id="${CSS.escape(runId)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  });
+}
+
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.openMenuRunId) closeRunMenu({ restoreFocus: true });
+  if (event.key === "Escape") {
+    if (state.openMenuRunId) {
+      closeRunMenu({ restoreFocus: true });
+      return;
+    }
+    if (isTypingTarget(event.target)) return;
+    if (state.comparisonMode) {
+      exitComparison();
+      return;
+    }
+  }
+  if (state.currentView !== "history") return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const search = $("#run-search");
+  if (event.key === "Escape" && event.target === search && search.value) {
+    search.value = "";
+    state.searchQuery = "";
+    saveHistoryFilters();
+    renderRuns();
+    return;
+  }
+  if (isTypingTarget(event.target)) return;
+  if (event.key === "/") {
+    event.preventDefault();
+    search?.focus();
+    search?.select();
+    return;
+  }
+  if (event.key === "j" || event.key === "ArrowDown") {
+    event.preventDefault();
+    stepRunSelection(1);
+    return;
+  }
+  if (event.key === "k" || event.key === "ArrowUp") {
+    event.preventDefault();
+    stepRunSelection(-1);
+  }
+});
+
+// Notes and a renamed run are the only History edits with no autosave.
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedHistoryEdits()) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 document.addEventListener("click", (event) => {
@@ -5691,6 +6034,10 @@ window.addEventListener("hashchange", () => {
 });
 
 loadNotificationState();
+loadHistoryFilters();
+if (runSearch) runSearch.value = state.searchQuery;
+if (statusFilterEl) statusFilterEl.value = state.statusFilter;
+if (sortRunsEl) sortRunsEl.value = state.sortKey;
 renderNotificationBadges();
 renderRunDetails();
 updateBulkToolbar();
