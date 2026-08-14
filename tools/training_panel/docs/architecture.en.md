@@ -19,6 +19,13 @@ The local mother is a Python `ThreadingHTTPServer` with static assets and APIs b
 
 `TrainingParams` builds the established `train.py` interface and passes `--panel_overrides`. The process registry serializes Isaac/GPU work, records commands and logs, reconciles RSL-RL artifacts, and associates panel request IDs with discovered run directories. History writes are guarded by an `RLock` and atomic replacement.
 
+<a id="google-drive-contract"></a>
+## Google Drive export contract
+
+`google_drive.py` owns the host-side rclone readiness check and background video export. The fixed `redrhex-drive:` remote writes to `RedRHex Videos/<sanitized-run-id>/<sanitized-video-name>`. The server resolves the latest or requested checkpoint video and rejects missing files, non-MP4 sources, run directories outside the RSL-RL root, and videos outside the selected run directory before rclone starts.
+
+Each run persists `google_drive_video_exports`, keyed by the run-relative video path. An entry records source size and nanosecond mtime, checkpoint iteration, lifecycle state, destination, Drive file ID, private view URL, timestamps, and a bounded redacted error. Matching completed entries are reused, concurrent clicks for one source coalesce, changed or failed sources start a new attempt, and startup converts stale uploading entries to interrupted. Export does not acquire the GPU lock. Rclone `copyto` receives an argument vector rather than a shell command; `lsjson --stat` supplies the Drive ID. The exporter never calls `rclone link` or changes sharing permissions.
+
 <a id="physics-profile-contract"></a>
 ## Physics profile contract
 
@@ -48,9 +55,9 @@ Mother has no built-in authentication and can launch or delete local work; local
 <a id="version"></a>
 ## Version contract
 
-The local Mother package and UI are release `3.6.3-history-clarity`. The independently deployed remote Child assets, Child release metadata, heartbeat schema, and worker synchronization contract remain at `3.4.10-sync-health`. A local UI release does not silently change the remote protocol. Update every surface belonging to the contract being released, retain compatibility evidence, and add a bilingual release entry.
+The local Mother package and UI are release `3.6.4-drive-export`. The independently deployed remote Child assets, Child release metadata, heartbeat schema, and worker synchronization contract remain at `3.4.10-sync-health`. A local UI release does not silently change the remote protocol. Update every surface belonging to the contract being released, retain compatibility evidence, and add a bilingual release entry.
 
-V3.5 adds progress parsing, TensorBoard summaries, divergence monitoring, Git provenance, and recorded random seeds. V3.6 adds URL-backed navigation, action-local error reporting, first-load skeletons, keyboard-focus tooltips, run-card action menus, and backend-freshness state. V3.6.1 quarantines Explicit policy training, makes Native the provisional new-run default, and preserves backend identity for stamped checkpoints. V3.6.2 makes the Train form route-aware, restores reliable hidden-state rendering, and omits irrelevant stage fields from browser requests. V3.6.3 gives run comparison its own panel, confirms destructive History actions before showing them as in progress, persists run-list filters, and adds keyboard navigation to the run list. Tests cover command construction, history, progress/convergence/provenance, queue/process behavior, remote roles/sync, notifications, contract parity, deployment, and UI assets.
+V3.5 adds progress parsing, TensorBoard summaries, divergence monitoring, Git provenance, and recorded random seeds. V3.6 adds URL-backed navigation, action-local error reporting, first-load skeletons, keyboard-focus tooltips, run-card action menus, and backend-freshness state. V3.6.1 quarantines Explicit policy training, makes Native the provisional new-run default, and preserves backend identity for stamped checkpoints. V3.6.2 makes the Train form route-aware, restores reliable hidden-state rendering, and omits irrelevant stage fields from browser requests. V3.6.3 gives run comparison its own panel, confirms destructive History actions before showing them as in progress, persists run-list filters, and adds keyboard navigation to the run list. V3.6.4 adds private, checkpoint-aware Google Drive video export through a host-configured rclone remote without changing the remote Child protocol. Tests cover command construction, history, progress/convergence/provenance, queue/process behavior, remote roles/sync, notifications, contract parity, deployment, Drive export, and UI assets.
 
 <a id="pages"></a>
 ## Pages artifact

@@ -38,6 +38,18 @@ Schema validation does not prove a physical value. Baseline inherits repository 
 
 Each non-empty candidate becomes a run-scoped `CalibrationProfileV1`. Play, video, and ONNX export reuse that run's saved profile. Physics presets affect simulation experiments; they do not authorize hardware operation.
 
+<a id="google-drive-export"></a>
+## Export recorded video to Google Drive
+
+Install `rclone` on the training PC and run `rclone config`. Create a Google Drive remote named exactly `redrhex-drive`; for a personal My Drive, prefer the `drive.file` scope so the remote is limited to files it creates. Verify the host-side connection before restarting Mother:
+
+```bash
+rclone listremotes
+rclone lsd redrhex-drive:
+```
+
+In History, select a run and choose the latest recording or an older checkpoint video, then click **Export to Drive**. The background upload targets `RedRHex Videos/<run-id>/<video-filename>`. An unchanged completed export is reused, failed or interrupted work can be retried, and **Open in Drive** opens the connected account's private file without changing sharing permissions. Rclone credentials remain on the training PC and are never returned by the Panel API.
+
 <a id="remote"></a>
 ## Use remote team mode
 

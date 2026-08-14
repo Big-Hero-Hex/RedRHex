@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.6.3 操作指南
+title: Training Panel 3.6.4 操作指南
 lang: zh-TW
 audience: operator
 type: how-to
@@ -88,6 +88,10 @@ Launch Command 是面板要求的命令；Output 是捕捉到的 process stream�
 ## 匯出與錄影
 
 Export ONNX 會從選定 training checkpoint 產生 `exported/policy.pt` 與 `exported/policy.onnx`。預設高品質 video preset 為 1920×1080、1,200 steps 與 30 FPS。Standard run 會使用已保存的 terrain override；Sensor V2 會使用固定 reward/terrain contract 與已保存 runner。兩種 route 都會重用 run 已保存的 physics profile。Video 也會傳入 `--initial_command forward`。
+
+若要使用 one-touch Google Drive 匯出，請在 training PC 安裝 `rclone`，並透過 `rclone config` 建立名稱必須完全是 `redrhex-drive` 的 Google Drive remote。個人 My Drive 建議使用 `drive.file` scope。確認 `rclone listremotes` 包含 `redrhex-drive:`，且 `rclone lsd redrhex-drive:` 成功，再重新啟動 Mother，讓 `/api/system` 將 integration 回報為已設定。
+
+在 History 顯示最新或 checkpoint 影片，然後按 **Export to Drive**。上傳會在背景繼續，不占用 Isaac/GPU lock，並寫入 `RedRHex Videos/<run-id>/<video-filename>`。相同且未變更的來源不會重複上傳。**Open in Drive** 使用回傳的 Drive file ID 開啟私人檔案，不會建立 anyone-with-link 權限。失敗或因 restart 中斷的匯出會保留錯誤並可重試。
 
 <a id="next"></a>
 ## 下一步

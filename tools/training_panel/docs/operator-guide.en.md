@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.6.3 Operator Guide
+title: Training Panel 3.6.4 Operator Guide
 lang: en
 audience: operator
 type: how-to
@@ -88,6 +88,10 @@ Launch Command is the command requested by the panel; Output is the captured pro
 ## Export and record
 
 Export ONNX produces `exported/policy.pt` and `exported/policy.onnx` from the selected training checkpoint. The default high-quality video preset is 1920×1080, 1,200 steps, and 30 FPS. Standard runs use their saved terrain override when available; Sensor V2 uses its fixed reward/terrain contract and saved runner. Both routes reuse the run's saved physics profile. Video also passes `--initial_command forward`.
+
+For one-touch Google Drive export, install `rclone` on the training PC and use `rclone config` to create a Google Drive remote named exactly `redrhex-drive`. Prefer the `drive.file` scope for a personal My Drive. Confirm `rclone listremotes` includes `redrhex-drive:` and `rclone lsd redrhex-drive:` succeeds, then restart Mother so `/api/system` reports the integration as configured.
+
+In History, display the latest or checkpoint video and click **Export to Drive**. Upload continues in the background without taking the Isaac/GPU lock and writes `RedRHex Videos/<run-id>/<video-filename>`. The same unchanged source is not uploaded twice. **Open in Drive** uses the returned Drive file ID to open the private file; it does not create an anyone-with-link permission. A failed or restart-interrupted export retains its error and becomes retryable.
 
 <a id="next"></a>
 ## Next steps

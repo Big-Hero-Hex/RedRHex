@@ -363,6 +363,124 @@ def test_history_checkpoint_evolution_is_manual_and_records_selected_save_point(
     expect(page.locator("#record-video")).to_have_text("Record Latest")
 
 
+def test_history_drive_export_explains_missing_training_pc_setup(panel, page):
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "google_drive_export": {
+                        "available": False,
+                        "configured": False,
+                        "remote": "redrhex-drive:",
+                        "folder": "RedRHex Videos",
+                        "remediation": "Install rclone and create the redrhex-drive remote.",
+                    }
+                }
+            ),
+        ),
+    )
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+
+    expect(page.locator("#export-video-drive")).to_be_visible()
+    expect(page.locator("#export-video-drive")).to_be_disabled()
+    expect(page.locator("#drive-export-hint")).to_contain_text("Install rclone")
+
+
+def test_history_drive_export_tracks_checkpoint_background_success_and_retry(panel, page):
+    requests = []
+
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "google_drive_export": {
+                        "available": True,
+                        "configured": True,
+                        "remote": "redrhex-drive:",
+                        "folder": "RedRHex Videos",
+                        "remediation": "",
+                    }
+                }
+            ),
+        ),
+    )
+
+    def export_video(route, request):
+        payload = json.loads(request.post_data or "{}")
+        requests.append(payload)
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "run_id": "panel_run_beta",
+                    "checkpoint_iteration": payload.get("checkpoint_iteration"),
+                    "started": True,
+                    "deduplicated": False,
+                    "export": {
+                        "status": "uploading",
+                        "remote_path": "redrhex-drive:RedRHex Videos/panel_run_beta/video.mp4",
+                    },
+                }
+            ),
+        )
+
+    page.route("**/api/runs/panel_run_beta/export-video-to-drive", export_video)
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    page.locator("#checkpoint-evolution summary").click()
+    page.locator('[data-checkpoint-iteration="0"]').click()
+
+    expect(page.locator("#export-video-drive")).to_be_enabled()
+    page.locator("#export-video-drive").click()
+    expect(page.locator("#export-video-drive")).to_have_text("Exporting…")
+    expect(page.locator("#export-video-drive")).to_be_disabled()
+    expect(page.locator("#drive-export-hint")).to_contain_text("Uploading in the background")
+    assert requests == [{"checkpoint_iteration": 0}]
+
+    page.evaluate(
+        """() => {
+          const run = state.selectedRun;
+          const key = displayedVideoRelativePath(run);
+          run.google_drive_video_exports[key] = {
+            status: 'completed',
+            web_view_url: 'https://drive.google.com/file/d/private-file-id/view',
+          };
+          renderVideoPanel(run);
+        }"""
+    )
+    expect(page.locator("#export-video-drive")).to_have_text("Export to Drive")
+    expect(page.locator("#export-video-drive")).to_be_enabled()
+    expect(page.locator("#open-video-drive")).to_be_visible()
+    expect(page.locator("#open-video-drive")).to_have_attribute(
+        "href", "https://drive.google.com/file/d/private-file-id/view"
+    )
+    expect(page.locator("#open-video-drive")).to_have_attribute("rel", "noopener noreferrer")
+
+    page.locator("#show-latest-video").click()
+    page.locator("#export-video-drive").click()
+    assert requests == [{"checkpoint_iteration": 0}, {}]
+    expect(page.locator("#export-video-drive")).to_have_text("Exporting…")
+    page.evaluate(
+        """() => {
+          const run = state.selectedRun;
+          const key = displayedVideoRelativePath(run);
+          run.google_drive_video_exports[key] = { status: 'failed', error: 'Drive quota exceeded.' };
+          renderVideoPanel(run);
+        }"""
+    )
+    expect(page.locator("#export-video-drive")).to_have_text("Retry Drive Export")
+    expect(page.locator("#export-video-drive")).to_be_enabled()
+    expect(page.locator("#drive-export-hint")).to_contain_text("Drive quota exceeded")
+
+
 def test_history_shows_evolution_entry_for_a_single_checkpoint(panel, page):
     open_history(page, panel["url"])
     page.locator(".run-card", has_text="run_alpha").click()
@@ -539,7 +657,9 @@ def test_history_mobile_layout_has_no_horizontal_overflow(panel, page):
 
     expect(page.locator("#folder-sidebar")).to_be_visible()
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
+    page.locator(".run-card", has_text="Beta Foldered").click()
     expect(page.locator("#details-title")).to_be_visible()
+    expect(page.locator("#export-video-drive")).to_be_visible()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 1
 

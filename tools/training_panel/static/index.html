@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.6.3-history-clarity-evolution-polish" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.6.4-drive-export" />
   </head>
   <body>
     <aside class="sidebar">
@@ -27,7 +27,7 @@
         <button class="nav-button" data-view="access">Control Center</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.6.3 History Clarity</span>
+        <span class="release-version">Version 3.6.4 Drive Export</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -40,7 +40,7 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.6.3 History Clarity</span>
+          <span class="release-chip">Training Panel V3.6.4 Drive Export</span>
           <span id="freshness" class="freshness" data-state="stale"
             data-tooltip="How recently the panel last heard from the training PC">
             <span class="freshness-dot" aria-hidden="true"></span>
@@ -469,8 +469,11 @@
                 <button type="button" id="stop-recording" class="ghost-button small-button" hidden data-tooltip="Stop the video recording process">Stop Recording</button>
                 <button type="button" id="open-video-folder" class="ghost-button small-button" hidden data-tooltip="Open the folder containing recorded videos (local only)">Open Folder</button>
                 <button type="button" id="copy-video-path" class="ghost-button small-button" hidden data-tooltip="Copy the video file path to clipboard">Copy Path</button>
+                <button type="button" id="export-video-drive" class="ghost-button small-button" hidden aria-describedby="drive-export-hint">Export to Drive</button>
+                <a id="open-video-drive" class="ghost-button small-button" target="_blank" rel="noopener noreferrer" hidden>Open in Drive</a>
               </div>
               <p id="record-video-hint" class="video-record-hint" role="status" hidden></p>
+              <p id="drive-export-hint" class="video-record-hint" role="status" hidden></p>
               <details id="checkpoint-evolution" class="checkpoint-evolution" hidden>
                 <summary>
                   <span>
@@ -891,8 +894,8 @@
 
     <div id="panel-status" class="panel-status" role="status" aria-live="polite" aria-atomic="false"></div>
 
-    <script src="/static/status_catalog.js?v=3.6.3-history-clarity"></script>
-    <script src="/static/api_adapters.js?v=3.6.3-history-clarity"></script>
-    <script src="/static/app.js?v=3.6.3-history-clarity-evolution-polish"></script>
+    <script src="/static/status_catalog.js?v=3.6.4-drive-export"></script>
+    <script src="/static/api_adapters.js?v=3.6.4-drive-export"></script>
+    <script src="/static/app.js?v=3.6.4-drive-export"></script>
   </body>
 </html>

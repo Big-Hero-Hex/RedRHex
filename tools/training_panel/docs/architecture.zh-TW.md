@@ -19,6 +19,13 @@ last_reviewed: 2026-08-14
 
 `TrainingParams` 建立既有 `train.py` 介面，並傳入 `--panel_overrides`。Process registry 序列化 Isaac/GPU 工作、記錄 command/log、reconcile RSL-RL artifact，並把 panel request ID 與探索到的 run directory 關聯。History write 由 `RLock` 與 atomic replacement 保護。
 
+<a id="google-drive-contract"></a>
+## Google Drive 匯出 contract
+
+`google_drive.py` 負責 host-side rclone readiness check 與背景 video export。固定的 `redrhex-drive:` remote 會寫入 `RedRHex Videos/<sanitized-run-id>/<sanitized-video-name>`。Server 先解析最新或指定 checkpoint 的影片；若檔案不存在、來源不是 MP4、run directory 位於 RSL-RL root 之外，或影片位於所選 run directory 之外，都會在 rclone 啟動前拒絕。
+
+每個 run 會保存 `google_drive_video_exports`，以 run-relative video path 為 key。Entry 記錄來源 size 與 nanosecond mtime、checkpoint iteration、lifecycle state、destination、Drive file ID、private view URL、timestamp，以及長度受限且已遮蔽敏感資訊的錯誤。相符且已完成的 entry 會直接重用；同一來源的 concurrent click 會合併；變更或失敗的來源會開始新嘗試；startup 會把 stale uploading entry 轉成 interrupted。Export 不取得 GPU lock。Rclone `copyto` 接收 argument vector，不使用 shell command；`lsjson --stat` 提供 Drive ID。Exporter 絕不呼叫 `rclone link`，也不改變分享權限。
+
 <a id="physics-profile-contract"></a>
 ## Physics profile contract
 
@@ -48,9 +55,9 @@ Mother 沒有內建 authentication，且可啟動或刪除本機工作；預設�
 <a id="version"></a>
 ## 版本 contract
 
-本機 Mother package 與 UI 的 release 是 `3.6.3-history-clarity`。獨立部署的 remote Child asset、Child release metadata、heartbeat schema 與 worker synchronization contract 仍為 `3.4.10-sync-health`。本機 UI release 不會暗中改變 remote protocol。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
+本機 Mother package 與 UI 的 release 是 `3.6.4-drive-export`。獨立部署的 remote Child asset、Child release metadata、heartbeat schema 與 worker synchronization contract 仍為 `3.4.10-sync-health`。本機 UI release 不會暗中改變 remote protocol。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
 
-V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。V3.6.1 quarantine Explicit policy training、把 Native 設為新 run 的暫定預設，並保留已 stamp checkpoint 的 backend identity。V3.6.2 讓 Train form 能依 route 顯示欄位、恢復可靠的 hidden-state rendering，並讓 browser request 省略無關 stage fields。V3.6.3 讓 run comparison 使用獨立 panel、在顯示為進行中之前先確認 History 的破壞性操作、保留 run-list filter，並為 run list 加入鍵盤操作。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment 與 UI asset。
+V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。V3.6.1 quarantine Explicit policy training、把 Native 設為新 run 的暫定預設，並保留已 stamp checkpoint 的 backend identity。V3.6.2 讓 Train form 能依 route 顯示欄位、恢復可靠的 hidden-state rendering，並讓 browser request 省略無關 stage fields。V3.6.3 讓 run comparison 使用獨立 panel、在顯示為進行中之前先確認 History 的破壞性操作、保留 run-list filter，並為 run list 加入鍵盤操作。V3.6.4 透過 host-configured rclone remote 新增 private、checkpoint-aware Google Drive video export，不改變 remote Child protocol。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment、Drive export 與 UI asset。
 
 <a id="pages"></a>
 ## Pages artifact

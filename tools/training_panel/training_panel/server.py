@@ -25,6 +25,7 @@ from .commands import (
 )
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
+from .google_drive import GoogleDriveExporter, GoogleDrivePathError, GoogleDriveUnavailableError
 from .history import HistoryStore, checkpoint_inventory
 from .physics import PhysicsPresetStore, physics_catalog
 from .presets import PresetStore
@@ -56,6 +57,12 @@ def _is_within(path: Path, root: Path) -> bool:
     return resolved == resolved_root or resolved_root in resolved.parents
 
 
+class RunVideoError(ValueError):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
 def _sync_active_terrain_override_file(paths: PanelPaths, values: dict) -> None:
     """Keep train.py's global terrain override file aligned with the active preset."""
     override_file = paths.terrain_override_file
@@ -70,6 +77,7 @@ class PanelState:
     def __init__(self, paths: PanelPaths):
         self.paths = paths
         self.history = HistoryStore(paths)
+        self.google_drive = GoogleDriveExporter(paths, self.history)
         self.processes = ProcessRegistry(paths, self.history, cuda_preflight=True)
         self.presets = PresetStore(_PRESET_FILE)
         self.terrain_presets = TerrainPresetStore(_TERRAIN_PRESET_FILE)
@@ -132,6 +140,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     "default_task": DEFAULT_TRAINING_TASK,
                     "version": __version__,
                     "cuda_health": self.state.processes.cuda_health(),
+                    "google_drive_export": self.state.google_drive.status(),
                     "local_url_hint": "http://127.0.0.1:8080",
                     "lan_hint": "Run with --host 0.0.0.0 and open http://<machine-ip>:8080",
                     "ssh_tunnel_hint": "ssh -L 8080:127.0.0.1:8080 user@host",
@@ -641,6 +650,41 @@ class PanelHandler(BaseHTTPRequestHandler):
                 run_id = route_id(parsed.path)
                 data = self._assign_folders({"run_ids": [run_id], "folder": payload.get("folder")})
                 return self._json({"folder": data["folder"], "run_id": run_id, "folders": data["folders"]})
+            if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export-video-to-drive"):
+                run_id = route_id(parsed.path)
+                try:
+                    _run, video, iteration = self._resolve_run_video(
+                        run_id,
+                        payload.get("checkpoint_iteration"),
+                    )
+                    export, started, deduplicated = self.state.google_drive.start_export(
+                        run_id,
+                        video,
+                        checkpoint_iteration=iteration,
+                    )
+                except RunVideoError as exc:
+                    return self._json({"error": str(exc)}, status=exc.status)
+                except GoogleDriveUnavailableError as exc:
+                    return self._json({"error": str(exc)}, status=503)
+                except GoogleDrivePathError as exc:
+                    status = 403 if "outside" in str(exc).lower() else 404
+                    return self._json({"error": str(exc)}, status=status)
+                result = {
+                    "run_id": run_id,
+                    "checkpoint_iteration": iteration,
+                    "export": export,
+                    "started": started,
+                    "deduplicated": deduplicated,
+                }
+                if started:
+                    self._record_activity(
+                        "video_drive_export_start",
+                        summary=f"Started Google Drive video export for {run_id}",
+                        subject_id=run_id,
+                        payload=result,
+                    )
+                status = 202 if started or export.get("status") in {"queued", "uploading"} else 200
+                return self._json(result, status=status)
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/record-video"):
                 run_id = route_id(parsed.path)
                 run = self.state.history.get_run(run_id)
@@ -1067,37 +1111,53 @@ class PanelHandler(BaseHTTPRequestHandler):
                 series[tag] = [[step, value] for step, value in downsample(scalars, points_limit)]
         return self._json({"tags": series, "log_dir": str(log_dir)})
 
-    def _send_run_video(self, run_id: str, query: dict | None = None) -> None:
+    def _resolve_run_video(
+        self,
+        run_id: str,
+        requested_iteration: object = None,
+    ) -> tuple[dict, Path, int | None]:
         run = self.state.history.get_run(run_id)
+        if not run:
+            raise RunVideoError("Run not found", 404)
         video_path = run.get("latest_video") if run else None
-        requested_iteration = (query or {}).get("checkpoint_iteration", [""])[0]
+        iteration = None
         if requested_iteration not in (None, ""):
             try:
                 iteration = int(requested_iteration)
             except (TypeError, ValueError):
-                return self._json({"error": "checkpoint_iteration must be an integer"}, status=400)
+                raise RunVideoError("checkpoint_iteration must be an integer", 400) from None
+            if iteration < 0:
+                raise RunVideoError("checkpoint_iteration must be zero or greater", 400)
             checkpoint = next(
                 (item for item in (run.get("checkpoint_history") or []) if item.get("iteration") == iteration),
                 None,
-            ) if run else None
+            )
             if checkpoint is None:
-                return self._json({"error": f"Checkpoint iteration {iteration} was not found for run"}, status=404)
+                raise RunVideoError(f"Checkpoint iteration {iteration} was not found for run", 404)
             video_path = checkpoint.get("video")
             if not video_path:
-                return self._json({"error": f"No recorded video found for checkpoint iteration {iteration}"}, status=404)
+                raise RunVideoError(f"No recorded video found for checkpoint iteration {iteration}", 404)
         video = Path(str(video_path)) if video_path else None
         if not video or not video.exists() or not video.is_file():
-            return self._json({"error": "No recorded video found for run"}, status=404)
+            raise RunVideoError("No recorded video found for run", 404)
         log_dir = Path(str(run.get("log_dir"))) if run and run.get("log_dir") else None
         if not log_dir or not log_dir.exists() or not log_dir.is_dir():
-            return self._json({"error": "No log directory found for run"}, status=404)
+            raise RunVideoError("No log directory found for run", 404)
         resolved_video = video.resolve()
         resolved_log_dir = log_dir.resolve()
         resolved_root = (self.state.paths.repo_root / "logs" / "rsl_rl").resolve()
         if not _is_within(resolved_log_dir, resolved_root):
-            return self._json({"error": "Run log directory is outside the RSL-RL log root"}, status=403)
+            raise RunVideoError("Run log directory is outside the RSL-RL log root", 403)
         if not _is_within(resolved_video, resolved_log_dir):
-            return self._json({"error": "Video path is outside the selected run log directory"}, status=403)
+            raise RunVideoError("Video path is outside the selected run log directory", 403)
+        return run, resolved_video, iteration
+
+    def _send_run_video(self, run_id: str, query: dict | None = None) -> None:
+        requested_iteration = (query or {}).get("checkpoint_iteration", [""])[0]
+        try:
+            _run, resolved_video, _iteration = self._resolve_run_video(run_id, requested_iteration)
+        except RunVideoError as exc:
+            return self._json({"error": str(exc)}, status=exc.status)
         self._send_file_response(resolved_video, "video/mp4")
 
     def _send_run_mujoco_video(self, run_id: str) -> None:

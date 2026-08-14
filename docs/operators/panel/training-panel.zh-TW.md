@@ -38,6 +38,18 @@ Schema validation 不代表 physical value 已證實。Baseline 會繼承 reposi
 
 每個 non-empty candidate 都會成為 run-scoped `CalibrationProfileV1`。Play、video 與 ONNX export 會重用該 run 已保存的 profile。Physics preset 只影響 simulation experiment，不會授權 hardware operation。
 
+<a id="google-drive-export"></a>
+## 將錄製影片匯出到 Google Drive
+
+在 training PC 安裝 `rclone`，然後執行 `rclone config`。建立名稱必須完全是 `redrhex-drive` 的 Google Drive remote；若使用個人 My Drive，建議選擇 `drive.file` scope，讓 remote 只存取由它建立的檔案。重新啟動 Mother 前，先在 host 驗證連線：
+
+```bash
+rclone listremotes
+rclone lsd redrhex-drive:
+```
+
+在 History 選擇 run，再選擇最新錄影或較舊 checkpoint 的影片，然後按 **Export to Drive**。背景上傳目的地為 `RedRHex Videos/<run-id>/<video-filename>`。未變更且已完成的匯出會直接重用；失敗或中斷的工作可重試；**Open in Drive** 會開啟已連線帳號中的私人檔案，不會改變分享權限。Rclone credential 只留在 training PC，Panel API 不會回傳。
+
 <a id="remote"></a>
 ## 使用遠端團隊模式
 

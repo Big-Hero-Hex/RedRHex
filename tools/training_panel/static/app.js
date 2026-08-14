@@ -19,6 +19,7 @@ const state = {
   activeProcessesByRun: {},
   activeProcessByKind: {},
   cudaHealth: null,
+  googleDriveExport: null,
   debugTarget: null,
   lastDebug: null,
   debugTimer: null,
@@ -751,8 +752,10 @@ function clearTrainingRunName(form = $("#train-form")) {
 async function loadSystem() {
   const system = await api("/api/system");
   state.cudaHealth = system.cuda_health || null;
+  state.googleDriveExport = system.google_drive_export || null;
   $("#system-info").textContent = JSON.stringify(system, null, 2);
   renderCudaHealthNotice();
+  if (state.selectedRun) renderGoogleDriveVideoExport(state.selectedRun);
 }
 
 function cudaHealthStatusHtml(health, prefix = "CUDA training is blocked.") {
@@ -1747,6 +1750,88 @@ function displayedVideoPath(run) {
   return checkpoint ? checkpoint.video || "" : run?.latest_video || "";
 }
 
+function displayedVideoRelativePath(run) {
+  const videoPath = String(displayedVideoPath(run) || "").replaceAll("\\", "/");
+  const logDir = String(run?.log_dir || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!videoPath || !logDir || !videoPath.startsWith(`${logDir}/`)) return "";
+  return videoPath.slice(logDir.length + 1);
+}
+
+function displayedVideoDriveExport(run) {
+  const key = displayedVideoRelativePath(run);
+  if (!key) return null;
+  const exports = run?.google_drive_video_exports;
+  return exports && typeof exports === "object" ? exports[key] || null : null;
+}
+
+function setDisplayedVideoDriveExport(run, record) {
+  const key = displayedVideoRelativePath(run);
+  if (!run || !key || !record) return;
+  run.google_drive_video_exports = {
+    ...(run.google_drive_video_exports || {}),
+    [key]: record,
+  };
+}
+
+function isPrivateGoogleDriveUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" && url.hostname === "drive.google.com";
+  } catch {
+    return false;
+  }
+}
+
+function renderGoogleDriveVideoExport(run) {
+  const exportButton = $("#export-video-drive");
+  const openButton = $("#open-video-drive");
+  const hint = $("#drive-export-hint");
+  if (!exportButton || !openButton || !hint) return;
+  const videoPath = displayedVideoPath(run);
+  exportButton.hidden = !videoPath;
+  openButton.hidden = true;
+  openButton.removeAttribute("href");
+  hint.hidden = true;
+  hint.textContent = "";
+  if (!videoPath) return;
+
+  const readiness = state.googleDriveExport;
+  const exportRecord = displayedVideoDriveExport(run);
+  if (!readiness?.configured) {
+    exportButton.disabled = true;
+    exportButton.textContent = readiness ? "Export to Drive" : "Checking Drive…";
+    hint.textContent = readiness?.remediation || "Checking Google Drive setup on the training PC.";
+    hint.hidden = false;
+    return;
+  }
+
+  const status = String(exportRecord?.status || "");
+  if (["queued", "uploading"].includes(status)) {
+    exportButton.disabled = true;
+    exportButton.textContent = "Exporting…";
+    hint.textContent = `Uploading in the background to ${exportRecord.remote_path || readiness.folder}.`;
+    hint.hidden = false;
+    return;
+  }
+  if (status === "completed") {
+    exportButton.disabled = false;
+    exportButton.textContent = "Export to Drive";
+    if (isPrivateGoogleDriveUrl(exportRecord.web_view_url)) {
+      openButton.hidden = false;
+      openButton.href = exportRecord.web_view_url;
+    }
+    return;
+  }
+  exportButton.disabled = false;
+  exportButton.textContent = ["failed", "interrupted"].includes(status)
+    ? "Retry Drive Export"
+    : "Export to Drive";
+  if (["failed", "interrupted"].includes(status) && exportRecord.error) {
+    hint.textContent = exportRecord.error;
+    hint.hidden = false;
+  }
+}
+
 function videoUrl(run, checkpoint = null) {
   const params = new URLSearchParams({ v: checkpoint?.video || run.latest_video || run.updated_at || "" });
   if (checkpoint) params.set("checkpoint_iteration", String(checkpoint.iteration));
@@ -1850,6 +1935,7 @@ function renderVideoPanel(run) {
   if (!run || (!run.latest_video && !run.video_status && !hasCheckpoint)) {
     panel.hidden = true;
     renderCheckpointEvolution(null);
+    renderGoogleDriveVideoExport(null);
     clearVideoPlayer();
     message.textContent = "";
     if (recordHint) {
@@ -1864,6 +1950,7 @@ function renderVideoPanel(run) {
   const videoProcessId = activeVideoProcessId(run);
   const checkpoint = selectedCheckpoint(run);
   const videoPath = displayedVideoPath(run);
+  renderGoogleDriveVideoExport(run);
   recordButton.disabled = !hasCheckpoint || Boolean(gpuProcess);
   recordButton.textContent = checkpoint ? `Record Iter ${checkpoint.iteration}` : "Record Latest";
   recordButton.removeAttribute("data-tooltip");
@@ -2595,7 +2682,10 @@ function hasActiveRun() {
     state.runs.some((run) =>
       ["queued", "running", "stopping"].includes(run.status) ||
       run.video_status === "recording" ||
-      ["running", "stopping"].includes(run.mujoco_playback_status)
+      ["running", "stopping"].includes(run.mujoco_playback_status) ||
+      Object.values(run.google_drive_video_exports || {}).some((item) =>
+        ["queued", "uploading"].includes(item?.status)
+      )
     )
   );
 }
@@ -2874,6 +2964,40 @@ async function copyVideoPath() {
   }
   await copyText(video);
   setStatus(`Video path copied: ${video}`);
+}
+
+async function exportVideoToDrive() {
+  const run = state.selectedRun;
+  const video = displayedVideoPath(run);
+  if (!run || !video) {
+    setStatus("No recorded video is available to export.");
+    return;
+  }
+  if (!state.googleDriveExport?.configured) {
+    setStatusTone(
+      state.googleDriveExport?.remediation || "Google Drive export is not configured on the training PC.",
+      "error",
+    );
+    return;
+  }
+  const data = await api(`/api/runs/${encodeURIComponent(run.id)}/export-video-to-drive`, {
+    method: "POST",
+    body: JSON.stringify(
+      state.selectedCheckpointIteration === null
+        ? {}
+        : { checkpoint_iteration: state.selectedCheckpointIteration },
+    ),
+  });
+  setDisplayedVideoDriveExport(run, data.export);
+  renderVideoPanel(run);
+  if (data.deduplicated) {
+    setStatus("This unchanged video is already exported to Google Drive.");
+  } else if (data.started) {
+    setStatus("Google Drive export started in the background.");
+  } else {
+    setStatus("Google Drive export is already running for this video.");
+  }
+  scheduleRunsRefresh();
 }
 
 async function openOnnxFolder() {
@@ -5825,6 +5949,7 @@ $("#record-video").addEventListener("click", () => recordVideo().catch(handleAct
 $("#stop-recording").addEventListener("click", () => stopVideoRecording().catch(handleActionError));
 $("#open-video-folder").addEventListener("click", () => openVideoFolder().catch(handleActionError));
 $("#copy-video-path").addEventListener("click", () => copyVideoPath().catch(handleActionError));
+$("#export-video-drive").addEventListener("click", () => exportVideoToDrive().catch(handleActionError));
 $("#show-latest-video").addEventListener("click", () => selectCheckpointForVideo(null));
 $("#checkpoint-timeline").addEventListener("click", (event) => {
   const point = event.target.closest("[data-checkpoint-iteration]");
