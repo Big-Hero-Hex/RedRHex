@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.6.2 Operator Guide
+title: Training Panel 3.6.3 Operator Guide
 lang: en
 audience: operator
 type: how-to
@@ -63,7 +63,15 @@ Play and Record Video reuse the selected run's saved task and start with the for
 
 The Windows and macOS launchers open the panel with an explicit desktop-remote marker. In that mode, **TensorBoard** starts or reuses one all-runs server on the forwarded `6006` port. Headless training is enforced. **Play**, **Open MuJoCo Viewer**, and host file-manager buttons are disabled because those windows would open on the training PC, not in the remote browser. Use recorded Isaac videos, recorded MuJoCo MP4s, browser console output, and copy-path controls instead.
 
-Compaction keeps the highest top-level `model_*.pt` and preserves events, parameters, videos, exports, notes, and deployment reports. Deletion requires the exact run ID and is rejected while a related process is active.
+Compaction keeps the highest top-level `model_*.pt` and preserves events, parameters, videos, exports, notes, and deployment reports. Deletion requires the exact run ID and is rejected while a related process is active. Bulk deletion requires a typed `DELETE` acknowledgement. A run is shown as deleting only after the confirmation is accepted.
+
+Search, status, sort, and folder selection persist across reloads; the run count reads `N of M` and a **Clear filters** control appears while a filter is hiding runs. Search matches run name, id, task, status, folder, note text, and preset ids. Sorting by status ranks running, stopping, and queued runs above finished ones. Press `/` to focus search, `j`/`k` or the arrow keys to move the selection, and `Escape` to clear search or close a comparison. Shift-click a checkbox to select a range; bulk move and delete appear once runs are selected.
+
+**Compare** opens a separate comparison panel beside the run list and does not disturb the run details panel; select **Compare** on another run to swap the compared column. Unsaved notes are kept per run when the selection changes, marked as an unsaved draft, and warn before the page is left. Bulk deletion requires a typed `DELETE` acknowledgement. A run is shown as deleting only after the confirmation is accepted.
+
+Search, status, sort, and folder selection persist across reloads; the run count reads `N of M` and a **Clear filters** control appears while a filter is hiding runs. Search matches run name, id, task, status, folder, note text, and preset ids. Sorting by status ranks running, stopping, and queued runs above finished ones. Press `/` to focus search, `j`/`k` or the arrow keys to move the selection, and `Escape` to clear search or close a comparison. Shift-click a checkbox to select a range; bulk move and delete appear once runs are selected.
+
+**Compare** opens a separate comparison panel beside the run list and does not disturb the run details panel; select **Compare** on another run to swap the compared column. Unsaved notes are kept per run when the selection changes, marked as an unsaved draft, and warn before the page is left.
 
 <a id="convergence"></a>
 ## Monitor convergence
