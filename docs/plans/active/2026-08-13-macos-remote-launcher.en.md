@@ -29,13 +29,15 @@ The launcher preserves the Windows launcher's fixed SSH target, port forwards, r
 - [x] Add `tools/macos/tests/test_redrhex_remote.sh` for the deterministic remote command, SSH arguments, install path, executable mode, and source preservation.
 - [x] Add a bilingual router and paired operator and developer documentation, then connect them to the central portals and site manifest.
 - [x] Store no password, private key, Tailscale credential, or other secret.
+- [x] Mark macOS launcher sessions, route one all-runs TensorBoard through fixed forward `6006`, force headless training, and disable host-only file-manager and live-viewer controls.
+- [x] Add browser regression proof for both desktop markers and preserved browser-safe actions.
 
 <a id="macos-smoke"></a>
 ### macOS smoke verification
 
 - [ ] Install without administrator privileges and verify the desktop `.command` file.
 - [ ] Double-click with no existing tunnel and observe visible host-key or SSH authentication prompts in Terminal.
-- [ ] Verify Training Panel and TensorBoard forwards and browser behavior after authentication.
+- [ ] Verify the marked Training Panel, on-demand TensorBoard, grey host-only controls, and browser-viewable recorded media after authentication.
 - [ ] Close Terminal and verify both forwards stop.
 - [ ] Relaunch with an existing tunnel and verify no duplicate SSH process.
 - [ ] Verify first-launch security handling, disconnected Tailscale, timeout, and occupied ports produce understandable results.

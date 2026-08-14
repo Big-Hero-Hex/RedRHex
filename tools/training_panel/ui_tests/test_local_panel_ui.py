@@ -461,6 +461,64 @@ def test_status_toast_appears_for_actions_outside_history(panel, page):
     expect(page.locator("#panel-status .toast")).to_contain_text("Fixture status message.")
 
 
+@pytest.mark.parametrize("remote_client", ["windows", "macos"])
+def test_desktop_remote_mode_disables_host_only_controls(panel, page, remote_client):
+    page.goto(f"{panel['url']}/?remote_client={remote_client}#/history/panel_run_beta")
+    expect(page.locator("#details-title")).to_contain_text("Beta Foldered")
+
+    for selector in (
+        "#play-run",
+        "#open-run-folder",
+        "#open-onnx-folder",
+        "#open-video-folder",
+        "#open-process-log-folder",
+        "#deploy-mujoco-viewer",
+    ):
+        expect(page.locator(selector)).to_be_disabled()
+
+    expect(page.locator("#play-run")).to_have_attribute("data-tooltip", re.compile("opens on the training PC"))
+    expect(page.locator("#open-run-folder")).to_have_attribute("data-tooltip", re.compile("folders open on the training PC"))
+    expect(page.locator("#tensorboard-run")).to_be_enabled()
+    expect(page.locator("#record-video")).to_be_enabled()
+    expect(page.locator("#copy-video-path")).to_be_enabled()
+    expect(page.locator("#copy-onnx-path")).to_be_enabled()
+
+    headless = page.locator('#train-form input[name="headless"]')
+    expect(headless).to_be_checked()
+    expect(headless).to_be_disabled()
+
+
+def test_desktop_remote_tensorboard_uses_fixed_forward_for_all_runs(panel, page):
+    requests = []
+
+    def start_tensorboard(route, request):
+        requests.append(json.loads(request.post_data or "{}"))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "id": "tensorboard_6006",
+                    "already_running": False,
+                    "url": panel["url"],
+                    "host": "127.0.0.1",
+                    "port": 6006,
+                }
+            ),
+        )
+
+    page.route("**/api/tensorboard/start", start_tensorboard)
+    page.goto(f"{panel['url']}/?remote_client=windows#/history/panel_run_beta")
+    expect(page.locator("#tensorboard-run")).to_be_enabled()
+
+    with page.expect_popup() as popup_info:
+        page.locator("#tensorboard-run").click()
+    popup = popup_info.value
+    expect(page.locator("#panel-status")).to_contain_text("Started TensorBoard for all runs on port 6006.")
+    assert requests == [{"host": "127.0.0.1", "port": 6006}]
+    popup.close()
+
+
 def test_error_toast_persists_and_closes_on_click(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")

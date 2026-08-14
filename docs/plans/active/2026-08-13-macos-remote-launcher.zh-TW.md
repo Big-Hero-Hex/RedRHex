@@ -29,13 +29,15 @@ Launcher 保留 Windows launcher 固定的 SSH target、port forward、remote pa
 - [x] 新增 `tools/macos/tests/test_redrhex_remote.sh`，檢查 deterministic remote command、SSH argument、install path、executable mode 與 source preservation。
 - [x] 新增雙語 router 與成對的 operator／developer 文件，再連至中央 portal 與 site manifest。
 - [x] 不儲存 password、private key、Tailscale credential 或其他 secret。
+- [x] 標記 macOS launcher session、透過固定 forward `6006` 路由單一 all-runs TensorBoard、強制 headless training，並停用 host-only file-manager 與 live-viewer control。
+- [x] 新增兩種 desktop marker 與維持可用 browser-safe action 的 browser regression proof。
 
 <a id="macos-smoke"></a>
 ### macOS smoke 驗證
 
 - [ ] 不使用 administrator 權限安裝，並驗證 desktop `.command` file。
 - [ ] 沒有既有 tunnel 時雙擊，確認 Terminal 顯示可見的 host-key 或 SSH authentication prompt。
-- [ ] Authentication 後驗證 Training Panel、TensorBoard forward 與 browser behavior。
+- [ ] Authentication 後驗證帶 marker 的 Training Panel、on-demand TensorBoard、灰色 host-only control 與可在 browser 檢視的 recorded media。
 - [ ] 關閉 Terminal，確認兩個 forward 都停止。
 - [ ] 已有 tunnel 時重新啟動，確認不建立重複 SSH process。
 - [ ] 驗證 first-launch security handling、Tailscale 未連線、timeout 與 port 被占用時產生清楚結果。

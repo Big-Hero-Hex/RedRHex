@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: draft
 owner: panel
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="prerequisites"></a>
@@ -35,7 +35,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $download -Install
 3. 若可見的 `RedRHex SSH Tunnel` 視窗出現 prompt，確認 host 後輸入 Ubuntu password。
 4. 使用轉送服務期間保持該視窗開啟。
 
-Launcher 會重用已有回應的 tunnel；否則連到 `lab_user1@100.90.246.97`、轉送本機 port `8080` 與 `6006`，並在 workstation 的 `env_isaaclab_bin` environment 啟動面板。它會開啟 `http://localhost:8080` 的 Training Panel。只有 TensorBoard 已有回應時，才會開啟 `http://localhost:6006`。
+Launcher 會重用已有回應的 tunnel；否則連到 `lab_user1@100.90.246.97`、轉送本機 port `8080` 與 `6006`，並在 workstation 的 `env_isaaclab_bin` environment 啟動面板。它會開啟 `http://localhost:8080/?remote_client=windows` 的 Training Panel。按下 **TensorBoard** 會在轉送的 `http://localhost:6006` 啟動或重用單一 all-runs TensorBoard。
+
+此 marker 會保留 browser-safe action，並明確顯示 remote boundary。Training 固定使用 Headless。**Play**、**Open MuJoCo Viewer** 與開啟 folder 的 button 會顯示為停用，因為這些視窗只會開在 Ubuntu workstation，不會出現在 Windows laptop。請改用 Record Video、Record MuJoCo MP4、Process Console 與可用的 copy-path control。
 
 <a id="stop"></a>
 ## 停止與移除
@@ -56,4 +58,4 @@ Remove-Item (Join-Path $env:LOCALAPPDATA "RedRHex Remote") -Recurse -Force
 - Authentication 或 reachability failure：在可見 tunnel 視窗確認 Tailscale、workstation address、host-key prompt 與 Ubuntu password。
 - Local bind failure：停止已使用 port `8080` 或 `6006` 的 process，再重試。
 - Panel readiness timeout：檢查 SSH 視窗與 workstation 的 `redrhex_panel` tmux session；沒有 tmux 時檢查 `logs/training_panel/remote_panel.log`。
-- TensorBoard 未開啟：先從 Training Panel 啟動，再開啟 `http://localhost:6006`。
+- TensorBoard 未開啟：確認本機 port `6006` 未被占用，在 History 按下 **TensorBoard**；若啟動失敗，檢查 Process Console。
