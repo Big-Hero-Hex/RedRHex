@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="architecture"></a>
@@ -30,6 +30,8 @@ python -m tools.training_panel.remote_worker --once
 ```
 
 Confirm the expected machine ID, `online: true`, a fresh heartbeat, and the intended `accept_jobs` state before continuous operation.
+
+After a 3.6.1 spring-safety update, pause job acceptance and explicitly restart the worker. Restarting Mother alone leaves an already-running worker unchanged. Confirm the refreshed worker heartbeat before accepting jobs; the 3.4.10 Child does not send `spring_backend`, so only the updated worker supplies the Native training default and Explicit quarantine.
 
 <a id="roles"></a>
 ## Roles and actions

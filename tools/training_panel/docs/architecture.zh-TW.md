@@ -24,6 +24,8 @@ last_reviewed: 2026-08-14
 
 `physics.py` 擁有 browser-facing schema 與 local sparse preset store。其 113 個 field 是目前 Isaac integration 會使用、可獨立調整的 `CalibrationProfileV1` value。API 與 command payload 只接受 schema key 及 finite bounded number。Cross-field validation 由 `CalibrationProfileV1` 負責；materialize candidate 時會補齊 coupled ground friction 與 passive-spring requirement。
 
+六個扭轉彈簧保留穩定的 `damper_0` 到 `damper_5` profile aliases。其未校準 damping 預設為零。相容性用 uniform spring stiffness/damping fields 會對映到 backend-aware 有效彈簧參數；大型 effort/velocity 數值讓 actuator-path limits 維持 nonbinding，不會 clip 或 brake spring law。
+
 Process registry 把每個 non-empty candidate 寫入 `logs/training_panel/process_overrides/<process>_physics.json`，並透過 `--physics-profile` 傳遞。`train.py` 透過 sim2real integration 套用 profile，並把確切 applied contract snapshot 到 run 的 `params/`。History 保存 preset identity、sparse value 與 candidate path。Evaluation 與 export 優先使用 immutable run snapshot；只有 snapshot 不存在時才重建。Empty Baseline 不傳 profile，並移除 stale process candidate。
 
 <a id="remote-contract"></a>
@@ -34,7 +36,9 @@ Remote role 與 job type 集中定義於 `remote_config.py`。Heartbeat 回報 p
 <a id="spring-contract"></a>
 ## Spring-backend 契約
 
-建立 run 時只接受 `explicit` 或 `native`，並把選擇記錄在 parameters 與 history。Training、Play、automatic video、export、deployment validation 與 remote synchronization 都重用儲存的 backend；spring metadata 缺失或無效時 fail closed。Play 與 recording 會明確加入 `--initial_command forward`；export 不會加入移動命令。
+Run metadata 只接受 `explicit` 或 `native`。新 policy request 預設使用 Native；由於目前 120 Hz 的未校準 model 會發生數值不穩定，process boundary 會在寫入 history 或 spawn process 前拒絕 Explicit training。Explicit 仍可用於 sim-to-real characterization path。
+
+Play、automatic video、export、deployment validation 與 remote synchronization 都重用儲存的 backend，spring metadata 無效時 fail closed。已 stamp 的 uncalibrated checkpoint 會拒絕 backend mismatch；沒有 metadata 的 legacy run 保留歷史 Explicit fallback，不會被靜默重新標記。Play 與 recording 會明確加入 `--initial_command forward`；export 不會加入移動命令。
 
 <a id="security"></a>
 ## 安全邊界
@@ -44,9 +48,9 @@ Mother 沒有內建 authentication，且可啟動或刪除本機工作；預設�
 <a id="version"></a>
 ## 版本 contract
 
-本機 Mother package 與 UI 的 release 是 `3.6.0-panel-ux`。獨立部署的 remote Child asset、Child release metadata、heartbeat schema 與 worker synchronization contract 仍為 `3.4.10-sync-health`。本機 UI release 不會暗中改變 remote protocol。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
+本機 Mother package 與 UI 的 release 是 `3.6.1-spring-safety`。獨立部署的 remote Child asset、Child release metadata、heartbeat schema 與 worker synchronization contract 仍為 `3.4.10-sync-health`。本機 UI release 不會暗中改變 remote protocol。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
 
-V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment 與 UI asset。
+V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。V3.6.1 quarantine Explicit policy training、把 Native 設為新 run 的暫定預設，並保留已 stamp checkpoint 的 backend identity。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment 與 UI asset。
 
 <a id="pages"></a>
 ## Pages artifact

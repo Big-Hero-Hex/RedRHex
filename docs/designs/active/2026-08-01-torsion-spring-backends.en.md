@@ -6,7 +6,7 @@ audience: developer
 type: design
 status: approved
 owner: sim2real
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="problem"></a>
@@ -27,7 +27,7 @@ Training, playback, evaluation, sim-to-real execution, and Panel processes accep
 - `explicit` zeros PhysX spring gains and applies restoring effort every physics substep.
 - `native` writes stiffness and damping to fixed-target PhysX implicit drives at the configured neutral angles.
 
-Neither backend adds a spring-law clip, artificial velocity brake, or policy-controlled spring action. The native applied-torque channel is an implicit-PD estimate rather than force-sensor evidence. Repository defaults (`200 N*m/rad`, zero damping, provisional neutral angles, `explicit`) are an uncalibrated starting point, not a production choice.
+Neither backend adds a spring-law clip, artificial velocity brake, or policy-controlled spring action. The native applied-torque channel is an implicit-PD estimate rather than force-sensor evidence. Physical defaults remain uncalibrated at `200 N*m/rad`, zero damping, and provisional neutral angles. New environment and policy-training entry points provisionally default to `native`; this is an operational quarantine response to Explicit numerical runaway, not a production backend choice.
 
 <a id="evidence"></a>
 ## Evidence and selection
@@ -37,7 +37,7 @@ Physical calibration uses representative `damper_0`, immutable calibration and h
 <a id="panel"></a>
 ## Training Panel propagation
 
-Panel run creation validates and stores `spring_backend`; train, Play, automatic video, export, deployment validation, history, and remote synchronization reuse the recorded value. ForwardFast automatic video alone supplies `--initial_command forward`; interactive Play and full Direct recordings retain their existing command behavior.
+Panel run creation validates and stores `spring_backend`; Play, automatic video, export, deployment validation, history, and remote synchronization reuse the recorded value. Policy-training entry points reject `explicit`, while deterministic sim-to-real characterization and historical playback retain the backend. Stamped uncalibrated checkpoints now reject backend mismatch as well as calibrated checkpoints. Panel Play and every Panel recording supply `--initial_command forward`; export does not add a motion command.
 
 <a id="non-goals"></a>
 ## Non-goals

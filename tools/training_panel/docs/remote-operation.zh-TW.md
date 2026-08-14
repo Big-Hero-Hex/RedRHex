@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: panel
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="architecture"></a>
@@ -30,6 +30,8 @@ python -m tools.training_panel.remote_worker --once
 ```
 
 連續執行前，確認正確 machine ID、`online: true`、新 heartbeat 與預期 `accept_jobs` 狀態。
+
+套用 3.6.1 spring-safety update 後，先 pause job acceptance，並明確 restart worker。只 restart Mother 會保留已在執行的舊 worker。再次接受 job 前，先確認更新後的 worker heartbeat；3.4.10 Child 不會傳送 `spring_backend`，因此只有更新後的 worker 會提供 Native training default 與 Explicit quarantine。
 
 <a id="roles"></a>
 ## Role 與 action
