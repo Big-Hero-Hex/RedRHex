@@ -641,6 +641,36 @@ class RemoteTests(unittest.TestCase):
             executor.history.delete_run.assert_called_once()
             self.assertEqual(result.local_run_id, "run_x")
 
+    def test_executor_sync_projects_bounded_metrics_progress_provenance_and_drive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executor = self._make_executor(root)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_x"
+            log_dir.mkdir(parents=True)
+            executor.history.add_run({
+                "id": "run_x",
+                "status": "running",
+                "log_dir": str(log_dir),
+                "params": {"spring_backend": "native"},
+                "progress": {"iteration": 20, "max_iterations": 100, "percent": 140, "secret": "drop"},
+                "git": {"commit": "abc123", "dirty": True},
+                "google_drive_video_exports": [{"id": "drive-1", "status": "completed", "web_view_url": "https://drive.google.com/file/d/x/view", "remote_path": "secret"}],
+            })
+            points = [(index, float(index)) for index in range(1000)]
+            with patch(
+                "tools.training_panel.training_panel.remote_worker.ConvergenceChecker.read_scalars",
+                return_value=points,
+            ):
+                record = executor.sync_runs_payload()[0]
+            self.assertEqual(record["progress"]["percent"], 100.0)
+            self.assertNotIn("secret", record["progress"])
+            self.assertEqual(record["git_provenance"]["commit"], "abc123")
+            self.assertEqual(record["effective_spring_backend"], "native")
+            self.assertLessEqual(len(record["metrics"]["Train/mean_reward"]), 400)
+            drive = record["google_drive_video_exports"][0]
+            self.assertEqual(drive["web_view_url"], "https://drive.google.com/file/d/x/view")
+            self.assertNotIn("remote_path", drive)
+
     # ------------------------------------------------------------------
     # RemoteWorker sync_runs + run_forever
     # ------------------------------------------------------------------
@@ -659,6 +689,29 @@ class RemoteTests(unittest.TestCase):
                 self.assertEqual(run["machine_id"], "lab-pc")
                 self.assertTrue(run["created_at"])
                 self.assertTrue(run["updated_at"])
+
+    def test_worker_projects_local_activity_with_redaction_and_idempotent_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            client = FakeClient()
+            worker = RemoteWorker(RemoteConfig(machine_id="lab-pc"), paths, client, executor=FakeExecutor())
+            worker.history.add_run({"id": "run_one", "status": "completed"})
+            worker.activity.record(
+                "training_completed",
+                subject_id="run_one",
+                actor_name="Mother operator",
+                payload={"run_id": "run_one", "status": "completed", "command": "secret shell", "token": "secret"},
+            )
+
+            self.assertEqual(worker.sync_local_activity(), 1)
+            table, payload, kwargs = next(item for item in client.upserts if item[0] == "team_activity_events")
+            self.assertEqual(table, "team_activity_events")
+            self.assertEqual(kwargs["query"]["on_conflict"], "machine_id,source_type,source_id")
+            self.assertEqual(payload[0]["source_type"], "mother_activity")
+            self.assertEqual(payload[0]["run_id"], "run_one")
+            self.assertNotIn("command", payload[0]["metadata"])
+            self.assertNotIn("token", payload[0]["metadata"])
 
     def test_worker_pulls_remote_folders_into_mother_history(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -223,7 +223,7 @@ def _safe_deploy_projection(run: dict) -> dict:
                 continue
             stages.append({
                 key: stage.get(key)
-                for key in ("name", "label", "status", "summary", "duration_ms", "error")
+                for key in ("name", "label", "title", "status", "summary", "duration_ms", "error")
                 if stage.get(key) not in (None, "")
             })
         state["report"] = {

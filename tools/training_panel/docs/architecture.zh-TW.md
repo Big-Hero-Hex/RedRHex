@@ -38,7 +38,11 @@ Process registry 把每個 non-empty candidate 寫入 `logs/training_panel/proce
 <a id="remote-contract"></a>
 ## Remote contract
 
-Remote role 與 job type 集中定義於 `remote_config.py`。Heartbeat 回報 panel version、machine ID、path、active job、queue depth、GPU lock、acceptance state、tunnel 與時間。Worker claim 已授權 job，透過同一 process registry 執行，並同步 run、artifact、metadata、folder、tombstone 與 notification。
+Remote role 與 job type 集中定義於 `remote_config.py`。Protocol `3.7.0-remote-parity` 新增 host-safe `machine_capabilities` row，包含 feature flag、route catalog、Physics field schema、列舉 deployment scenario、read-only detection setting 與 integration readiness。Heartbeat 與 sync summary 使用相同 protocol version。所選 machine 與 capability row 未同時符合時，Child 進入 inspection-only mode。
+
+Worker claim 已授權 job，透過同一 process registry 執行，並同步 run、artifact、metadata、folder、tombstone、notification、bounded scalar series、progress、provenance、spring identity、divergence、deployment evidence、MuJoCo artifact、Drive state 與 allowlisted Mother activity projection。Browser checkpoint input 為 `{run_id, checkpoint_iteration}`；worker 解析並 containment-check path。Remote deployment 只接受 repository-owned model 與列舉 scenario，絕不接受 path 或 shell fragment。
+
+`start_training`、video、ONNX 與 export-and-validate 由 Isaac GPU lock 序列化。Stop 維持優先。Drive export、existing-ONNX validation 與 MuJoCo-only 工作不取得該 lock。`client_request_id` 對 machine 與 actor 唯一，因此 retry 不會重複 enqueue。
 
 <a id="spring-contract"></a>
 ## Spring-backend 契約
@@ -50,14 +54,16 @@ Play、automatic video、export、deployment validation 與 remote synchronizati
 <a id="security"></a>
 ## 安全邊界
 
-Mother 沒有內建 authentication，且可啟動或刪除本機工作；預設邊界是 localhost 加 SSH。Child 只能暴露 publishable configuration。Service-role/machine token 留在 worker host。Role check 是 defense in depth，不能取代 Supabase policy 與 secret handling。
+Mother 沒有內建 authentication，且可啟動或刪除本機工作；預設邊界是 localhost 加 SSH。Child 只能暴露 publishable configuration。Service-role/machine token 與 Google Drive credential 留在 worker host。Role check 是 defense in depth，不能取代 Supabase policy 與 secret handling。
+
+Viewer 為 read-only。Operator 可修改共享 metadata、preset 與 folder，並送出 non-destructive job。Admin 另可刪除。Supabase 透過 RPC 限制 run metadata，queued cancellation 僅限 requester 或 admin；trigger/RPC 與 worker event 會 audit authenticated actor。Worker 解析 authoritative profile role，並忽略 browser 提供的 `actor_role`。Terminal、raw log、worker control、任意 host file、convergence edit、GUI viewer 與 robot actuation 絕不投影到 Child。
 
 <a id="version"></a>
 ## 版本 contract
 
-本機 Mother package 與 UI 的 release 是 `3.6.4-drive-export`。獨立部署的 remote Child asset、Child release metadata、heartbeat schema 與 worker synchronization contract 仍為 `3.4.10-sync-health`。本機 UI release 不會暗中改變 remote protocol。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
+Mother package/UI、remote Child asset、heartbeat、capability row、cache key、sync summary、schema label 與 worker synchronization contract 均為 release `3.7.0-remote-parity`。Migration 為 additive；既有 3.4.10 row 與 read path 仍有效。舊 schema 或 worker 仍可 authentication 與 inspection，但 Child 會停用 mutation，直到兩個 compatibility signal 都相符。更新 release contract 所屬的每個 surface、保留 compatibility evidence，並新增雙語 release entry。
 
-V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。V3.6.1 quarantine Explicit policy training、把 Native 設為新 run 的暫定預設，並保留已 stamp checkpoint 的 backend identity。V3.6.2 讓 Train form 能依 route 顯示欄位、恢復可靠的 hidden-state rendering，並讓 browser request 省略無關 stage fields。V3.6.3 讓 run comparison 使用獨立 panel、在顯示為進行中之前先確認 History 的破壞性操作、保留 run-list filter，並為 run list 加入鍵盤操作。V3.6.4 透過 host-configured rclone remote 新增 private、checkpoint-aware Google Drive video export，不改變 remote Child protocol。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment、Drive export 與 UI asset。
+V3.5 新增 progress parsing、TensorBoard summary、divergence monitoring、Git provenance 與已記錄的 random seed。V3.6 新增 URL-backed navigation、action-local error reporting、first-load skeleton、keyboard-focus tooltip、run-card action menu 與 backend-freshness state。V3.6.1 quarantine Explicit policy training、把 Native 設為新 run 的暫定預設，並保留已 stamp checkpoint 的 backend identity。V3.6.2 讓 Train form 能依 route 顯示欄位、恢復可靠的 hidden-state rendering，並讓 browser request 省略無關 stage fields。V3.6.3 讓 run comparison 使用獨立 panel、在顯示為進行中之前先確認 History 的破壞性操作、保留 run-list filter，並為 run list 加入鍵盤操作。V3.6.4 透過 host-configured rclone remote 新增 private、checkpoint-aware Google Drive video export。V3.7 在 remote-safe Child 採用上述 Mother-grade contract，並新增前述 capability/security protocol。測試涵蓋 command construction、history、progress/convergence/provenance、queue/process behavior、remote role/sync、notification、contract parity、deployment、Drive export 與兩套 UI surface。
 
 <a id="pages"></a>
 ## Pages artifact

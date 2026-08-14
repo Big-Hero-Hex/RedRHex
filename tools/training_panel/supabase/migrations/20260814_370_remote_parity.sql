@@ -104,6 +104,68 @@ create trigger authorize_redrhex_job
   before insert on public.jobs
   for each row execute function public.authorize_redrhex_job();
 
+create or replace function public.audit_redrhex_shared_mutation()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  actor public.profiles%rowtype;
+  record_data jsonb;
+  record_id text;
+begin
+  if auth.uid() is null then
+    if tg_op = 'DELETE' then
+      return old;
+    end if;
+    return new;
+  end if;
+  select * into actor from public.profiles where id = auth.uid();
+  if actor.id is null then
+    raise exception 'Authenticated profile required';
+  end if;
+  record_data := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  record_id := coalesce(record_data ->> 'id', record_data ->> 'folder_key', 'unknown');
+  insert into public.team_activity_events (
+    machine_id, actor_id, actor_name, actor_role, event_type, category, outcome,
+    points, metadata, source_type, source_id
+  ) values (
+    nullif(record_data ->> 'machine_id', ''), actor.id,
+    coalesce(actor.display_name, actor.email), actor.role,
+    tg_table_name || '_' || lower(tg_op), 'organization', 'completed', 1,
+    jsonb_build_object(
+      'resource', tg_table_name,
+      'resource_id', record_id,
+      'name', record_data ->> 'name'
+    ),
+    'database_mutation',
+    tg_table_name || ':' || record_id || ':' || lower(tg_op) || ':' || gen_random_uuid()::text
+  );
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists audit_reward_presets_mutation on public.reward_presets;
+create trigger audit_reward_presets_mutation
+  after insert or update or delete on public.reward_presets
+  for each row execute function public.audit_redrhex_shared_mutation();
+drop trigger if exists audit_terrain_presets_mutation on public.terrain_presets;
+create trigger audit_terrain_presets_mutation
+  after insert or update or delete on public.terrain_presets
+  for each row execute function public.audit_redrhex_shared_mutation();
+drop trigger if exists audit_physics_presets_mutation on public.physics_presets;
+create trigger audit_physics_presets_mutation
+  after insert or update or delete on public.physics_presets
+  for each row execute function public.audit_redrhex_shared_mutation();
+drop trigger if exists audit_team_folders_mutation on public.team_folders;
+create trigger audit_team_folders_mutation
+  after insert or update or delete on public.team_folders
+  for each row execute function public.audit_redrhex_shared_mutation();
+
 create or replace function public.update_run_metadata(
   p_run_id text,
   p_display_name text default null,
@@ -153,18 +215,32 @@ set search_path = public
 as $$
 declare
   authoritative_role public.redrhex_role;
+  cancelled_job public.jobs%rowtype;
+  actor public.profiles%rowtype;
 begin
-  select role into authoritative_role from public.profiles where id = auth.uid();
+  select * into actor from public.profiles where id = auth.uid();
+  authoritative_role := actor.role;
   if authoritative_role is null then
     raise exception 'Authenticated profile required';
   end if;
-  return query
   update public.jobs
   set status = 'cancelled', updated_at = now()
   where id = p_job_id
     and status = 'queued'
     and (actor_id = auth.uid() or authoritative_role = 'admin')
-  returning *;
+  returning * into cancelled_job;
+  if cancelled_job.id is null then
+    return;
+  end if;
+  insert into public.team_activity_events (
+    machine_id, actor_id, actor_name, actor_role, event_type, category, outcome,
+    job_id, points, metadata, source_type, source_id
+  ) values (
+    cancelled_job.machine_id, actor.id, coalesce(actor.display_name, actor.email), actor.role,
+    'queued_job_cancelled', 'organization', 'completed', cancelled_job.id, 1,
+    jsonb_build_object('job_type', cancelled_job.type), 'cancellation_rpc', cancelled_job.id::text
+  );
+  return next cancelled_job;
 end;
 $$;
 
@@ -201,6 +277,7 @@ revoke all on function public.update_run_metadata(text, text, text, text) from p
 grant execute on function public.update_run_metadata(text, text, text, text) to authenticated;
 revoke all on function public.cancel_queued_job(uuid) from public;
 grant execute on function public.cancel_queued_job(uuid) to authenticated;
+revoke all on function public.audit_redrhex_shared_mutation() from public;
 
 alter table public.machine_capabilities enable row level security;
 alter table public.physics_presets enable row level security;

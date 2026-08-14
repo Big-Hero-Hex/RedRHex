@@ -6,7 +6,7 @@ audience: shared
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="project"></a>
@@ -17,7 +17,9 @@ The `RedRhex` Python extension reports version `0.1.0` and requires Python 3.10 
 <a id="panel"></a>
 ## Training Panel
 
-The independently versioned Training Panel is `3.4.10` (`Sync Health Repair`). Its local API/UI, remote worker, remote web assets, and schema tag must remain aligned. Do not infer nonexistent releases 3.4.4 through 3.4.9; the consolidated 3.4.10 release record describes the evidenced change range.
+The independently versioned Training Panel is `3.7.0-remote-parity`. Its Mother package/UI, remote worker, Child web assets and cache keys, heartbeat, capability row, sync summary, and schema label must remain aligned. The 3.7 migration is additive and keeps 3.4.10 rows readable; it does not make an old worker mutation-compatible. When either worker or schema is older, Child deliberately preserves sign-in and inspection while disabling mutations with migration/restart guidance.
+
+Do not infer nonexistent releases 3.4.4 through 3.4.9; the consolidated 3.4.10 release record describes that evidenced change range. The 3.6.4 Drive exporter remains the prerequisite baseline and keeps credentials and sharing policy on Mother.
 
 <a id="deployment"></a>
 ## Deployment

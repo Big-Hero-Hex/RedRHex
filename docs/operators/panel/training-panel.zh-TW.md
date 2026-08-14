@@ -55,9 +55,11 @@ rclone lsd redrhex-drive:
 
 Remote worker 需要 Supabase URL、anonymous key、machine token、machine ID 與明確的 accept-jobs 設定。請將它們存於權限為 `600` 的 `~/.redrhex_remote.env`；絕不可把 service-role 或 machine token 放入 GitHub Pages 或已提交檔案。
 
-從 Control Center 啟動及監督 worker。設定與擁有者尚未確認前，保持關閉遠端工作接受功能。角色分為 viewer、operator 與 admin；破壞性操作僅限 admin。
+從 Control Center 啟動及監督 worker。設定與擁有者尚未確認前，保持關閉遠端工作接受功能。套用 additive 3.7 migration、更新 Mother、restart worker，確認 heartbeat 與 capability row 都回報 `3.7.0-remote-parity` 後，才能發布 Child asset 或接受 job。舊 schema 或 worker 會讓 Child 保持登入但進入 read-only。
 
-安裝 3.6.1 spring-safety update 後，先 pause acceptance，並同時 restart remote worker 與 Mother。Mother startup 不會替換已在執行的 worker。再次接受 job 前，確認 heartbeat 來自更新後的 worker；checked-in 3.4.10 Child 會省略 `spring_backend`，因此必須由更新後的 worker 補上安全的 Native default。
+Child 維持 phone-first Dashboard、Train、History、More，並新增 Mother-grade route、共享 Reward/Terrain/Physics preset、folder、comparison、bounded curve、provenance、private Drive link、deployment evidence、read-only detection、activity attribution 與 Connection health。Checkpoint 以 run 與 iteration 選擇；worker 解析 host path。Viewer 僅能 inspection，operator 可編輯共享 metadata 並執行 non-destructive job，admin 另可 delete。Bulk deletion 需要輸入 `DELETE`，並逐一回報各 run。
+
+Terminal access、raw log、worker administration、任意 host path、GUI viewer、convergence edit 與 physical deployment 仍僅限 Mother。Remote Deploy 只接受 repository-owned input 與列舉 MuJoCo scenario 進行 validation/recording；無法驅動 hardware。
 
 <a id="safety"></a>
 ## 操作邊界

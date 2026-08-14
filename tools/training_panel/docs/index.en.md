@@ -22,6 +22,7 @@ last_reviewed: 2026-08-14
 
 - [Architecture and contracts](architecture.en.md)
 - [Porting and extension guide](porting.en.md)
+- [Release 3.7.0](releases/v3-7-0.en.md)
 - [Release 3.6.4](releases/v3-6-4.en.md)
 - [Release 3.6.3](releases/v3-6-3.en.md)
 - [Release 3.6.2](releases/v3-6-2.en.md)

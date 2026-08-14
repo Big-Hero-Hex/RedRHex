@@ -705,6 +705,9 @@ export function buildRunMetadataPatch({ displayName = "", folder = "", notes = "
 
 export function friendlyErrorMessage(error) {
   const message = error?.message || String(error || "");
+  if (/client_request_id|idx_jobs_machine_actor_client_request|duplicate key/i.test(message)) {
+    return "This request was already queued. Refresh History instead of submitting it again.";
+  }
   if (/Requested function was not found|NOT_FOUND/i.test(message)) {
     return `${message} Deploy the Supabase notify Edge Function, then reload this page.`;
   }

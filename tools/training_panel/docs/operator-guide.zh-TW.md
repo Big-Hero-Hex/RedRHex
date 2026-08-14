@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.6.4 操作指南
+title: Training Panel 3.7.0 操作指南
 lang: zh-TW
 audience: operator
 type: how-to
@@ -89,6 +89,15 @@ Convergence view 包含兩條各自獨立的規則。**Plateau rule** 判定 rew
 ## 導覽與診斷 UI
 
 目前 view 與選定 run 會保存於 URL，因此 refresh 或分享連結都能保留 context。Top bar 會回報 backend freshness；若顯示 stale，操作人員應先停止送出新 action，直到理解連線狀態。初次載入時使用 skeleton，不會誤報沒有資料；Rewards、Terrain、Convergence、Activity 與 Control Center 的 action failure 會顯示在目前 view。
+
+<a id="child"></a>
+## 安全使用 Child
+
+RedRHex To Go 在 desktop 使用 persistent sidebar，在手機與平板使用 Dashboard、Train、History、More。More 包含 Rewards、Terrain、Physics、Deploy、Detection、Activity 與 Connection。URL 與 local draft 會保留目前 view、選定 run/folder、filter、sort 與尚未完成的 training input。Dashboard 維持 remote landing page，顯示 acceptance、machine readiness、GPU/queue state、compatibility、active job 與 recent run。
+
+Train 採用與 Mother 相同的 Standard/F1/F2/F3/full-pipeline route 與 Native spring contract，但 checkpoint 以 run 加 iteration 選擇。History 預設顯示 all runs，並包含 folder、keyboard navigation、comparison、progress、bounded curve、provenance、checkpoint evolution、bulk move 與 remote-safe action。Deploy 僅產生 evidence：ONNX validation、export-and-validate、MuJoCo smoke/MP4 與 optional ROS mock 都使用 repository-owned input。Detection 只顯示 Mother setting，無法編輯。
+
+Viewer 僅能檢視。Operator 可編輯共享 metadata/preset/folder，並執行 non-destructive action。Admin 另可刪除；bulk deletion 需要輸入 `DELETE`，而且每個 run 都會回報各自結果。若 Connection 回報舊 schema 或 worker，保持 read-only，套用指定 migration、更新 Mother、restart worker，再 refresh。Child 絕不提供 terminal、raw log、host path、GUI viewer、worker control、convergence edit 或 robot actuation。
 
 <a id="console"></a>
 ## 使用 Process Console

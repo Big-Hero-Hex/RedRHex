@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.6.4 Operator Guide
+title: Training Panel 3.7.0 Operator Guide
 lang: en
 audience: operator
 type: how-to
@@ -89,6 +89,15 @@ Turning off a master switch disables the controls it governs instead of leaving 
 ## Navigate and diagnose the UI
 
 The current view and selected run are stored in the URL, so refresh and shared links preserve context. The top bar reports backend freshness; a stale indicator means operators should stop issuing new actions until connectivity is understood. Initial loading uses skeletons instead of reporting empty data, and action failures from Rewards, Terrain, Convergence, Activity, and Control Center appear in their current view.
+
+<a id="child"></a>
+## Use Child safely
+
+RedRHex To Go uses a persistent desktop sidebar and Dashboard, Train, History, and More on phones and tablets. More contains Rewards, Terrain, Physics, Deploy, Detection, Activity, and Connection. URLs and local drafts preserve the current view, selected run and folder, filters, sort, and unfinished training input. Dashboard remains the remote landing page for acceptance, machine readiness, GPU/queue state, compatibility, active jobs, and recent runs.
+
+Train follows the same Standard/F1/F2/F3/full-pipeline routes and Native spring contract as Mother, but checkpoints are selected as a run plus iteration. History defaults to all runs and includes folders, keyboard navigation, comparison, progress, bounded curves, provenance, checkpoint evolution, bulk move, and remote-safe actions. Deploy is evidence-only: ONNX validation, export-and-validate, MuJoCo smoke/MP4, and optional ROS mock use repository-owned inputs. Detection shows Mother settings without editing them.
+
+Viewer can only inspect. Operator can edit shared metadata/presets/folders and run non-destructive actions. Admin additionally deletes; bulk deletion requires `DELETE`, and each run reports its own result. If Connection reports an older schema or worker, remain in read-only mode and apply the named migration, update Mother, restart the worker, and refresh. Child never provides a terminal, raw logs, host paths, GUI viewers, worker controls, convergence edits, or robot actuation.
 
 <a id="console"></a>
 ## Use Process Console

@@ -76,8 +76,10 @@ def category_for_job_type(job_type: str) -> str:
     kind = str(job_type or "").lower()
     if kind == "start_training":
         return "training"
-    if kind in {"record_video", "export_onnx"}:
-        return "artifact"
+    if kind in {"record_video", "export_onnx", "export_video_drive", "record_mujoco_video"}:
+        return "media"
+    if kind in {"validate_deploy", "export_validate_deploy", "mujoco_smoke"}:
+        return "deployment"
     if "reward" in kind or "terrain" in kind or "preset" in kind:
         return "preset"
     if kind in {"rename_run", "update_run", "save_note", "folder_assign"} or any(token in kind for token in ("note", "folder", "rename")):
@@ -95,8 +97,10 @@ def category_for_event_type(event_type: str, metadata: dict[str, Any] | None = N
     kind = str(event_type or "").lower()
     if "training" in kind or "start_training" in kind:
         return "training"
-    if "video" in kind or "onnx" in kind:
-        return "artifact"
+    if "deploy" in kind or "mujoco" in kind:
+        return "deployment"
+    if "video" in kind or "onnx" in kind or "drive" in kind:
+        return "media"
     if "reward" in kind or "terrain" in kind or "preset" in kind:
         return "preset"
     if "note" in kind or "folder" in kind or "rename" in kind or "metadata" in kind:
@@ -135,8 +139,10 @@ def score_activity_event(
         if outcome in {"failed", "interrupted"}:
             return 2
         return 0
-    if kind in {"record_video", "export_onnx"} or category == "artifact":
-        return 4 if outcome == "completed" and kind in {"record_video", "export_onnx"} else 0
+    if kind in {"record_video", "export_onnx", "export_video_drive", "record_mujoco_video"} or category in {"artifact", "media"}:
+        return 4 if outcome == "completed" else 0
+    if category == "deployment":
+        return 5 if outcome == "completed" else 0
     if category == "preset":
         return 3 if outcome in {"completed", "info", "success"} else 0
     if category == "metadata":

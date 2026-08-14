@@ -38,7 +38,11 @@ The process registry writes each non-empty candidate to `logs/training_panel/pro
 <a id="remote-contract"></a>
 ## Remote contract
 
-Remote roles and job types are defined centrally in `remote_config.py`. A heartbeat reports panel version, machine ID, paths, active job, queue depth, GPU lock, acceptance state, tunnel, and time. The worker claims authorized jobs, executes through the same process registry, and syncs runs, artifacts, metadata, folders, tombstones, and notifications.
+Remote roles and job types are defined centrally in `remote_config.py`. Protocol `3.7.0-remote-parity` adds a host-safe `machine_capabilities` row containing feature flags, the route catalog, the Physics field schema, enumerated deployment scenarios, read-only detection settings, and integration readiness. A heartbeat and sync summary carry the same protocol version. Child enters inspection-only mode unless the selected machine and capability row both match it.
+
+The worker claims authorized jobs, executes through the same process registry, and syncs runs, artifacts, metadata, folders, tombstones, notifications, bounded scalar series, progress, provenance, spring identity, divergence, deployment evidence, MuJoCo artifacts, Drive state, and an allowlisted Mother activity projection. Browser checkpoint input is `{run_id, checkpoint_iteration}`; the worker resolves and containment-checks the path. Remote deployment accepts repository-owned models and enumerated scenarios, never paths or shell fragments.
+
+`start_training`, video, ONNX, and export-and-validate are serialized by the Isaac GPU lock. Stop remains prioritized. Drive export, existing-ONNX validation, and MuJoCo-only work do not take that lock. `client_request_id` is unique for the machine and actor so retries do not enqueue duplicate work.
 
 <a id="spring-contract"></a>
 ## Spring-backend contract
@@ -50,14 +54,16 @@ Play, automatic video, export, deployment validation, and remote synchronization
 <a id="security"></a>
 ## Security boundary
 
-Mother has no built-in authentication and can launch or delete local work; localhost plus SSH is the default boundary. The child may expose only publishable configuration. Service-role/machine tokens stay on the worker host. Role checks are defense in depth, not a replacement for Supabase policy and secret handling.
+Mother has no built-in authentication and can launch or delete local work; localhost plus SSH is the default boundary. The child may expose only publishable configuration. Service-role/machine tokens and Google Drive credentials stay on the worker host. Role checks are defense in depth, not a replacement for Supabase policy and secret handling.
+
+Viewer is read-only. Operator can mutate shared metadata, presets, and folders and submit non-destructive jobs. Admin additionally deletes. Supabase constrains run metadata to an RPC and queued cancellation to the requester or an admin; triggers/RPCs and worker events audit authenticated actors. The worker resolves the authoritative profile role and ignores any browser-supplied `actor_role`. Terminal, raw logs, worker controls, arbitrary host files, convergence edits, GUI viewers, and robot actuation are never projected to Child.
 
 <a id="version"></a>
 ## Version contract
 
-The local Mother package and UI are release `3.6.4-drive-export`. The independently deployed remote Child assets, Child release metadata, heartbeat schema, and worker synchronization contract remain at `3.4.10-sync-health`. A local UI release does not silently change the remote protocol. Update every surface belonging to the contract being released, retain compatibility evidence, and add a bilingual release entry.
+The Mother package and UI, remote Child assets, heartbeat, capability row, cache keys, sync summary, schema label, and worker synchronization contract are release `3.7.0-remote-parity`. The migration is additive: existing 3.4.10 rows and read paths stay valid. An older schema or worker keeps authentication and inspection available, but the Child disables mutations until both compatibility signals match. Update every surface belonging to the contract being released, retain compatibility evidence, and add a bilingual release entry.
 
-V3.5 adds progress parsing, TensorBoard summaries, divergence monitoring, Git provenance, and recorded random seeds. V3.6 adds URL-backed navigation, action-local error reporting, first-load skeletons, keyboard-focus tooltips, run-card action menus, and backend-freshness state. V3.6.1 quarantines Explicit policy training, makes Native the provisional new-run default, and preserves backend identity for stamped checkpoints. V3.6.2 makes the Train form route-aware, restores reliable hidden-state rendering, and omits irrelevant stage fields from browser requests. V3.6.3 gives run comparison its own panel, confirms destructive History actions before showing them as in progress, persists run-list filters, and adds keyboard navigation to the run list. V3.6.4 adds private, checkpoint-aware Google Drive video export through a host-configured rclone remote without changing the remote Child protocol. Tests cover command construction, history, progress/convergence/provenance, queue/process behavior, remote roles/sync, notifications, contract parity, deployment, Drive export, and UI assets.
+V3.5 adds progress parsing, TensorBoard summaries, divergence monitoring, Git provenance, and recorded random seeds. V3.6 adds URL-backed navigation, action-local error reporting, first-load skeletons, keyboard-focus tooltips, run-card action menus, and backend-freshness state. V3.6.1 quarantines Explicit policy training, makes Native the provisional new-run default, and preserves backend identity for stamped checkpoints. V3.6.2 makes the Train form route-aware, restores reliable hidden-state rendering, and omits irrelevant stage fields from browser requests. V3.6.3 gives run comparison its own panel, confirms destructive History actions before showing them as in progress, persists run-list filters, and adds keyboard navigation to the run list. V3.6.4 adds private, checkpoint-aware Google Drive video export through a host-configured rclone remote. V3.7 adopts those Mother-grade contracts in the remote-safe Child and adds the capability/security protocol described above. Tests cover command construction, history, progress/convergence/provenance, queue/process behavior, remote roles/sync, notifications, contract parity, deployment, Drive export, and both UI surfaces.
 
 <a id="pages"></a>
 ## Pages artifact

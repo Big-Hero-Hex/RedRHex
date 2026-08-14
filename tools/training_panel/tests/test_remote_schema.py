@@ -35,6 +35,11 @@ def test_remote_parity_migration_enforces_identity_and_constrained_mutations() -
     assert "function public.cancel_queued_job" in sql
     assert "actor_id = auth.uid() or authoritative_role = 'admin'" in sql
     assert "unique index if not exists idx_jobs_machine_actor_client_request" in sql
+    assert "function public.audit_redrhex_shared_mutation" in sql
+    assert "audit_reward_presets_mutation" in sql
+    assert "audit_terrain_presets_mutation" in sql
+    assert "audit_physics_presets_mutation" in sql
+    assert "audit_team_folders_mutation" in sql
 
 
 def test_remote_parity_gpu_claim_contract_only_blocks_isaac_jobs() -> None:

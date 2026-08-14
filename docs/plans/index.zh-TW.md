@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="active-plans"></a>
 ## 進行中計畫
 
+- [Child Panel 3.7 遠端同等升級實作](active/2026-08-14-child-panel-remote-parity.zh-TW.md)
 - [純感測器學生蒸餾 V2 實作](active/2026-08-13-student-distillation-v2.zh-TW.md)
 - [macOS 遠端啟動器實作](active/2026-08-13-macos-remote-launcher.zh-TW.md)
 - [Windows 遠端啟動器實作](active/2026-08-01-windows-remote-launcher.zh-TW.md)

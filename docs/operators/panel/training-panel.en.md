@@ -55,9 +55,11 @@ In History, select a run and choose the latest recording or an older checkpoint 
 
 The remote worker requires Supabase URL, anonymous key, machine token, machine ID, and an explicit accept-jobs setting. Store them in `~/.redrhex_remote.env` with mode `600`; never place the service-role or machine token in GitHub Pages or committed files.
 
-Start and supervise the worker from Control Center. Leave remote job acceptance disabled until configuration and ownership are verified. Role boundaries are viewer, operator, and admin; destructive actions remain admin-only.
+Start and supervise the worker from Control Center. Leave remote job acceptance disabled until configuration and ownership are verified. Apply the additive 3.7 migration, update Mother, restart the worker, and confirm that its heartbeat and capability row both report `3.7.0-remote-parity` before publishing Child assets or accepting jobs. An older schema or worker leaves Child signed in but read-only.
 
-After installing the 3.6.1 spring-safety update, pause acceptance and restart the remote worker as well as Mother. Mother startup does not replace an already-running worker. Confirm that the heartbeat comes from the updated worker before accepting jobs; the checked-in 3.4.10 Child omits `spring_backend`, so the updated worker must supply the safe Native default.
+Child keeps Dashboard, Train, History, and More phone-first while adding Mother-grade routes, shared Reward/Terrain/Physics presets, folders, comparison, bounded curves, provenance, private Drive links, deployment evidence, read-only detection, activity attribution, and Connection health. Checkpoints are selected by run and iteration; the worker resolves the host path. Viewer is inspection-only, operator may edit shared metadata and run non-destructive jobs, and admin additionally deletes. Bulk deletion requires `DELETE` and reports each run separately.
+
+Terminal access, raw logs, worker administration, arbitrary host paths, GUI viewers, convergence edits, and physical deployment remain Mother-only. Remote Deploy accepts repository-owned inputs and enumerated MuJoCo scenarios for validation and recording; it cannot actuate hardware.
 
 <a id="safety"></a>
 ## Operational boundaries

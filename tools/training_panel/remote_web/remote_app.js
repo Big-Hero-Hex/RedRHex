@@ -166,6 +166,10 @@ const state = {
   folderFilter: routeFromLocation().folder,
   historyStatus: routeFromLocation().status,
   historySort: initialHistorySort(),
+  bulkRunIds: [],
+  comparisonRunIds: [],
+  bulkActionResults: [],
+  draggedRunId: "",
   activityFilter: "all",
   mobileMoreOpen: false,
   signedVideos: {},
@@ -783,7 +787,7 @@ function shell() {
     ${state.user ? page() : loginPage()}
     </div>
     ${state.user ? `<nav class="mobile-nav" aria-label="Mobile navigation">${PRIMARY_VIEWS.map(([id, label, icon]) => `<button class="${state.view === id ? "active" : ""}" data-action="view" data-view="${id}"><span aria-hidden="true">${escapeHtml(icon)}</span><small>${escapeHtml(label)}</small></button>`).join("")}<button class="${isMoreView(state.view) || state.mobileMoreOpen ? "active" : ""}" data-action="toggle-mobile-more"><span aria-hidden="true">•••</span><small>More</small></button></nav>${state.mobileMoreOpen ? `<div class="mobile-more-scrim" data-action="toggle-mobile-more"></div><section class="mobile-more-sheet" aria-label="More views"><div class="section-head"><h2>More</h2><button data-action="toggle-mobile-more" aria-label="Close">×</button></div><div class="mobile-more-grid">${MORE_VIEWS.map(([id, label, icon]) => `<button class="${state.view === id ? "active" : ""}" data-action="view" data-view="${id}"><span aria-hidden="true">${escapeHtml(icon)}</span><strong>${escapeHtml(label)}</strong></button>`).join("")}</div></section>` : ""}` : ""}
-    <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite">${state.message ? `<div class="toast">${escapeHtml(state.message)}</div>` : ""}</div>
     </div>
   `;
 }
@@ -1364,7 +1368,7 @@ function folderCard(folder) {
   const referenceLabel = state.historySort === "oldest" ? "Oldest" : "Newest";
   const referenceTime = referenceRun?.created_at || referenceRun?.started_at || referenceRun?.updated_at || "";
   return `
-    <button class="folder-card" data-action="open-folder" data-folder="${escapeHtml(folder.key)}">
+    <button class="folder-card" data-action="open-folder" data-folder="${escapeHtml(folder.key)}" data-drop-folder="${escapeHtml(folder.key)}">
       <span class="folder-card-top">
         <strong>${escapeHtml(folder.label)}</strong>
         <span class="badge">${folder.runs.length} run${folder.runs.length === 1 ? "" : "s"}</span>
@@ -1423,11 +1427,18 @@ function historyLayout() {
             <select id="history-status"><option value="all" ${state.historyStatus === "all" ? "selected" : ""}>All statuses</option>${["queued", "running", "stopping", "completed", "failed", "interrupted"].map((status) => `<option value="${status}" ${state.historyStatus === status ? "selected" : ""}>${status}</option>`).join("")}</select>
           </label>
         </div>
+        ${historyBulkToolbar()}
         <div id="history-browser">${historyBrowserContent()}</div>
       </aside>
-      ${state.isPhone ? "" : `<article class="panel run-details">${selected ? runDetails(selected, { context: "desktop" }) : empty("Select a run.")}</article>`}
+      ${state.isPhone ? "" : `<article class="panel run-details">${state.comparisonRunIds.length > 1 ? runComparisonHtml() : selected ? runDetails(selected, { context: "desktop" }) : empty("Select a run.")}</article>`}
     </section>
   `;
+}
+
+function historyBulkToolbar() {
+  const count = state.bulkRunIds.length;
+  const folderOptions = [`<option value="">Uncategorized</option>`, ...folders().map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`)].join("");
+  return `<div class="history-bulk-toolbar"><span class="badge ${count ? "info" : ""}">${count} selected</span><button data-action="select-visible-runs">Select visible</button><button data-action="clear-run-selection" ${count ? "" : "disabled"}>Clear</button><label>Move to <select id="bulk-run-folder">${folderOptions}</select></label><button data-action="bulk-move-runs" ${count && canMutate() ? "" : "disabled"}>Move</button><button data-action="compare-selected-runs" ${count >= 2 ? "" : "disabled"}>Compare</button><button class="danger" data-action="bulk-delete-runs" ${count && role() === "admin" && compatibility().compatible ? "" : "disabled"}>Delete</button>${state.bulkActionResults.length ? `<div class="bulk-results">${state.bulkActionResults.map((item) => `<div><code>${escapeHtml(item.run_id)}</code><span class="badge ${item.ok ? "good" : "bad"}">${item.ok ? "queued" : "failed"}</span>${item.error ? `<small>${escapeHtml(item.error)}</small>` : ""}</div>`).join("")}</div>` : ""}</div>`;
 }
 
 function historyDesktopBackBar(currentLabel) {
@@ -1456,7 +1467,7 @@ function historyFolderNav({ root, currentLabel, folderCount }) {
           <strong>Folder Library</strong>
           <small>${folderCount} folder${folderCount === 1 ? "" : "s"} · ${runCount} run${runCount === 1 ? "" : "s"}</small>
         </div>
-        <button class="icon-action folder-add" data-action="start-create-folder" title="New folder" aria-label="New folder">+</button>
+        <button class="icon-action folder-add" data-action="start-create-folder" title="New folder" aria-label="New folder" ${canMutate() ? "" : "disabled"}>+</button>
       </div>
       ${state.creatingFolder ? `
         <div class="folder-create-bar">
@@ -1528,8 +1539,10 @@ function runStatusLabel(run) {
 
 function runCardWithOptionalInlineDetails(run) {
   const active = run.id === state.selectedRunId;
+  const checked = state.bulkRunIds.includes(run.id);
   return `
-    <div class="run-card-wrap ${active ? "active" : ""}">
+    <div class="run-card-wrap ${active ? "active" : ""}" draggable="${canMutate() && !run.synthetic_job ? "true" : "false"}" data-drag-run-id="${escapeHtml(run.id)}">
+      <label class="bulk-run-check" title="Select ${escapeHtml(run.display_name || run.id)}"><input class="bulk-run-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${checked ? "checked" : ""}><span aria-hidden="true">Select</span></label>
       ${runCard(run)}
       ${state.isPhone && active ? `<article class="inline-run-details">${runDetails(run, { context: "inline" })}</article>` : ""}
     </div>
@@ -1562,6 +1575,8 @@ function runDetailsGrid(run) {
   const statusDesc = statusDescription("run", run.status);
   const convLabel = convergenceLabel(run);
   const syncState = runSyncState(run, video);
+  const progress = run.progress && typeof run.progress === "object" ? run.progress : {};
+  const git = run.git_provenance && typeof run.git_provenance === "object" ? run.git_provenance : {};
   return `
     <article class="run-info-card">
       <span>Run State</span>
@@ -1594,7 +1609,44 @@ function runDetailsGrid(run) {
         <small>Terrain <strong>${escapeHtml(terrainPreset)}</strong> <em>${terrainOverrides} override${terrainOverrides === 1 ? "" : "s"}</em></small>
       </div>
     </article>
+    <article class="run-info-card">
+      <span>Progress</span>
+      <strong>${escapeHtml(progress.percent ?? (run.status === "completed" ? 100 : 0))}%</strong>
+      <small>Iteration ${escapeHtml(progress.iteration ?? "-")} / ${escapeHtml(progress.max_iterations ?? params.max_iterations ?? "-")}</small>
+      <small>${progress.eta_seconds ? `ETA ${escapeHtml(Math.round(progress.eta_seconds / 60))} min` : "ETA unavailable"}</small>
+    </article>
+    <article class="run-info-card">
+      <span>Provenance</span>
+      <strong>${escapeHtml(git.commit || git.sha || "Not recorded")}</strong>
+      <small>${git.branch ? `Branch ${escapeHtml(git.branch)}` : "Branch unavailable"}${git.dirty ? " · dirty tree" : ""}</small>
+      <small>Spring ${escapeHtml(run.effective_spring_backend || params.spring_backend || "native")}</small>
+    </article>
+    ${run.divergence_detected ? `<article class="run-info-card bad"><span>Divergence</span><strong>${escapeHtml(run.divergence_kind || "Detected")}</strong><small>${escapeHtml(run.divergence_reason || "Mother detected divergence.")}</small></article>` : ""}
+    ${metricCurveHtml(run)}
   `;
+}
+
+function metricCurveHtml(run) {
+  const metrics = run.metrics && typeof run.metrics === "object" ? run.metrics : {};
+  const entries = Object.entries(metrics).filter(([, points]) => Array.isArray(points) && points.length);
+  if (!entries.length) return "";
+  return entries.slice(0, 2).map(([tag, points]) => {
+    const values = points.map((point) => Number(point?.[1])).filter(Number.isFinite);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = Math.max(max - min, 1e-9);
+    const polyline = values.map((value, index) => `${values.length === 1 ? 50 : (index / (values.length - 1)) * 100},${30 - ((value - min) / span) * 28}`).join(" ");
+    return `<article class="run-info-card metric-card"><span>${escapeHtml(tag)}</span><svg viewBox="0 0 100 32" role="img" aria-label="${escapeHtml(tag)} curve"><polyline points="${escapeHtml(polyline)}" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke"></polyline></svg><small>${values.length} bounded points · latest ${escapeHtml(values.at(-1))}</small></article>`;
+  }).join("");
+}
+
+function runComparisonHtml() {
+  const runs = state.comparisonRunIds.map(runById).filter(Boolean);
+  return `<div class="section-head"><div><h2>Run Comparison</h2><p class="muted">${runs.length} selected runs</p></div><button data-action="close-run-comparison">Close</button></div><div class="comparison-grid">${runs.map((run) => {
+    const params = run.params || {};
+    const progress = run.progress || {};
+    return `<article class="subpanel"><div class="section-head compact"><strong>${escapeHtml(run.display_name || run.id)}</strong><span class="badge ${statusTone(run.status)}">${escapeHtml(run.status || "unknown")}</span></div><div class="health-row"><span>Route</span><strong>${escapeHtml(params.training_route || "standard")}</strong></div><div class="health-row"><span>Reward</span><strong>${escapeHtml(params.reward_preset_id || "baseline")}</strong></div><div class="health-row"><span>Terrain</span><strong>${escapeHtml(params.terrain_preset_id || "baseline")}</strong></div><div class="health-row"><span>Physics</span><strong>${escapeHtml(params.physics_preset_id || "baseline")}</strong></div><div class="health-row"><span>Progress</span><strong>${escapeHtml(progress.percent ?? (run.status === "completed" ? 100 : 0))}%</strong></div>${metricCurveHtml(run)}</article>`;
+  }).join("")}</div>`;
 }
 
 function runSyncState(run, video = null) {
@@ -2013,6 +2065,7 @@ function notificationChannelResult(result) {
 
 function notificationSettingsCard() {
   const settings = notificationSettingsForView();
+  const editable = canMutate();
   const testText = state.notificationTestResult ? notificationChannelResult(state.notificationTestResult.results || {}) : "";
   const missedText = state.notificationMissedResult
     ? state.notificationMissedResult.message
@@ -2030,11 +2083,11 @@ function notificationSettingsCard() {
       <div class="notification-grid">
         <section>
           <label class="switch-row">
-            <input id="notify-discord-enabled" type="checkbox" ${settings.discord_enabled ? "checked" : ""}>
+            <input id="notify-discord-enabled" type="checkbox" ${settings.discord_enabled ? "checked" : ""} ${editable ? "" : "disabled"}>
             <span>Discord</span>
           </label>
           <label>Discord Webhook
-            <input id="notify-discord-webhook" type="url" placeholder="https://discord.com/api/webhooks/..." value="${escapeHtml(settings.discord_webhook_url)}">
+            <input id="notify-discord-webhook" type="url" placeholder="https://discord.com/api/webhooks/..." value="${escapeHtml(settings.discord_webhook_url)}" ${editable ? "" : "disabled"}>
           </label>
         </section>
         <section>
@@ -2042,7 +2095,7 @@ function notificationSettingsCard() {
           <div class="notification-events">
             ${NOTIFICATION_EVENTS.map(([key, label, detail]) => `
               <label class="switch-row">
-                <input class="notify-event-toggle" data-key="${escapeHtml(key)}" type="checkbox" ${settings[key] ? "checked" : ""}>
+                <input class="notify-event-toggle" data-key="${escapeHtml(key)}" type="checkbox" ${settings[key] ? "checked" : ""} ${editable ? "" : "disabled"}>
                 <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(detail)}</small></span>
               </label>`).join("")}
           </div>
@@ -2052,7 +2105,7 @@ function notificationSettingsCard() {
         <h3>Missed notifications</h3>
         <div class="input-row">
           <label>Catch-up
-            <select id="missed-notification-mode">
+            <select id="missed-notification-mode" ${editable ? "" : "disabled"}>
               <option value="future_only" ${state.missedNotificationMode === "future_only" ? "selected" : ""}>Future only</option>
               <option value="latest" ${state.missedNotificationMode === "latest" ? "selected" : ""}>Latest missed run</option>
               <option value="all" ${state.missedNotificationMode === "all" ? "selected" : ""}>All missed runs</option>
@@ -2061,9 +2114,9 @@ function notificationSettingsCard() {
         </div>
       </section>
       <div class="button-row wrap">
-        <button class="primary" data-action="save-notification-settings">Save Notifications</button>
-        <button data-action="send-test-notification">Send Test</button>
-        <button data-action="send-missed-notifications">Send Missed</button>
+        <button class="primary" data-action="save-notification-settings" ${editable ? "" : "disabled"}>Save Notifications</button>
+        <button data-action="send-test-notification" ${editable ? "" : "disabled"}>Send Test</button>
+        <button data-action="send-missed-notifications" ${editable ? "" : "disabled"}>Send Missed</button>
       </div>
       ${testText ? `<p class="muted">${escapeHtml(testText)}</p>` : ""}
       ${missedText ? `<p class="muted">${escapeHtml(missedText)}</p>` : ""}
@@ -2152,6 +2205,8 @@ function patchShellStatus() {
   const machineStatus = machineState(machine);
   setTextAndClass("#machine-state-badge", machineStatus, `badge ${statusTone(machineStatus)}`);
   setTextAndClass("#role-badge", role(), "badge");
+  const protocol = compatibility();
+  setTextAndClass("#protocol-mode-badge", protocol.mode, `badge ${protocol.compatible ? "good" : "warning"}`);
   setTextAndClass(
     "#last-updated-badge",
     state.lastUpdated ? `Updated ${formatRelativeTime(state.lastUpdated)}` : "Not updated yet",
@@ -2182,6 +2237,8 @@ function patchShellStatus() {
     error.textContent = state.loadError;
     error.hidden = !state.loadError;
   }
+  const toast = document.querySelector("#toast-region");
+  if (toast) toast.innerHTML = state.message ? `<div class="toast">${escapeHtml(state.message)}</div>` : "";
 }
 
 function patchDashboard() {
@@ -2631,6 +2688,9 @@ async function queueTraining() {
   const terrainPresetId = document.querySelector("#train-terrain-preset")?.value || state.selectedTerrainPresetId;
   state.selectedTerrainPresetId = terrainPresetId;
   localStorage.setItem("redrhex_child_terrain_preset", terrainPresetId);
+  const physicsPresetId = document.querySelector("#train-physics-preset")?.value || state.selectedPhysicsPresetId;
+  state.selectedPhysicsPresetId = physicsPresetId;
+  localStorage.setItem("redrhex_child_physics_preset", physicsPresetId);
   if (state.tweakDraftPreset && state.selectedPresetId === state.tweakDraftPreset.id) {
     const values = collectRewardValues();
     if (Object.keys(values).length) state.tweakDraftPreset.values = values;
@@ -2700,6 +2760,8 @@ async function queueTraining() {
 function applyTweakPayload(payload) {
   const params = payload.training_params || {};
   state.trainForm = {
+    ...state.trainForm,
+    training_route: params.training_route || "standard",
     task: params.task || "Template-Redrhex-Direct-v0",
     num_envs: Number(params.num_envs || 4),
     max_iterations: Number(params.max_iterations || 8),
@@ -2707,6 +2769,8 @@ function applyTweakPayload(payload) {
     seed: params.seed ?? "",
     display_name: "",
     folder: params.folder || "",
+    resume_run_id: "",
+    resume_iteration: "",
   };
   state.tweakDraftPreset = normalizePreset({
     ...payload.reward_preset,
@@ -2724,6 +2788,9 @@ function applyTweakPayload(payload) {
   state.tweakTerrainPresetId = state.selectedTerrainPresetId;
   state.tweakTerrainOverrides = params.terrain_overrides || payload.terrain_overrides || {};
   localStorage.setItem("redrhex_child_terrain_preset", state.selectedTerrainPresetId);
+  state.selectedPhysicsPresetId = params.physics_preset_id || "baseline";
+  localStorage.setItem("redrhex_child_physics_preset", state.selectedPhysicsPresetId);
+  localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
   setMessage(payload.message || "Loaded tweak draft.", { forceRender: false });
   setView("rewards");
 }
@@ -3303,6 +3370,88 @@ async function deleteSelectedRun() {
   }, run);
 }
 
+function selectVisibleRuns() {
+  state.bulkRunIds = filteredRuns().filter((run) => !run.synthetic_job).map((run) => run.id);
+  state.comparisonRunIds = [];
+  render();
+}
+
+function clearRunSelection() {
+  state.bulkRunIds = [];
+  state.comparisonRunIds = [];
+  state.bulkActionResults = [];
+  render();
+}
+
+async function moveRunsToFolder(runIds, folder) {
+  assertMutationAllowed();
+  const normalizedFolder = normalizeFolderName(folder || "");
+  if (normalizedFolder) await ensureTeamFolder(normalizedFolder);
+  const targets = runIds.map(runById).filter((run) => run && !run.synthetic_job);
+  const outcomes = await Promise.allSettled(targets.map((run) => rpc("update_run_metadata", {
+    p_run_id: run.id,
+    p_display_name: run.display_name || "",
+    p_folder: normalizedFolder,
+    p_notes: run.notes || "",
+  })));
+  outcomes.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled") targets[index].folder = normalizedFolder || null;
+  });
+  const succeeded = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
+  const failed = outcomes.length - succeeded;
+  state.bulkRunIds = failed ? targets.filter((_, index) => outcomes[index].status === "rejected").map((run) => run.id) : [];
+  state.bulkActionResults = targets.map((run, index) => ({
+    run_id: run.id,
+    ok: outcomes[index].status === "fulfilled",
+    error: outcomes[index].status === "rejected" ? friendlyErrorMessage(outcomes[index].reason) : "",
+  }));
+  await refresh({ silent: true });
+  render();
+  setMessage(`Moved ${succeeded} run${succeeded === 1 ? "" : "s"}${failed ? `; ${failed} failed and remain selected.` : "."}`);
+}
+
+async function bulkMoveSelectedRuns() {
+  const folder = document.querySelector("#bulk-run-folder")?.value || "";
+  await moveRunsToFolder(state.bulkRunIds, folder);
+}
+
+async function bulkDeleteSelectedRuns() {
+  assertMutationAllowed();
+  if (role() !== "admin") throw new Error("Only admins can delete runs.");
+  const runIds = [...state.bulkRunIds];
+  if (!runIds.length) return;
+  const confirmation = window.prompt(`Type DELETE to queue deletion for ${runIds.length} selected runs.`) || "";
+  if (confirmation !== "DELETE") throw new Error("Bulk deletion cancelled: type DELETE exactly.");
+  const outcomes = await Promise.allSettled(runIds.map((runId) => {
+    const clientRequestId = createClientRequestId();
+    const job = buildActionJob({
+      machineId: state.machineId,
+      type: "delete_run",
+      runId,
+      role: role(),
+      userId: state.user?.id,
+      payload: { confirmation: runId, delete_logs: true, client_request_id: clientRequestId },
+    });
+    return insert("jobs", job);
+  }));
+  const succeeded = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
+  const failedIds = runIds.filter((_, index) => outcomes[index].status === "rejected");
+  state.bulkRunIds = failedIds;
+  state.bulkActionResults = runIds.map((runId, index) => ({
+    run_id: runId,
+    ok: outcomes[index].status === "fulfilled",
+    error: outcomes[index].status === "rejected" ? friendlyErrorMessage(outcomes[index].reason) : "",
+  }));
+  await refresh({ silent: true });
+  render();
+  setMessage(`Deletion queued for ${succeeded} run${succeeded === 1 ? "" : "s"}${failedIds.length ? `; ${failedIds.length} failed and remain selected.` : "."}`);
+}
+
+function compareSelectedRuns() {
+  state.comparisonRunIds = state.bulkRunIds.slice(0, 4);
+  render();
+}
+
 function openSelectedRunDeploy() {
   const run = selectedRun();
   if (run) state.selectedRunId = run.id;
@@ -3595,6 +3744,15 @@ document.addEventListener("click", async (event) => {
     if (action === "create-folder") return await createFolderFromInput();
     if (action === "open-folder") return openHistoryFolder(target.dataset.folder || "all");
     if (action === "open-folder-root") return openHistoryFolder("all");
+    if (action === "select-visible-runs") return selectVisibleRuns();
+    if (action === "clear-run-selection") return clearRunSelection();
+    if (action === "bulk-move-runs") return await bulkMoveSelectedRuns();
+    if (action === "bulk-delete-runs") return await bulkDeleteSelectedRuns();
+    if (action === "compare-selected-runs") return compareSelectedRuns();
+    if (action === "close-run-comparison") {
+      state.comparisonRunIds = [];
+      return render();
+    }
     if (action === "select-run") {
       const previousDraftRunId = persistActiveRunMetadataDraft({ flush: true });
       if (state.view === "history") {
@@ -3660,6 +3818,15 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  if (event.target.classList.contains("bulk-run-checkbox")) {
+    const runId = event.target.dataset.runId;
+    state.bulkRunIds = event.target.checked
+      ? [...new Set([...state.bulkRunIds, runId])]
+      : state.bulkRunIds.filter((id) => id !== runId);
+    state.comparisonRunIds = [];
+    render();
+    return;
+  }
   if (["training-route", "task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed", "resume-run", "resume-iteration", "teacher-iterations", "distillation-iterations", "ppo-iterations"].includes(event.target.id)) {
     state.trainFolderCreating = document.querySelector("#run-folder-before-launch")?.value === "__new__";
     state.trainForm = {
@@ -3866,6 +4033,29 @@ document.addEventListener("focusout", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.mobileMoreOpen) {
+    state.mobileMoreOpen = false;
+    render();
+    return;
+  }
+  if (state.view === "history" && event.key === "/" && !event.ctrlKey && !event.metaKey && !["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) {
+    event.preventDefault();
+    document.querySelector("#run-search")?.focus();
+    return;
+  }
+  if (state.view === "history" && ["ArrowDown", "ArrowUp"].includes(event.key) && !["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) {
+    const runs = filteredRuns();
+    if (!runs.length) return;
+    event.preventDefault();
+    const currentIndex = Math.max(0, runs.findIndex((run) => run.id === state.selectedRunId));
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const next = runs[(currentIndex + delta + runs.length) % runs.length];
+    state.selectedRunId = next.id;
+    syncRoute();
+    render();
+    document.querySelector(`.run-card[data-id="${CSS.escape(next.id)}"]`)?.focus();
+    return;
+  }
   if (event.target.id === "history-folder-new" && event.key === "Enter") {
     event.preventDefault();
     createFolderFromInput();
@@ -3898,6 +4088,35 @@ document.addEventListener("keydown", (event) => {
       .catch((error) => setMessage(friendlyErrorMessage(error)));
     event.target.blur();
   }
+});
+
+document.addEventListener("dragstart", (event) => {
+  const wrapper = event.target.closest("[data-drag-run-id]");
+  if (!wrapper || !canMutate()) return;
+  state.draggedRunId = wrapper.dataset.dragRunId || "";
+  event.dataTransfer?.setData("text/plain", state.draggedRunId);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+});
+
+document.addEventListener("dragover", (event) => {
+  const folder = event.target.closest("[data-drop-folder]");
+  if (!folder || !state.draggedRunId) return;
+  event.preventDefault();
+  folder.classList.add("drop-target");
+});
+
+document.addEventListener("dragleave", (event) => {
+  event.target.closest("[data-drop-folder]")?.classList.remove("drop-target");
+});
+
+document.addEventListener("drop", (event) => {
+  const folder = event.target.closest("[data-drop-folder]");
+  if (!folder) return;
+  event.preventDefault();
+  folder.classList.remove("drop-target");
+  const runId = state.draggedRunId || event.dataTransfer?.getData("text/plain") || "";
+  state.draggedRunId = "";
+  if (runId) moveRunsToFolder([runId], folder.dataset.dropFolder || "").catch((error) => setMessage(friendlyErrorMessage(error)));
 });
 
 boot().catch((error) => {
@@ -3944,6 +4163,3 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(state.refreshTimer);
   }
 });
-  const physicsPresetId = document.querySelector("#train-physics-preset")?.value || state.selectedPhysicsPresetId;
-  state.selectedPhysicsPresetId = physicsPresetId;
-  localStorage.setItem("redrhex_child_physics_preset", physicsPresetId);
