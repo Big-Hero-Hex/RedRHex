@@ -57,6 +57,21 @@ def _actuator_fields(section: str, label: str, defaults: tuple[float, float, flo
     ]
 
 
+def _torsion_spring_actuator_fields() -> list[PhysicsField]:
+    """Expose legacy uniform aliases without presenting them as a second PD drive."""
+
+    prefix = "simulation_physics.damper"
+    category = "Torsion spring compatibility"
+    return [
+        PhysicsField(f"{prefix}.stiffness", "Uniform spring stiffness (legacy)", category, "N·m/rad", "Compatibility shortcut applied to all six torsion-spring stiffness values.", 200.0, 0.1),
+        PhysicsField(f"{prefix}.damping", "Uniform spring damping (legacy)", category, "N·m·s/rad", "Compatibility shortcut applied to all six torsion-spring damping values; zero is the repository default.", 0.0, 0.1),
+        PhysicsField(f"{prefix}.effort_limit", "Effort limit", category, "N·m", "Nonbinding actuator-path effort limit; this does not clip the torsion-spring law.", 1.0e9, 0.1),
+        PhysicsField(f"{prefix}.velocity_limit", "Velocity limit", category, "rad/s", "Nonbinding actuator-path velocity limit; this is not a spring-joint brake.", 1.0e6, 0.1),
+        PhysicsField(f"{prefix}.armature", "Armature", category, "kg·m²", "Additional joint-space inertia; set only from measured or reviewed physical evidence.", None, 0.001),
+        PhysicsField(f"{prefix}.friction", "Actuator friction", category, "N·m", "Actuator-level friction term.", None, 0.001),
+    ]
+
+
 def _joint_fields(group: str, group_label: str) -> list[PhysicsField]:
     fields: list[PhysicsField] = []
     for index, leg in enumerate(_LEG_LABELS):
@@ -79,9 +94,9 @@ def _passive_spring_fields() -> list[PhysicsField]:
         prefix = f"simulation_physics.passive_spring.damper_{index}"
         fields.extend(
             [
-                PhysicsField(f"{prefix}.stiffness", f"{leg} spring stiffness", "Passive springs", "N·m/rad", "Damper-joint torsional spring stiffness.", 200.0, 0.1),
-                PhysicsField(f"{prefix}.damping", f"{leg} spring damping", "Passive springs", "N·m·s/rad", "Damper-joint torsional damping.", 20.0, 0.1),
-                PhysicsField(f"{prefix}.rest_position_rad", f"{leg} rest position", "Passive springs", "rad", "Damper-joint spring rest angle.", default_rest[index], 0.001, -math.pi, math.pi),
+                PhysicsField(f"{prefix}.stiffness", f"{leg} spring stiffness", "Torsion springs", "N·m/rad", "Torsion-spring stiffness for the stable damper alias.", 200.0, 0.1),
+                PhysicsField(f"{prefix}.damping", f"{leg} spring damping", "Torsion springs", "N·m·s/rad", "Torsion-spring damping; zero is the uncalibrated repository default.", 0.0, 0.1),
+                PhysicsField(f"{prefix}.rest_position_rad", f"{leg} rest position", "Torsion springs", "rad", "Torsion-spring neutral angle for the stable damper alias.", default_rest[index], 0.001, -math.pi, math.pi),
             ]
         )
     return fields
@@ -115,10 +130,10 @@ FIELD_SCHEMA: tuple[PhysicsField, ...] = tuple(
     ]
     + _actuator_fields("main_drive", "Main drive", (0.0, 1.0, 15.0, 15.0))
     + _actuator_fields("abad", "ABAD", (40.0, 4.0, 8.0, 5.0))
-    + _actuator_fields("damper", "Damper", (200.0, 20.0, 50.0, 1.0))
+    + _torsion_spring_actuator_fields()
     + _joint_fields("main", "Main drive")
     + _joint_fields("abad", "ABAD")
-    + _joint_fields("damper", "Damper")
+    + _joint_fields("damper", "Torsion spring")
     + _passive_spring_fields()
     + _abad_mapping_fields()
 )

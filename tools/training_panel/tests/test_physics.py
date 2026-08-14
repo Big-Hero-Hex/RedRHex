@@ -27,13 +27,28 @@ class PhysicsProfileTests(unittest.TestCase):
             "Contact material",
             "Main drive actuator",
             "ABAD actuator",
-            "Damper actuator",
-            "Passive springs",
+            "Torsion spring compatibility",
+            "Torsion springs",
             "Timing",
             "ABAD calibration",
         }.issubset(categories))
         self.assertIn("simulation_physics.joint_friction.main_0", keys)
         self.assertIn("simulation_physics.joint_viscous_friction.damper_5", keys)
+
+    def test_torsion_spring_editor_matches_backend_aware_runtime_defaults(self):
+        fields = {field.key: field for field in FIELD_SCHEMA}
+
+        self.assertEqual(
+            fields["simulation_physics.passive_spring.damper_0.damping"].default,
+            0.0,
+        )
+        self.assertEqual(fields["simulation_physics.damper.damping"].default, 0.0)
+        self.assertEqual(fields["simulation_physics.damper.effort_limit"].default, 1.0e9)
+        self.assertEqual(fields["simulation_physics.damper.velocity_limit"].default, 1.0e6)
+        self.assertIn(
+            "does not clip",
+            fields["simulation_physics.damper.effort_limit"].description,
+        )
 
     def test_normalize_rejects_unknown_nonfinite_and_out_of_range_values(self):
         for values in (

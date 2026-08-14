@@ -368,7 +368,7 @@ def test_history_mobile_layout_has_no_horizontal_overflow(panel, page):
     assert overflow <= 1
 
 
-def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
+def test_native_spring_backend_is_safe_default_submitted_restored_and_displayed(panel, page):
     submitted_payloads = []
 
     def capture_training_start(route):
@@ -385,25 +385,43 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
     backend = page.locator('select[name="spring_backend"]')
     assert backend.locator('option[value="explicit"]').count() == 1
     assert backend.locator('option[value="native"]').count() == 1
-    expect(backend).to_have_value("explicit")
-    backend.select_option("native")
+    expect(backend).to_have_value("native")
+    expect(backend.locator('option[value="explicit"]')).to_have_attribute("disabled", "")
+    expect(backend.locator("xpath=following-sibling::small")).to_contain_text(
+        "numerically unstable"
+    )
     page.locator("#train-form button[type=submit]").click()
     expect(page.locator("#train-status")).to_contain_text("Queued native_submit")
     assert submitted_payloads == [{
-        "task": "Template-Redrhex-Direct-v0",
+        "training_route": "standard",
+        "task": "Template-Redrhex-ForwardFast-Direct-v0",
         "display_name": "",
         "num_envs": 4,
         "max_iterations": 1,
+        "teacher_iterations": 1500,
+        "distillation_iterations": 800,
+        "ppo_iterations": 1500,
         "device": "cuda:0",
         "spring_backend": "native",
         "seed": "",
         "checkpoint": "",
         "headless": True,
         "resume": False,
-        "reward_preset_id": "baseline",
-        "reward_overrides": {},
+        "reward_preset_id": "speed-focus",
+        "reward_overrides": {
+            "v2_reward_scales.forward_progress": 3,
+            "v2_reward_scales.velocity_tracking": 6,
+            "v2_reward_scales.axis_suppression": 2,
+            "v2_reward_scales.height_maintain": 1,
+            "v2_reward_scales.height_low_penalty": 1.5,
+            "v2_reward_scales.leg_moving": 0.25,
+            "v2_reward_scales.stall_penalty": -3,
+            "v2_reward_scales.energy_per_distance": 0.0005,
+        },
         "terrain_preset_id": "baseline",
         "terrain_overrides": {},
+        "physics_preset_id": "baseline",
+        "physics_overrides": {},
     }]
 
     open_history(page, panel["url"])
@@ -423,6 +441,9 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
     page.locator('.nav-button[data-view="history"]').click()
     page.locator(".run-card", has_text="run_alpha").click()
     expect(page.locator("#details-title")).to_have_text("run_alpha")
+    expect(page.locator("#runs")).to_contain_text("spring backend: explicit")
+    expect(page.locator("#resume-run")).to_be_disabled()
+    expect(page.locator("#resume-run")).to_have_attribute("title", re.compile("Explicit.*cannot be resumed"))
     beta_card = page.locator(".run-card", has_text="Beta Foldered")
     beta_card.locator(".run-menu-trigger").click()
     beta_card.locator('button[data-action="compare"]').click()

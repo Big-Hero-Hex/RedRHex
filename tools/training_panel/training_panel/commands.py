@@ -21,12 +21,27 @@ DEFAULT_VIDEO_PRESET = "high"
 DEFAULT_FOLLOW_CAMERA_EYE = (-3.0, -2.4, 1.6)
 DEFAULT_FOLLOW_CAMERA_LOOKAT = (0.45, 0.0, 0.35)
 SPRING_BACKENDS = ("explicit", "native")
+DEFAULT_PANEL_SPRING_BACKEND = "native"
+EXPLICIT_SPRING_QUARANTINE_REASON = (
+    "Explicit torsion-spring training is quarantined in the Panel: the current "
+    "uncalibrated 200 N·m/rad model is numerically unstable at the 120 Hz physics "
+    "step. Use Native for provisional simulation and use the spring-release "
+    "characterization workflow to investigate Explicit."
+)
 _TOP_LEVEL_SPRING_BACKEND_RE = re.compile(r"^spring_backend\s*:\s*(.*)$")
 
 
 def validate_spring_backend(spring_backend: str) -> None:
     if spring_backend not in SPRING_BACKENDS:
         raise ValueError(f"spring_backend must be one of: {', '.join(SPRING_BACKENDS)}")
+
+
+def validate_panel_training_spring_backend(spring_backend: str) -> None:
+    """Reject a backend that is retained for characterization but unsafe to train."""
+
+    validate_spring_backend(spring_backend)
+    if spring_backend == "explicit":
+        raise ValueError(EXPLICIT_SPRING_QUARANTINE_REASON)
 
 
 def _spring_backend_from_yaml(path: Path) -> str | None:
@@ -129,7 +144,7 @@ class TrainingParams:
     num_envs: int = 4
     max_iterations: int = 1
     device: str = "cuda:0"
-    spring_backend: str = "explicit"
+    spring_backend: str = DEFAULT_PANEL_SPRING_BACKEND
     headless: bool = True
     seed: int | None = None
     resume: bool = False
@@ -164,7 +179,11 @@ class TrainingParams:
             num_envs=int(data.get("num_envs") or 4),
             max_iterations=int(data.get("max_iterations") or 1),
             device=str(data.get("device") or "cuda:0"),
-            spring_backend=data["spring_backend"] if "spring_backend" in data else "explicit",
+            spring_backend=(
+                data["spring_backend"]
+                if "spring_backend" in data
+                else DEFAULT_PANEL_SPRING_BACKEND
+            ),
             headless=bool(data.get("headless", True)),
             # A blank seed used to mean "env default", which made runs
             # unreproducible. The panel now picks one and records it.
@@ -226,6 +245,7 @@ class TrainingParams:
 
 
 def training_argv(params: TrainingParams, *, physics_profile_file: str | None = None) -> list[str]:
+    validate_panel_training_spring_backend(params.spring_backend)
     if params.training_route == "sensor_v2_full":
         argv = [
             "scripts/rsl_rl/train_sensor_v2_pipeline.py",
@@ -239,6 +259,8 @@ def training_argv(params: TrainingParams, *, physics_profile_file: str | None = 
             str(params.ppo_iterations),
             "--device",
             params.device,
+            "--spring-backend",
+            params.spring_backend,
         ]
         if params.seed is not None:
             argv.extend(["--seed", str(params.seed)])

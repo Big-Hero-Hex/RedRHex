@@ -234,9 +234,9 @@ REDRHEX_CFG = ArticulationCfg(
         # =================================================================
         # 【扭轉彈簧關節】被動式，不由 AI 控制
         # =================================================================
-        # 預設 explicit backend 由環境在每個 physics substep 施加
+        # 選用 explicit backend 時，環境在每個 physics substep 施加
         # tau = -k(q-q0)-c*qdot，因此 PhysX drive gains 必須為零。
-        # native backend 會在 runtime 寫入相同的 k/c 與固定 q0 target。
+        # 暫定預設 native backend 會在 runtime 寫入相同的 k/c 與固定 q0 target。
         "damper": ImplicitActuatorCfg(
             joint_names_expr=[
                 "Revolute_5", "Revolute_8", "Revolute_13",
@@ -1658,7 +1658,10 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # =========================================================================
     # 【扭轉彈簧物理常數】同時驅動物理與節能 diagnostics
     # =========================================================================
-    spring_backend = "explicit"
+    # Native is the provisional safe default. Explicit remains available for
+    # deliberate spring-release characterization, but the uncalibrated
+    # 200 N·m/rad law is numerically unstable at the current 120 Hz step.
+    spring_backend = "native"
     spring_stiffness_nm_per_rad = (200.0,) * 6
     spring_damping_nm_s_per_rad = (0.0,) * 6
     spring_calibrated = False

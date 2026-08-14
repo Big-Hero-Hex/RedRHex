@@ -38,13 +38,22 @@ def _spring_backend_argument(relative: str) -> ast.Call:
     return calls[0]
 
 
-@pytest.mark.parametrize("relative", RSL_ENTRYPOINTS)
-def test_rsl_entrypoints_expose_bounded_explicit_default_spring_backend(relative: str) -> None:
+@pytest.mark.parametrize(
+    ("relative", "expected_default"),
+    (
+        ("scripts/rsl_rl/train.py", "native"),
+        ("scripts/rsl_rl/play.py", "explicit"),
+        ("scripts/rsl_rl/eval_command_sweep.py", "explicit"),
+    ),
+)
+def test_rsl_entrypoints_expose_provenance_aware_spring_backend_defaults(
+    relative: str, expected_default: str
+) -> None:
     call = _spring_backend_argument(relative)
     keywords = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
 
     assert keywords["choices"] == ("explicit", "native")
-    assert keywords["default"] == "explicit"
+    assert keywords["default"] == expected_default
 
 
 @pytest.mark.parametrize("relative", RSL_ENTRYPOINTS)
@@ -180,6 +189,17 @@ def test_command_sweep_validates_calibrated_checkpoint_binding_before_creation()
     assert "selected_profile_id=spring_profile_id" in source
     assert "selected_profile_sha256=spring_profile_sha256" in source
     assert "calibrated checkpoint profile did not produce a calibrated spring configuration" in source
+
+
+def test_policy_training_quarantines_explicit_backend_but_characterization_retains_it() -> None:
+    train_source = _source("scripts/rsl_rl/train.py")
+    runner_source = _source("tools/sim2real/isaac_runner.py")
+
+    assert 'if args_cli.spring_backend == "explicit":' in train_source
+    assert "Explicit torsion-spring policy training is quarantined" in train_source
+    pipeline_source = _source("scripts/rsl_rl/train_sensor_v2_pipeline.py")
+    assert 'if args.spring_backend == "explicit":' in pipeline_source
+    assert 'spring_backend not in {"explicit", "native"}' in runner_source
 
 
 @pytest.mark.parametrize("command", ("run-sim", "sweep"))

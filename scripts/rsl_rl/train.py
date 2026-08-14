@@ -46,8 +46,12 @@ parser.add_argument(
 parser.add_argument(
     "--spring-backend",
     choices=("explicit", "native"),
-    default="explicit",
-    help="Passive torsion-spring implementation used by the environment.",
+    default="native",
+    help=(
+        "Passive torsion-spring implementation used by the environment. Native is "
+        "the provisional safe default; Explicit policy training is quarantined and "
+        "remains available through the sim2real spring-release characterization workflow."
+    ),
 )
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -109,6 +113,17 @@ def _is_sensor_v2_task(task_name: str | None) -> bool:
     return bool(task_name and task_name.split(":")[-1] == "Template-Redrhex-ForwardSensorV2-Direct-v0")
 
 
+def _validate_spring_backend_cli() -> None:
+    if args_cli.spring_backend == "explicit":
+        parser.error(
+            "Explicit torsion-spring policy training is quarantined: the current "
+            "uncalibrated 200 N·m/rad model is numerically unstable at 120 Hz. "
+            "Use --spring-backend native for provisional training or use "
+            "`python -m tools.sim2real run-sim --scenario spring-release "
+            "--spring-backend explicit ...` for deterministic characterization."
+        )
+
+
 def _validate_checkpoint_cli() -> None:
     bootstrap = [
         name
@@ -132,6 +147,7 @@ def _validate_checkpoint_cli() -> None:
         parser.error("V2 forbids --resume_policy_only and shape-compatible partial loading")
 
 
+_validate_spring_backend_cli()
 _validate_checkpoint_cli()
 
 # always enable cameras to record video

@@ -158,7 +158,7 @@ class CommandTests(unittest.TestCase):
 
         self.assertEqual(argv[argv.index("--spring-backend") + 1], "native")
 
-    def test_play_argv_uses_and_overrides_explicit_spring_backend(self):
+    def test_play_argv_preserves_explicit_legacy_default_and_allows_native_override(self):
         default_argv = play_argv("/tmp/model_10.pt")
         native_argv = play_argv("/tmp/model_10.pt", spring_backend="native")
 
@@ -171,10 +171,17 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(params.spring_backend, "native")
         self.assertEqual(params.to_dict()["spring_backend"], "native")
 
-    def test_training_params_default_spring_backend_is_explicit(self):
+    def test_training_params_default_spring_backend_is_native(self):
         params = TrainingParams.from_dict({})
 
-        self.assertEqual(params.to_dict()["spring_backend"], "explicit")
+        self.assertEqual(params.to_dict()["spring_backend"], "native")
+
+    def test_training_params_can_parse_historical_explicit_backend(self):
+        params = TrainingParams.from_dict({"spring_backend": "explicit"})
+
+        self.assertEqual(params.spring_backend, "explicit")
+        with self.assertRaisesRegex(ValueError, "quarantined.*120 Hz"):
+            training_argv(params)
 
     def test_training_params_reject_unknown_spring_backend_before_queuing(self):
         with self.assertRaises(ValueError):
@@ -223,6 +230,7 @@ class CommandTests(unittest.TestCase):
         argv = training_argv(params, physics_profile_file="/tmp/panel_physics.json")
 
         self.assertIn("scripts/rsl_rl/train_sensor_v2_pipeline.py", argv)
+        self.assertEqual(argv[argv.index("--spring-backend") + 1], "native")
         self.assertEqual(argv[argv.index("--physics-profile") + 1], "/tmp/panel_physics.json")
 
     def test_training_params_accept_terrain_overrides(self):

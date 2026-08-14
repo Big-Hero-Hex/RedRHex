@@ -131,4 +131,5 @@ def test_tweak_payload_preserves_legacy_explicit_backend():
 
     payload = build_tweak_payload(run, reward_presets=REWARD_PRESETS, terrain_presets=TERRAIN_PRESETS)
 
-    assert payload["training_params"]["spring_backend"] == "explicit"
+    assert payload["training_params"]["spring_backend"] == "native"
+    assert "quarantined Explicit backend was changed to Native" in payload["message"]

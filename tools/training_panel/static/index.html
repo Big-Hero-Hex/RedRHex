@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.6.0-panel-ux" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.6.1-spring-safety" />
   </head>
   <body>
     <aside class="sidebar">
@@ -27,7 +27,7 @@
         <button class="nav-button" data-view="access">Control Center</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.6.0 Panel UX</span>
+        <span class="release-version">Version 3.6.1 Spring Safety</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -40,7 +40,7 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.6.0 Panel UX</span>
+          <span class="release-chip">Training Panel V3.6.1 Spring Safety</span>
           <span id="freshness" class="freshness" data-state="stale"
             data-tooltip="How recently the panel last heard from the training PC">
             <span class="freshness-dot" aria-hidden="true"></span>
@@ -98,9 +98,10 @@
           <label>
             Spring Backend
             <select name="spring_backend" required>
-              <option value="explicit" selected>Explicit</option>
-              <option value="native">Native</option>
+              <option value="native" selected>Native (provisional default)</option>
+              <option value="explicit" disabled>Explicit (quarantined at 120 Hz)</option>
             </select>
+            <small>Explicit is retained for spring-release characterization, but its current uncalibrated 200 N·m/rad setup is numerically unstable and cannot start Panel training.</small>
           </label>
           <label>
             Seed
@@ -844,8 +845,8 @@
 
     <div id="panel-status" class="panel-status" role="status" aria-live="polite" aria-atomic="false"></div>
 
-    <script src="/static/status_catalog.js?v=3.6.0-panel-ux"></script>
-    <script src="/static/api_adapters.js?v=3.6.0-panel-ux"></script>
-    <script src="/static/app.js?v=3.6.0-panel-ux"></script>
+    <script src="/static/status_catalog.js?v=3.6.1-spring-safety"></script>
+    <script src="/static/api_adapters.js?v=3.6.1-spring-safety"></script>
+    <script src="/static/app.js?v=3.6.1-spring-safety"></script>
   </body>
 </html>

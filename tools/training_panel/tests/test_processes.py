@@ -164,6 +164,18 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(record["status"], "running")
             self.assertEqual([process["kind"] for process in registry.running_isaac_processes()], ["training"])
 
+    def test_queue_training_rejects_direct_explicit_params_before_writing_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history)
+
+            with self.assertRaisesRegex(ValueError, "quarantined.*120 Hz"):
+                registry.queue_training(TrainingParams(spring_backend="explicit"))
+
+            self.assertEqual(history.list_runs(), [])
+
     def test_cuda_preflight_blocks_training_before_history_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -409,6 +421,32 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertIsNone(started)
             self.assertEqual(history.get_run(queued["id"])["status"], "queued")
             schedule.assert_called_once()
+
+    def test_start_next_queued_training_fails_legacy_run_before_native_reinterpretation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "queued_explicit",
+                    "source": "training_panel",
+                    "status": "queued",
+                    "created_at": "2026-08-14T10:00:00",
+                    "queued_at": "2026-08-14T10:00:00",
+                    "params": {"task": "Template-Redrhex-Direct-v0"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                started = registry.start_next_queued_training()
+
+            self.assertIsNone(started)
+            record = history.get_run("queued_explicit")
+            self.assertEqual(record["status"], "failed")
+            self.assertRegex(record["queue_error"], "quarantined.*120 Hz")
+            spawn.assert_not_called()
 
     def test_cancel_queued_training(self):
         class FakeProcess:

@@ -33,6 +33,7 @@ from .commands import (
     shell_for_isaaclab,
     tensorboard_argv,
     training_argv,
+    validate_panel_training_spring_backend,
 )
 from .provenance import git_provenance
 from .config import PanelPaths, timestamp_id
@@ -162,6 +163,8 @@ class ProcessRegistry:
         return snapshot
 
     def queue_training(self, params: TrainingParams) -> dict:
+        params.validate()
+        validate_panel_training_spring_backend(params.spring_backend)
         self._assert_cuda_ready(params.device)
         with self._queue_lock:
             settle_delay = self._isaac_settle_delay()
@@ -173,6 +176,8 @@ class ProcessRegistry:
             return self._start_training_run(params)
 
     def start_training(self, params: TrainingParams) -> dict:
+        params.validate()
+        validate_panel_training_spring_backend(params.spring_backend)
         return self._start_training_run(params)
 
     def _create_queued_training_run(self, params: TrainingParams) -> dict:
@@ -217,6 +222,7 @@ class ProcessRegistry:
         run_id: str | None = None,
         existing_record: dict | None = None,
     ) -> dict:
+        validate_panel_training_spring_backend(params.spring_backend)
         self._assert_cuda_ready(params.device)
         self.paths.ensure_dirs()
         run_id = run_id or f"panel_{timestamp_id()}"
@@ -303,7 +309,10 @@ class ProcessRegistry:
                 return None
             run = queued[0]
             try:
-                params = TrainingParams.from_dict(run.get("params") or {})
+                stored_params = dict(run.get("params") or {})
+                if "spring_backend" not in stored_params:
+                    stored_params["spring_backend"] = resolve_spring_backend(run)
+                params = TrainingParams.from_dict(stored_params)
                 return self._start_training_run(params, run_id=str(run["id"]), existing_record=run)
             except CudaPreflightError as exc:
                 self.history.update_run(

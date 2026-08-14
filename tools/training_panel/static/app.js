@@ -973,19 +973,18 @@ function statusLabel(kind, status, context) {
 
 function runParamSummary(run) {
   const parts = [];
-  if (run.params?.task) parts.push(`task: ${run.params.task}`);
-  if (run.params?.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params.training_route && run.params.training_route !== "standard") {
-    parts.push(`route: ${run.params.training_route}`);
+  const params = run.params || {};
+  if (params.training_route && params.training_route !== "standard") {
+    parts.push(`route: ${params.training_route}`);
   }
-  if (run.params.task) parts.push(`task: ${run.params.task}`);
-  if (run.params.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params.training_route === "sensor_v2_full") {
+  if (params.task) parts.push(`task: ${params.task}`);
+  if (params.num_envs !== undefined) parts.push(`envs: ${params.num_envs}`);
+  if (params.training_route === "sensor_v2_full") {
     parts.push(
-      `iters: ${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}`
+      `iters: ${params.teacher_iterations}/${params.distillation_iterations}/${params.ppo_iterations}`
     );
-  } else if (run.params.max_iterations !== undefined) {
-    parts.push(`iters: ${run.params.max_iterations}`);
+  } else if (params.max_iterations !== undefined) {
+    parts.push(`iters: ${params.max_iterations}`);
   }
   parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
@@ -1748,7 +1747,12 @@ function renderRunDetails() {
     !run || runBusy || !run.onnx_path,
     "Open the exported policy folder (local only)"
   );
-  $("#resume-run").disabled = !run || runBusy || !run.latest_checkpoint;
+  const resumeButton = $("#resume-run");
+  const explicitResumeQuarantined = Boolean(run && runSpringBackend(run) === "explicit");
+  resumeButton.disabled = !run || runBusy || !run.latest_checkpoint || explicitResumeQuarantined;
+  resumeButton.title = explicitResumeQuarantined
+    ? "Explicit spring checkpoints cannot be resumed in the Panel at the current 120 Hz physics step."
+    : "Resume training from the latest checkpoint.";
   $("#tweak-run").disabled = !run || runBusy || ["running", "stopping"].includes(String(run.status || "").toLowerCase());
   $("#stop-process").disabled = !state.debugTarget && !run;
   const debugKey = state.debugTarget ? `${state.debugTarget.type}:${state.debugTarget.id}` : "";
@@ -2885,6 +2889,10 @@ function resumeRun(runId) {
     setStatus("No checkpoint available for this run.");
     return;
   }
+  if (runSpringBackend(run) === "explicit") {
+    setStatus("This Explicit checkpoint cannot be resumed in the Panel because that backend is quarantined at the current 120 Hz physics step. Start a new Native run or use spring-release characterization.");
+    return;
+  }
   const form = $("#train-form");
   form.elements.checkpoint.value = run.latest_checkpoint;
   form.elements.spring_backend.value = runSpringBackend(run);
@@ -3218,7 +3226,7 @@ function applyTrainingParamsToForm(params) {
   form.elements.distillation_iterations.value = params.distillation_iterations ?? 800;
   form.elements.ppo_iterations.value = params.ppo_iterations ?? 1500;
   form.elements.device.value = params.device || "cuda:0";
-  form.elements.spring_backend.value = params.spring_backend || "explicit";
+  form.elements.spring_backend.value = params.spring_backend || "native";
   form.elements.seed.value = params.seed ?? "";
   form.elements.checkpoint.value = "";
   form.elements.headless.checked = IS_REMOTE_DESKTOP || params.headless !== false;

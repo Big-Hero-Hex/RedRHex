@@ -35,11 +35,24 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--distillation_iterations", type=int, default=800)
     parser.add_argument("--ppo_iterations", type=int, default=1500)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--spring-backend",
+        choices=("explicit", "native"),
+        default="native",
+        help="Passive torsion-spring backend forwarded unchanged to every stage.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--pipeline_id", default="")
     parser.add_argument("--physics-profile", default=None)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.spring_backend == "explicit":
+        parser.error(
+            "Explicit torsion-spring policy training is quarantined at the current "
+            "120 Hz physics step; use Native for provisional training and the "
+            "sim2real spring-release workflow for Explicit characterization."
+        )
+    return args
 
 
 def _safe_pipeline_id(value: str) -> str:
@@ -95,6 +108,8 @@ def _run_stage(
         args.device,
         "--seed",
         str(args.seed),
+        "--spring-backend",
+        args.spring_backend,
         "--run_name",
         run_name,
     ]
