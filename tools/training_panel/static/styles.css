@@ -563,6 +563,7 @@ html[data-theme="dark"] .status-unknown {
 
 .folder-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 4px;
@@ -1461,6 +1462,9 @@ html[data-theme="dark"] .comparison-diff {
   width: max-content;
   max-width: min(520px, calc(100vw - 32px));
   white-space: normal;
+  /* A tooltip that carries a filesystem path holds one unbreakable token, which
+     overflows the capped box and widens the document behind the hidden layer. */
+  overflow-wrap: anywhere;
   text-align: left;
   pointer-events: none;
   opacity: 0;
@@ -1836,6 +1840,47 @@ html[data-theme="dark"] .comparison-diff {
   line-height: 1.45;
 }
 
+/* A panel whose master switch is off still shows its values, but reads as
+   inert rather than editable. */
+.panel-inactive {
+  opacity: 0.55;
+}
+
+.form-row {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  font-size: 12px;
+}
+
+.form-row small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+#convergence-card .section-header {
+  margin-top: 14px;
+}
+
+#convergence-info-grid {
+  margin-bottom: 10px;
+}
+
+#convergence-plateau-panel .segmented-control {
+  margin-top: 0;
+}
+
+#convergence-divergence-panel .muted-copy,
+#convergence-plateau-panel .muted-copy {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .remote-grid {
   align-items: stretch;
 }
@@ -2054,6 +2099,13 @@ html[data-theme="dark"] .comparison-diff {
   font-weight: 650;
 }
 
+/* Without this the global full-width input rule stretches the box and strands
+   the label against the opposite edge of the row. */
+.toggle-row input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 18px;
+}
+
 .copy-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2268,8 +2320,38 @@ pre {
   border: 1px solid var(--line-strong);
 }
 
+/* ── Dragging runs into folders ──
+   The bold moment is the hovered folder, which states the outcome before the
+   drop is committed. Everything else in the drag stays deliberately quiet. */
+
+.run-card[draggable="true"] {
+  cursor: grab;
+}
+
 .run-card.dragging {
-  opacity: 0.5;
+  cursor: grabbing;
+  opacity: 0.4;
+  border-style: dashed;
+  box-shadow: none;
+  transform: none;
+}
+
+/* What the cursor carries: a name for one run, a count for a selection. */
+.run-drag-chip {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  max-width: 260px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: var(--red);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow);
 }
 
 .run-menu[data-direction="up"] {
@@ -2282,21 +2364,77 @@ pre {
   z-index: 5;
 }
 
-/* While a drag is in flight, show every legal destination rather than only the
-   row under the pointer. */
+/* Every legal destination is marked for the whole drag, so the operator sees
+   where a run can land instead of hunting row by row. */
 body.dragging-runs .folder-item[data-drop-folder] {
   outline: 1px dashed var(--line-strong);
   outline-offset: -1px;
+  transition:
+    background-color 120ms ease,
+    box-shadow 140ms ease,
+    outline-color 120ms ease;
+}
+
+/* A folder that already holds every dragged run is not a move. Saying so up
+   front beats letting it glow and then do nothing. */
+body.dragging-runs .folder-item.drop-unavailable {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+body.dragging-runs .folder-item[data-drop-folder] .folder-rename-button,
+body.dragging-runs .folder-item[data-drop-folder] .folder-delete-button {
+  display: none;
 }
 
 .folder-item.drop-target {
   background: var(--surface-hover);
   outline: 2px solid var(--red);
   outline-offset: -1px;
+  box-shadow: 0 10px 26px rgba(183, 54, 45, 0.24);
+}
+
+html[data-theme="dark"] .folder-item.drop-target {
+  box-shadow: 0 10px 26px rgba(227, 93, 82, 0.26);
 }
 
 .folder-item.drop-target .folder-name {
   font-weight: 800;
+}
+
+/* The one bold element: the row states the outcome before the drop is
+   committed, in the same words the resulting toast uses. */
+.folder-item.drop-target::after {
+  content: attr(data-drop-label);
+  flex-basis: 100%;
+  padding: 0 10px 7px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.folder-item.drop-target .folder-count {
+  background: var(--red);
+  color: #fff;
+}
+
+/* The list under the folder is about to change, so the row confirms it caught
+   the runs rather than leaving that to a toast in the far corner. */
+.folder-item.drop-received {
+  animation: folder-received 520ms ease-out;
+}
+
+@keyframes folder-received {
+  from {
+    outline: 2px solid var(--red);
+    outline-offset: -1px;
+    background: var(--surface-hover);
+  }
+  to {
+    outline: 2px solid transparent;
+    outline-offset: -1px;
+    background: transparent;
+  }
 }
 
 #bulk-selected-count.has-selection {
@@ -2898,12 +3036,154 @@ body.dragging-runs .folder-item[data-drop-folder] {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 6px 10px;
+  align-items: center;
   padding: 10px;
-  margin: 8px 0 14px;
+  margin: 8px 0 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface-subtle);
+  background: var(--surface);
   font-size: 13px;
+}
+
+.deploy-artifact-status .status-badge {
+  justify-self: start;
+}
+
+/* The single sentence that says what to do next. Same callout idiom as the
+   training route summary so the two pages read as one product. */
+.deploy-next-step {
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.deploy-next-step:empty {
+  display: none;
+}
+
+.deploy-next-action,
+.deploy-next-running {
+  border-left-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.deploy-next-pass {
+  border-left-color: var(--green);
+  background: var(--green-bg);
+}
+
+.deploy-next-warn {
+  border-left-color: var(--amber);
+  background: var(--amber-bg);
+}
+
+.deploy-next-fail {
+  border-left-color: var(--red);
+  background: var(--failed-bg);
+}
+
+/* Three checks that look alike from the button row alone, so each one states
+   what it costs and what it skips. */
+.deploy-action-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.deploy-action {
+  display: grid;
+  gap: 5px;
+}
+
+.deploy-action button {
+  width: 100%;
+}
+
+.deploy-control-panel .ghost-button {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.deploy-action small,
+.deploy-control-panel label small,
+.mujoco-playback-panel label small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.deploy-advanced {
+  margin-bottom: 14px;
+}
+
+.deploy-advanced[open] > summary {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.deploy-advanced label:last-of-type {
+  margin-bottom: 0;
+}
+
+.deploy-stage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.deploy-report-panel .section-header > button,
+.deploy-report-panel .section-header > .deploy-stage-summary + button {
+  margin-left: auto;
+}
+
+.deploy-report-details {
+  margin-top: 14px;
+}
+
+.deploy-report-details[open] > summary {
+  margin-bottom: 10px;
+}
+
+.deploy-console-details > summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.deploy-console-details > summary .status-badge {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.deploy-console-details[open] > summary {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* A hidden tooltip still occupies layout. Centred on an element that sits in
+   the right half of a narrow viewport, it pushes the document wider than the
+   screen. Anchoring to the element's right edge makes it grow leftwards, and
+   overflow past the left edge is not scrollable, so the page stays put. */
+@media (max-width: 980px) {
+  #deploy [data-tooltip]::after,
+  #convergence [data-tooltip]::after {
+    left: auto;
+    right: 0;
+    transform: none;
+    max-width: calc(100vw - 48px);
+  }
 }
 
 .deploy-artifact-key {
@@ -3192,6 +3472,8 @@ body.dragging-runs .folder-item[data-drop-folder] {
 
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
+  .folder-item.drop-received { animation: none; }
+  body.dragging-runs .folder-item[data-drop-folder] { transition: none; }
 }
 
 /* ── Run card overflow menu (V3.6) ── */

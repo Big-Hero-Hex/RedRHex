@@ -13,6 +13,8 @@ from tools.training_panel import __version__
 from .config import PanelPaths
 
 
+REMOTE_PROTOCOL_VERSION = "3.7.0-remote-parity"
+
 REMOTE_JOB_TYPES = {
     "start_training",
     "stop_process",
@@ -22,6 +24,11 @@ REMOTE_JOB_TYPES = {
     "compact_run",
     "delete_run",
     "send_missed_notifications",
+    "export_video_drive",
+    "validate_deploy",
+    "export_validate_deploy",
+    "mujoco_smoke",
+    "record_mujoco_video",
 }
 
 ROLE_PERMISSIONS = {
@@ -34,6 +41,11 @@ ROLE_PERMISSIONS = {
         "tensorboard",
         "compact_run",
         "send_missed_notifications",
+        "export_video_drive",
+        "validate_deploy",
+        "export_validate_deploy",
+        "mujoco_smoke",
+        "record_mujoco_video",
     },
     "admin": set(REMOTE_JOB_TYPES),
 }
@@ -101,6 +113,7 @@ class RemoteConfig:
         accept_jobs = state.effective_accept_jobs(self) if state else self.accept_jobs
         return {
             "version": __version__,
+            "remote_protocol_version": REMOTE_PROTOCOL_VERSION,
             "machine_id": self.machine_id,
             "configured": self.configured,
             "accept_jobs": accept_jobs,
@@ -161,6 +174,7 @@ def heartbeat_payload(
         "machine_id": config.machine_id,
         "online": True,
         "panel_version": __version__,
+        "remote_protocol_version": REMOTE_PROTOCOL_VERSION,
         "repo_root": str(paths.repo_root),
         "rsl_rl_log_root": str(paths.rsl_rl_log_root),
         "active_job_id": active_job_id,

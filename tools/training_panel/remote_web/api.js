@@ -1,5 +1,5 @@
-import { SUPABASE_ANON_KEY, SUPABASE_URL, VIDEO_BUCKET } from "./config.js?v=3.4.10-sync-health";
-import { BUILT_IN_REWARD_PRESETS, BUILT_IN_TERRAIN_PRESETS } from "./core.js?v=3.4.10-sync-health";
+import { SUPABASE_ANON_KEY, SUPABASE_URL, VIDEO_BUCKET } from "./config.js?v=3.7.0-remote-parity";
+import { BUILT_IN_REWARD_PRESETS, BUILT_IN_TERRAIN_PRESETS } from "./core.js?v=3.7.0-remote-parity";
 
 const TOKEN_KEY = "redrhex_child_access_token";
 const REFRESH_KEY = "redrhex_child_refresh_token";
@@ -188,6 +188,13 @@ export async function invokeFunction(name, payload) {
   });
 }
 
+export async function rpc(name, payload = {}) {
+  return supabaseFetch(`/rest/v1/rpc/${encodeURIComponent(name)}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function createSignedVideoUrl(storagePath, expiresIn = 3600) {
   const encoded = String(storagePath || "")
     .split("/")
@@ -211,7 +218,7 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
   const notificationQuery = userId
     ? `user_id=eq.${encodedUser}&machine_id=eq.${encodedMachine}&select=*&limit=1`
     : "select=*&limit=0";
-  const [machines, machineJobs, legacyJobsResult, claimedJobsResult, machineRuns, legacyRunsResult, deletionsResult, machineArtifactsResult, legacyArtifactsResult, presetsResult, terrainPresetsResult, teamFoldersResult, profilesResult, notificationResult] = await Promise.all([
+  const [machines, machineJobs, legacyJobsResult, claimedJobsResult, machineRuns, legacyRunsResult, deletionsResult, machineArtifactsResult, legacyArtifactsResult, presetsResult, terrainPresetsResult, physicsPresetsResult, teamFoldersResult, profilesResult, notificationResult, capabilitiesResult, activityResult, memberActivityResult, missionActivityResult] = await Promise.all([
     select("machines", `select=*&order=heartbeat_at.desc`),
     select("jobs", `machine_id=eq.${encodedMachine}&select=*&order=created_at.desc&limit=200`),
     optionalSelect("jobs", `machine_id=is.null&select=*&order=created_at.desc&limit=200`),
@@ -223,9 +230,14 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
     optionalSelect("artifacts", `machine_id=is.null&select=*&order=created_at.desc&limit=500`),
     optionalSelect("reward_presets", `select=*&order=built_in.desc,updated_at.desc,name.asc`),
     optionalSelect("terrain_presets", `select=*&order=built_in.desc,updated_at.desc,name.asc`),
+    optionalSelect("physics_presets", `select=*&order=built_in.desc,updated_at.desc,name.asc`),
     optionalSelect("team_folders", `machine_id=eq.${encodedMachine}&select=*&order=name.asc`),
     optionalSelect("profiles", `select=id,email,display_name,role`),
     optionalSelect("notification_settings", notificationQuery),
+    optionalSelect("machine_capabilities", `machine_id=eq.${encodedMachine}&select=*&limit=1`),
+    optionalSelect("team_activity_events", `machine_id=eq.${encodedMachine}&select=*&order=created_at.desc&limit=500`),
+    optionalSelect("team_activity_member_7d", "select=*&order=points.desc,events.desc"),
+    optionalSelect("team_activity_experiment_7d", "select=*&order=points.desc,events.desc"),
   ]);
   const jobs = mergeRows([machineJobs, legacyJobsResult.rows, claimedJobsResult.rows]);
   const runs = mergeRows([machineRuns, legacyRunsResult.rows]);
@@ -245,18 +257,29 @@ export async function loadRemoteSnapshot(machineId, userId = "") {
     notificationSettings: notificationResult.rows[0] || null,
     presets,
     terrainPresets,
+    physicsPresets: physicsPresetsResult.rows,
+    capabilities: capabilitiesResult.rows[0] || null,
+    activity: activityResult.rows,
+    activityMembers: memberActivityResult.rows,
+    activityMissions: missionActivityResult.rows,
     encodedMachine,
     schema: {
       artifacts: machineArtifactsResult.ok,
       runDeletions: deletionsResult.ok,
       rewardPresets: presetsResult.ok,
       terrainPresets: terrainPresetsResult.ok,
+      physicsPresets: physicsPresetsResult.ok,
+      capabilities: capabilitiesResult.ok,
+      activity: activityResult.ok,
       teamFolders: teamFoldersResult.ok,
       warnings: [
         deletionsResult.ok ? "" : `Run deletion tombstones unavailable: ${deletionsResult.error}`,
         machineArtifactsResult.ok ? "" : `Artifacts table unavailable: ${machineArtifactsResult.error}`,
         presetsResult.ok ? "" : `Reward presets table unavailable: ${presetsResult.error}`,
         terrainPresetsResult.ok ? "" : `Terrain presets table unavailable: ${terrainPresetsResult.error}`,
+        physicsPresetsResult.ok ? "" : `Physics presets table unavailable: ${physicsPresetsResult.error}`,
+        capabilitiesResult.ok ? "" : `3.7 capabilities unavailable: ${capabilitiesResult.error}`,
+        activityResult.ok ? "" : `Activity projection unavailable: ${activityResult.error}`,
         teamFoldersResult.ok ? "" : `Team folders table unavailable: ${teamFoldersResult.error}`,
         profilesResult.ok ? "" : `Profiles table unavailable: ${profilesResult.error}`,
         notificationResult.ok ? "" : `Notification settings unavailable: ${notificationResult.error}`,

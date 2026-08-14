@@ -1,4 +1,4 @@
-import { DEFAULT_MACHINE_ID, SUPABASE_URL } from "./config.js?v=3.4.10-sync-health";
+import { DEFAULT_MACHINE_ID, SUPABASE_URL } from "./config.js?v=3.7.0-remote-parity";
 import {
   createSignedVideoUrl,
   currentUser,
@@ -6,27 +6,30 @@ import {
   invokeFunction,
   loadRemoteSnapshot,
   remove,
+  rpc,
   select,
   signIn,
   signOut,
   update,
   upsert,
-} from "./api.js?v=3.4.10-sync-health";
-import { createRemoteRealtime } from "./realtime.js?v=3.4.10-sync-health";
+} from "./api.js?v=3.7.0-remote-parity";
+import { createRemoteRealtime } from "./realtime.js?v=3.7.0-remote-parity";
 import {
   compareHistoryRuns,
   historyRunsForSnapshot,
   jobClientRequestId,
   normalizeHistorySort,
   realRunConfirmsJob,
-} from "./history_sync.js?v=3.4.10-sync-health";
+} from "./history_sync.js?v=3.7.0-remote-parity";
 import {
   REWARD_FIELDS,
+  REMOTE_PROTOCOL_VERSION,
   TERRAIN_DEFAULT_VALUES,
   TERRAIN_FIELDS,
   buildRunMetadataPatch,
   buildActionJob,
   buildTrainingJob,
+  buildDeployPayload,
   buildTweakDraftFromRun,
   canEditPreset,
   canEditRun,
@@ -44,6 +47,9 @@ import {
   machineState,
   normalizePreset,
   normalizeTerrainPreset,
+  normalizePhysicsValues,
+  remoteCompatibility,
+  checkpointReference,
   checkpointIteration,
   checkpointOptionsForRun,
   refreshDelayForSnapshot,
@@ -59,7 +65,11 @@ import {
   videoArtifactForCheckpoint,
   videoStateForCheckpoint,
   videoStateForRun,
-} from "./core.js?v=3.4.10-sync-health";
+} from "./core.js?v=3.7.0-remote-parity";
+import { ALL_VIEW_IDS, ALL_VIEWS, MORE_VIEWS, PRIMARY_VIEWS, isMoreView, routeFromLocation, syncRouteToLocation } from "./ui.js?v=3.7.0-remote-parity";
+import { normalizePhysicsPreset, physicsValuesFromForm, physicsViewHtml } from "./physics_panel.js?v=3.7.0-remote-parity";
+import { deployViewHtml, detectionViewHtml } from "./deploy_panel.js?v=3.7.0-remote-parity";
+import { activityViewHtml } from "./activity_panel.js?v=3.7.0-remote-parity";
 
 const PHONE_MEDIA = window.matchMedia
   ? window.matchMedia("(max-width: 720px)")
@@ -67,9 +77,9 @@ const PHONE_MEDIA = window.matchMedia
 
 const TEXT_AUTOSAVE_DELAY_MS = 350;
 const THEME_KEY = "redrhex_to_go_theme";
-const CHILD_RELEASE_VERSION = "3.4.10";
-const CHILD_RELEASE_NAME = "Sync Health Repair";
-const VIEW_IDS = ["train", "rewards", "terrain", "history", "connection", "dashboard"];
+const CHILD_RELEASE_VERSION = "3.7.0";
+const CHILD_RELEASE_NAME = "Remote Parity";
+const VIEW_IDS = ALL_VIEW_IDS;
 const NOTIFICATION_EVENTS = [
   ["notify_training_converged", "Converged", "Reward improvement has flattened."],
   ["notify_training_completed", "Completed", "Training finished successfully."],
@@ -78,13 +88,22 @@ const NOTIFICATION_EVENTS = [
 ];
 
 function initialView() {
+  const routed = routeFromLocation().view;
   const stored = localStorage.getItem("redrhex_child_view");
-  if (stored === "dashboard") return "train";
-  return VIEW_IDS.includes(stored) ? stored : "train";
+  return VIEW_IDS.includes(routed) ? routed : VIEW_IDS.includes(stored) ? stored : "dashboard";
+}
+
+function storedObject(key, fallback) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "null");
+    return value && typeof value === "object" ? { ...fallback, ...value } : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function initialHistorySort() {
-  return normalizeHistorySort(localStorage.getItem("redrhex_child_history_sort"));
+  return normalizeHistorySort(routeFromLocation().sort || localStorage.getItem("redrhex_child_history_sort"));
 }
 
 function preferredTheme() {
@@ -108,6 +127,11 @@ const state = {
     folders: [],
     presets: [],
     terrainPresets: [],
+    physicsPresets: [],
+    capabilities: null,
+    activity: [],
+    activityMembers: [],
+    activityMissions: [],
     notificationSettings: null,
     schema: { artifacts: true, runDeletions: true, rewardPresets: true, terrainPresets: true, teamFolders: true, warnings: [] },
   },
@@ -118,7 +142,11 @@ const state = {
   draftTerrainPreset: null,
   tweakTerrainPresetId: "",
   tweakTerrainOverrides: null,
-  trainForm: {
+  selectedPhysicsPresetId: localStorage.getItem("redrhex_child_physics_preset") || "baseline",
+  draftPhysicsPreset: null,
+  physicsSearch: "",
+  trainForm: storedObject("redrhex_child_train_draft", {
+    training_route: "standard",
     task: "Template-Redrhex-ForwardFast-Direct-v0",
     num_envs: 4,
     max_iterations: 8,
@@ -126,12 +154,20 @@ const state = {
     seed: "",
     display_name: "",
     folder: "",
-  },
+    resume_run_id: "",
+    resume_iteration: "",
+    teacher_iterations: 1500,
+    distillation_iterations: 800,
+    ppo_iterations: 1500,
+  }),
   trainFolderCreating: false,
-  selectedRunId: "",
-  runSearch: "",
-  folderFilter: "all",
+  selectedRunId: routeFromLocation().run,
+  runSearch: routeFromLocation().search,
+  folderFilter: routeFromLocation().folder,
+  historyStatus: routeFromLocation().status,
   historySort: initialHistorySort(),
+  activityFilter: "all",
+  mobileMoreOpen: false,
   signedVideos: {},
   videoCheckpointByRun: {},
   runDrafts: {},
@@ -178,6 +214,20 @@ document.documentElement.dataset.theme = state.theme;
 
 function role() {
   return state.profile?.role || "viewer";
+}
+
+function compatibility() {
+  return remoteCompatibility(state.snapshot.targetMachine || state.snapshot.machine, state.snapshot.capabilities);
+}
+
+function canMutate() {
+  return canOperate(role()) && compatibility().compatible;
+}
+
+function assertMutationAllowed() {
+  if (!canOperate(role())) throw new Error("Viewer accounts are read-only.");
+  const result = compatibility();
+  if (!result.compatible) throw new Error(result.message);
 }
 
 function defaultNotificationSettings() {
@@ -237,6 +287,29 @@ function selectedTerrainPresetForTraining() {
   return preset;
 }
 
+function physicsPresetsForView() {
+  const presets = (state.snapshot.physicsPresets || []).map(normalizePhysicsPreset);
+  const withBaseline = presets.length ? presets : [normalizePhysicsPreset({ id: "baseline", name: "Baseline", description: "Repository defaults", built_in: true })];
+  if (!state.draftPhysicsPreset) return withBaseline;
+  return [state.draftPhysicsPreset, ...withBaseline.filter((item) => item.id !== state.draftPhysicsPreset.id)];
+}
+
+function selectedPhysicsPreset() {
+  const presets = physicsPresetsForView();
+  return presets.find((preset) => preset.id === state.selectedPhysicsPresetId) || presets[0];
+}
+
+function syncRoute(options = {}) {
+  syncRouteToLocation({
+    view: state.view,
+    folder: state.folderFilter,
+    run: state.selectedRunId,
+    search: state.runSearch,
+    status: state.historyStatus,
+    sort: state.historySort,
+  }, options);
+}
+
 function historyRunsForView(sortBy = "newest") {
   return historyRunsForSnapshot(state.snapshot, { sortBy, localPendingTrainingJobs: state.localPendingTrainingJobs });
 }
@@ -256,7 +329,6 @@ function runById(runId) {
 }
 
 function selectedHistoryRun() {
-  if (state.folderFilter === "all") return null;
   return selectedRun({ fallback: !state.isPhone });
 }
 
@@ -308,13 +380,11 @@ function toggleTheme() {
 }
 
 function setView(view) {
-  if (view === "history") {
-    state.folderFilter = "all";
-    state.selectedRunId = "";
-    state.runSearch = "";
-  }
+  if (!VIEW_IDS.includes(view)) return;
   state.view = view;
+  state.mobileMoreOpen = false;
   localStorage.setItem("redrhex_child_view", view);
+  syncRoute({ replace: false });
   render();
 }
 
@@ -464,6 +534,7 @@ function folderSelectValue(selectId, createInputId) {
 }
 
 async function ensureTeamFolder(folderName) {
+  assertMutationAllowed();
   const name = normalizeFolderName(folderName);
   if (!name || !state.machineId) return null;
   if (folders().some((folder) => folderKey(folder) === folderKey(name))) return { name };
@@ -484,6 +555,7 @@ async function ensureTeamFolder(folderName) {
 }
 
 async function createFolderFromInput() {
+  assertMutationAllowed();
   const input = document.querySelector("#history-folder-new");
   const name = normalizeFolderName(input?.value || state.newFolderName);
   if (!name) return setMessage("Type a folder name first.");
@@ -579,6 +651,7 @@ async function refresh(options = {}) {
     state.snapshot = await loadRemoteSnapshot(state.machineId, state.user?.id || "");
     state.snapshot.presets = state.snapshot.presets.map(normalizePreset);
     state.snapshot.terrainPresets = (state.snapshot.terrainPresets || []).map(normalizeTerrainPreset);
+    state.snapshot.physicsPresets = (state.snapshot.physicsPresets || []).map(normalizePhysicsPreset);
     pruneLocalPendingTrainingJobs();
     const freshNotificationSettings = normalizeNotificationSettings(state.snapshot.notificationSettings);
     state.notificationSettings = freshNotificationSettings;
@@ -599,6 +672,9 @@ async function refresh(options = {}) {
     }
     if (!state.snapshot.terrainPresets.find((preset) => preset.id === state.selectedTerrainPresetId) && state.snapshot.terrainPresets[0]) {
       state.selectedTerrainPresetId = state.snapshot.terrainPresets[0].id;
+    }
+    if (!physicsPresetsForView().find((preset) => preset.id === state.selectedPhysicsPresetId)) {
+      state.selectedPhysicsPresetId = physicsPresetsForView()[0]?.id || "baseline";
     }
     state.lastUpdated = new Date().toISOString();
     await ensureSelectedVideoSigned();
@@ -663,21 +739,23 @@ function healthChecks() {
     ["rewards", "Reward preset schema", Boolean(state.snapshot.schema?.rewardPresets), state.snapshot.schema?.rewardPresets ? "Shared presets ready" : "Apply schema.sql in Supabase"],
     ["terrain", "Terrain preset schema", Boolean(state.snapshot.schema?.terrainPresets), state.snapshot.schema?.terrainPresets ? "Shared terrain presets ready" : "Apply schema.sql in Supabase"],
     ["video", "Video storage", Boolean(state.snapshot.schema?.artifacts), state.snapshot.schema?.artifacts ? "Private signed playback ready" : "Apply schema.sql in Supabase"],
+    ["protocol", "3.7 remote protocol", compatibility().compatible, compatibility().message],
+    ["physics", "Physics preset schema", Boolean(state.snapshot.schema?.physicsPresets), state.snapshot.schema?.physicsPresets ? "Shared sparse profiles ready" : "Apply the 3.7 migration"],
   ];
 }
 
 function shell() {
-  const views = [
-    ["train", "Train"],
-    ["rewards", "Rewards"],
-    ["terrain", "Terrain"],
-    ["history", "History"],
-    ["connection", "Connection"],
-    ["dashboard", "Dashboard"],
-  ];
   const machine = state.snapshot.targetMachine || state.snapshot.machine;
   const tone = statusTone(machineState(machine));
+  const protocol = compatibility();
   return `
+    <div class="parity-layout">
+    <aside class="desktop-sidebar" aria-label="Primary navigation">
+      <div class="sidebar-brand"><span class="brand-mark" aria-hidden="true">R</span><div><strong>RedRHex</strong><small>To Go</small></div></div>
+      <nav>${ALL_VIEWS.map(([id, label, icon]) => `<button class="sidebar-link ${state.view === id ? "active" : ""}" data-action="view" data-view="${id}" ${state.view === id ? 'aria-current="page"' : ""}><span aria-hidden="true">${escapeHtml(icon)}</span>${escapeHtml(label)}</button>`).join("")}</nav>
+      <div class="sidebar-foot"><span class="badge ${tone}">${escapeHtml(machineState(machine))}</span><small>${escapeHtml(state.machineId)}</small></div>
+    </aside>
+    <div class="parity-main">
     <header class="topbar">
       <div>
         <p class="eyebrow">BioRoLa ABAD RHex Team</p>
@@ -686,6 +764,7 @@ function shell() {
       </div>
       <div class="top-status">
         <span id="child-release-badge" class="badge release-badge">To Go V${escapeHtml(CHILD_RELEASE_VERSION)} · ${escapeHtml(CHILD_RELEASE_NAME)}</span>
+        <span id="protocol-mode-badge" class="badge ${protocol.compatible ? "good" : "warning"}">${escapeHtml(protocol.mode)}</span>
         <span id="machine-state-badge" class="badge ${tone}">${escapeHtml(machineState(machine))}</span>
         <span id="role-badge" class="badge">${escapeHtml(role())}</span>
         <span id="last-updated-badge" class="badge">${state.lastUpdated ? `Updated ${escapeHtml(formatRelativeTime(state.lastUpdated))}` : "Not updated yet"}</span>
@@ -693,14 +772,19 @@ function shell() {
         <button class="theme-toggle" data-action="toggle-theme">${state.theme === "dark" ? "Light Mode" : "Dark Mode"}</button>
       </div>
     </header>
-    <nav class="nav-tabs">
-      ${views.map(([id, label]) => `<button class="${state.view === id ? "active" : ""}" data-action="view" data-view="${id}">${label}</button>`).join("")}
+    <nav class="nav-tabs" aria-label="Section shortcuts">
+      ${ALL_VIEWS.map(([id, label]) => `<button class="${state.view === id ? "active" : ""}" data-action="view" data-view="${id}">${label}</button>`).join("")}
     </nav>
+    ${state.user && !protocol.compatible ? `<div class="notice warning compatibility-notice"><strong>Read-only compatibility mode.</strong> ${escapeHtml(protocol.message)}</div>` : ""}
     <div id="message-notice" class="notice ${state.lastQueuedJobId && /^Queued/.test(state.message) ? "queue-success" : ""}" ${state.message ? "" : "hidden"}>${escapeHtml(state.message)}</div>
     <div id="schema-warnings">${(state.snapshot.schema?.warnings || []).map((warning) => `<div class="notice warning">${escapeHtml(warning)}</div>`).join("")}</div>
     <div id="load-error-notice" class="notice danger" ${state.loadError ? "" : "hidden"}>${escapeHtml(state.loadError)}</div>
     ${state.user ? welcomeBanner() : ""}
     ${state.user ? page() : loginPage()}
+    </div>
+    ${state.user ? `<nav class="mobile-nav" aria-label="Mobile navigation">${PRIMARY_VIEWS.map(([id, label, icon]) => `<button class="${state.view === id ? "active" : ""}" data-action="view" data-view="${id}"><span aria-hidden="true">${escapeHtml(icon)}</span><small>${escapeHtml(label)}</small></button>`).join("")}<button class="${isMoreView(state.view) || state.mobileMoreOpen ? "active" : ""}" data-action="toggle-mobile-more"><span aria-hidden="true">•••</span><small>More</small></button></nav>${state.mobileMoreOpen ? `<div class="mobile-more-scrim" data-action="toggle-mobile-more"></div><section class="mobile-more-sheet" aria-label="More views"><div class="section-head"><h2>More</h2><button data-action="toggle-mobile-more" aria-label="Close">×</button></div><div class="mobile-more-grid">${MORE_VIEWS.map(([id, label, icon]) => `<button class="${state.view === id ? "active" : ""}" data-action="view" data-view="${id}"><span aria-hidden="true">${escapeHtml(icon)}</span><strong>${escapeHtml(label)}</strong></button>`).join("")}</div></section>` : ""}` : ""}
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+    </div>
   `;
 }
 
@@ -774,10 +858,21 @@ function loginPage() {
 }
 
 function page() {
+  if (state.view === "dashboard") return dashboardView();
   if (state.view === "train") return trainView();
   if (state.view === "rewards") return rewardsView();
   if (state.view === "terrain") return terrainView();
+  if (state.view === "physics") return physicsViewHtml({
+    presets: physicsPresetsForView(),
+    selectedId: state.selectedPhysicsPresetId,
+    fieldSchema: state.snapshot.capabilities?.physics?.field_schema || [],
+    editable: canMutate() && Boolean(state.snapshot.schema?.physicsPresets),
+    search: state.physicsSearch,
+  });
   if (state.view === "history") return historyView();
+  if (state.view === "deploy") return deployViewHtml({ runs: historyRunsForView(), selectedRunId: state.selectedRunId, capability: state.snapshot.capabilities, canOperate: canOperate(role()), compatible: compatibility().compatible });
+  if (state.view === "detection") return detectionViewHtml({ detection: state.snapshot.capabilities?.detection || {}, runs: historyRunsForView() });
+  if (state.view === "activity") return activityViewHtml({ events: state.snapshot.activity || [], members: state.snapshot.activityMembers || [], missions: state.snapshot.activityMissions || [], filter: state.activityFilter });
   if (state.view === "connection") return connectionView();
   return dashboardView();
 }
@@ -910,18 +1005,24 @@ function jobSummary(jobs) {
 function trainView() {
   const preset = selectedPreset();
   const terrainPreset = selectedTerrainPresetForTraining();
-  const disabled = !canOperate(role());
+  const physicsPreset = selectedPhysicsPreset();
+  const disabled = !canMutate();
   const form = state.trainForm;
+  const route = form.training_route || "standard";
+  const sourceRun = runById(form.resume_run_id) || historyRunsForView().find((run) => run.latest_checkpoint) || null;
+  const sourceOptions = sourceRun ? checkpointOptionsForRun(sourceRun, state.snapshot.artifacts) : [];
+  const needsSource = ["sensor_v2_distillation", "sensor_v2_ppo"].includes(route) || (route === "standard" && Boolean(form.resume_run_id));
   const currentFolder = normalizeFolderName(form.folder || "");
   const trainFolderCreating = state.trainFolderCreating || Boolean(currentFolder && selectValueForFolder(currentFolder) === "__new__");
   return `
     <section class="split-grid">
       <article class="panel">
         <h2>Launch Training</h2>
-        <p class="muted">Queues a job for mother. The worker will run one Isaac/GPU action at a time.</p>
-        <label>Machine ID <input id="machine-id" value="${escapeHtml(state.machineId)}"></label>
-        <label>Task <input id="task" value="${escapeHtml(form.task)}"></label>
-        <div class="input-row">
+        <p class="muted">Route-aware, idempotent queueing. Irrelevant fields are omitted before the request leaves this browser.</p>
+        <div class="button-row wrap train-defaults"><button data-action="train-default-smoke">Smoke defaults</button><button data-action="train-default-debug">Debug defaults</button><span class="badge good">Native springs</span></div>
+        <label>Training Route <select id="training-route"><option value="standard" ${route === "standard" ? "selected" : ""}>Standard</option><option value="sensor_v2_full" ${route === "sensor_v2_full" ? "selected" : ""}>Full F1 → F2 → F3 Pipeline</option><option value="sensor_v2_teacher" ${route === "sensor_v2_teacher" ? "selected" : ""}>F1 Teacher</option><option value="sensor_v2_distillation" ${route === "sensor_v2_distillation" ? "selected" : ""}>F2 Distillation</option><option value="sensor_v2_ppo" ${route === "sensor_v2_ppo" ? "selected" : ""}>F3 PPO</option></select></label>
+        <label class="${route === "standard" ? "" : "hidden"}">Task <input id="task" value="${escapeHtml(form.task)}"></label>
+        <div class="input-row ${route === "sensor_v2_full" ? "hidden" : ""}">
           <label>Run Name <input id="run-display-name" maxlength="120" placeholder="optional" value="${escapeHtml(form.display_name || "")}"></label>
           <label>Folder
             <select id="run-folder-before-launch">
@@ -934,6 +1035,12 @@ function trainView() {
           <label>Envs <input id="num-envs" type="number" min="1" max="8192" value="${escapeHtml(form.num_envs)}"></label>
           <label>Iterations <input id="max-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.max_iterations)}"></label>
         </div>
+        <div class="input-row ${route === "sensor_v2_full" ? "" : "hidden"}">
+          <label>F1 iterations <input id="teacher-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.teacher_iterations)}"></label>
+          <label>F2 iterations <input id="distillation-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.distillation_iterations)}"></label>
+          <label>F3 iterations <input id="ppo-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.ppo_iterations)}"></label>
+        </div>
+        ${["standard", "sensor_v2_distillation", "sensor_v2_ppo"].includes(route) ? `<fieldset class="checkpoint-reference"><legend>${route === "standard" ? "Resume from checkpoint (optional)" : "Source checkpoint (required)"}</legend><label>Run <select id="resume-run"><option value="">${route === "standard" ? "Start a new run" : "Select a source run"}</option>${historyRunsForView().filter((run) => run.latest_checkpoint).map((run) => `<option value="${escapeHtml(run.id)}" ${run.id === form.resume_run_id ? "selected" : ""}>${escapeHtml(run.display_name || run.id)}</option>`).join("")}</select></label><label class="${needsSource ? "" : "hidden"}">Iteration <select id="resume-iteration">${sourceOptions.map((option) => `<option value="${escapeHtml(checkpointIteration(option.path) ?? "")}" ${String(checkpointIteration(option.path) ?? "") === String(form.resume_iteration ?? "") ? "selected" : ""}>${escapeHtml(option.label || `Iteration ${checkpointIteration(option.path)}`)}</option>`).join("")}</select></label><small>Only run ID and iteration are sent; Mother resolves and containment-checks the path.</small></fieldset>` : ""}
         <label>Device <input id="device" value="${escapeHtml(form.device)}"></label>
         <label>Seed <input id="seed" type="number" placeholder="optional" value="${escapeHtml(form.seed ?? "")}"></label>
         <div class="train-preset-pickers">
@@ -947,22 +1054,25 @@ function trainView() {
               ${state.snapshot.terrainPresets.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === terrainPreset.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}
             </select>
           </label>
+          <label class="preset-select-card">Physics Preset
+            <select id="train-physics-preset">${physicsPresetsForView().map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === physicsPreset.id ? "selected" : ""}>${escapeHtml(item.name)}</option>`).join("")}</select>
+          </label>
         </div>
         <div class="button-row wrap">
           <button class="primary" data-action="queue-training" ${disabled ? "disabled" : ""}>Queue Training</button>
           <button data-action="tweak-last-run" ${disabled ? "disabled" : ""}>Tweak From Last Run</button>
         </div>
         ${trainQueueNoticeHtml()}
-        ${disabled ? `<p class="muted">Viewer accounts can inspect but cannot launch training.</p>` : ""}
+        ${disabled ? `<p class="muted">${escapeHtml(compatibility().compatible ? "Viewer accounts can inspect but cannot launch training." : compatibility().message)}</p>` : ""}
       </article>
       <article class="panel">
-        <div id="train-preset-snapshot">${trainPresetSnapshot(preset, terrainPreset)}</div>
+        <div id="train-preset-snapshot">${trainPresetSnapshot(preset, terrainPreset, physicsPreset)}</div>
       </article>
     </section>
   `;
 }
 
-function trainPresetSnapshot(preset, terrainPreset = selectedTerrainPreset()) {
+function trainPresetSnapshot(preset, terrainPreset = selectedTerrainPreset(), physicsPreset = selectedPhysicsPreset()) {
   return `
     <h2>Preset Snapshot</h2>
     <h3>${escapeHtml(preset.name)}</h3>
@@ -971,6 +1081,9 @@ function trainPresetSnapshot(preset, terrainPreset = selectedTerrainPreset()) {
     <h3>${escapeHtml(terrainPreset.name)}</h3>
     <p class="muted">${escapeHtml(terrainPreset.description || "No description.")}</p>
     ${terrainSnapshot(terrainPreset.values)}
+    <h3>${escapeHtml(physicsPreset.name)} Physics</h3>
+    <p class="muted">${escapeHtml(physicsPreset.description || "Sparse overrides on repository defaults.")}</p>
+    ${rewardSnapshot(physicsPreset.values)}
   `;
 }
 
@@ -991,7 +1104,7 @@ function terrainSnapshot(values) {
 function rewardsView() {
   const preset = state.draftPreset || selectedPreset();
   const rewardSchemaReady = Boolean(state.snapshot.schema?.rewardPresets);
-  const editable = (rewardSchemaReady || preset.draft) && canEditPreset(role()) && !preset.built_in;
+  const editable = (rewardSchemaReady || preset.draft) && canMutate() && !preset.built_in;
   return `
     <section class="rewards-page">
       ${presetRail("reward", preset, rewardSchemaReady)}
@@ -1012,7 +1125,7 @@ function rewardsView() {
 function terrainView() {
   const preset = state.draftTerrainPreset || selectedTerrainPreset();
   const terrainSchemaReady = Boolean(state.snapshot.schema?.terrainPresets);
-  const editable = terrainSchemaReady && canEditPreset(role()) && !preset.built_in;
+  const editable = terrainSchemaReady && canMutate() && !preset.built_in;
   return `
     <section class="rewards-page terrain-page">
       ${presetRail("terrain", preset, terrainSchemaReady)}
@@ -1044,7 +1157,7 @@ function presetRail(kind, preset, schemaReady) {
           <h2>${escapeHtml(title)}</h2>
           <p class="muted">${escapeHtml(subtitle)}</p>
         </div>
-        <button class="icon-action" title="New preset" data-action="${newAction}" ${!schemaReady || !canEditPreset(role()) ? "disabled" : ""}>+</button>
+        <button class="icon-action" title="New preset" data-action="${newAction}" ${!schemaReady || !canMutate() ? "disabled" : ""}>+</button>
       </div>
       ${schemaReady ? "" : `<p class="muted">Using built-in fallback presets until Supabase schema is updated.</p>`}
       <div class="preset-scroll">
@@ -1068,7 +1181,7 @@ function rewardHeader(preset, rewardSchemaReady, editable) {
       </div>
       <div class="button-row reward-actions">
         <button data-action="toggle-all-groups" data-kind="reward">Collapse All</button>
-        <button data-action="duplicate-preset" ${!rewardSchemaReady || !canEditPreset(role()) ? "disabled" : ""}>Duplicate</button>
+        <button data-action="duplicate-preset" ${!rewardSchemaReady || !canMutate() ? "disabled" : ""}>Duplicate</button>
         <button class="danger" data-action="delete-preset" ${!editable ? "disabled" : ""}>${preset.draft ? "Discard Draft" : "Delete"}</button>
         <button class="primary" data-action="save-preset" ${!editable || !rewardSchemaReady ? "disabled" : ""}>${preset.draft ? "Save as Preset" : "Save Preset"}</button>
       </div>
@@ -1085,7 +1198,7 @@ function terrainHeader(preset, terrainSchemaReady, editable) {
       </div>
       <div class="button-row reward-actions">
         <button data-action="toggle-all-groups" data-kind="terrain">Collapse All</button>
-        <button data-action="duplicate-terrain-preset" ${!terrainSchemaReady || !canEditPreset(role()) ? "disabled" : ""}>Duplicate</button>
+        <button data-action="duplicate-terrain-preset" ${!terrainSchemaReady || !canMutate() ? "disabled" : ""}>Duplicate</button>
         <button class="danger" data-action="delete-terrain-preset" ${!editable ? "disabled" : ""}>Delete</button>
         <button class="primary" data-action="save-terrain-preset" ${!editable ? "disabled" : ""}>Save Preset</button>
       </div>
@@ -1182,6 +1295,7 @@ function filteredRuns() {
     const folder = run.folder || "";
     if (state.folderFilter === "uncategorized" && folder) return false;
     if (state.folderFilter !== "all" && state.folderFilter !== "uncategorized" && folder !== state.folderFilter) return false;
+    if (state.historyStatus !== "all" && String(run.status || "unknown").toLowerCase() !== state.historyStatus) return false;
     if (!q) return true;
     return `${run.id} ${run.display_name || ""} ${run.status || ""} ${folder}`.toLowerCase().includes(q);
   });
@@ -1264,7 +1378,8 @@ function folderCard(folder) {
 function historyBrowserContent() {
   if (state.folderFilter === "all") {
     const summaries = folderSummaries();
-    return `<div class="folder-list">${summaries.map(folderCard).join("") || empty("No folders yet. Create one above, then move runs into it.")}</div>`;
+    const runs = filteredRuns();
+    return `<div class="folder-list">${summaries.map(folderCard).join("")}</div><div class="run-list all-runs-list">${runs.map(runCardWithOptionalInlineDetails).join("") || empty("No matching runs yet.")}</div>`;
   }
   const runs = filteredRuns();
   return `
@@ -1281,7 +1396,7 @@ function historyLayout() {
   const selected = selectedHistoryRun();
   const phoneClass = state.isPhone ? "inline-history" : "";
   const root = state.folderFilter === "all";
-  const currentLabel = root ? "Folders" : folderLabel(state.folderFilter);
+  const currentLabel = root ? "All runs" : folderLabel(state.folderFilter);
   const folderCount = folderSummaries().length;
   return `
     <section class="history-layout ${phoneClass}">
@@ -1304,10 +1419,13 @@ function historyLayout() {
               <option value="name" ${state.historySort === "name" ? "selected" : ""}>Name</option>
             </select>
           </label>
+          <label>Status
+            <select id="history-status"><option value="all" ${state.historyStatus === "all" ? "selected" : ""}>All statuses</option>${["queued", "running", "stopping", "completed", "failed", "interrupted"].map((status) => `<option value="${status}" ${state.historyStatus === status ? "selected" : ""}>${status}</option>`).join("")}</select>
+          </label>
         </div>
         <div id="history-browser">${historyBrowserContent()}</div>
       </aside>
-      ${state.isPhone ? "" : `<article class="panel run-details">${selected ? runDetails(selected, { context: "desktop" }) : empty(root ? "Open a folder to see runs." : "Select a run.")}</article>`}
+      ${state.isPhone ? "" : `<article class="panel run-details">${selected ? runDetails(selected, { context: "desktop" }) : empty("Select a run.")}</article>`}
     </section>
   `;
 }
@@ -1714,7 +1832,7 @@ function teamVideoSection(run) {
   const video = videoStateForCheckpoint(run, state.snapshot.artifacts, checkpoint);
   const videoArtifact = video.artifact;
   const signed = videoArtifact ? signedVideoEntry(videoArtifact.storage_path)?.url || "" : "";
-  const runnable = canOperate(role()) && Boolean(checkpoint);
+  const runnable = canMutate() && Boolean(checkpoint);
   const storagePath = videoArtifact?.storage_path || "";
   const selectedIteration = Number.isFinite(selectedOption?.iteration) ? selectedOption.iteration : checkpointIteration(checkpoint);
   const selectedLabel = Number.isFinite(selectedIteration)
@@ -1818,8 +1936,10 @@ function runDetails(run, { context = "desktop" } = {}) {
     `;
   }
   const draft = currentRunDraft(run);
-  const editable = canEditRun(role());
-  const tweakable = canOperate(role()) && canBuildTweakFromRun(run, state.snapshot.presets);
+  const editable = canEditRun(role()) && compatibility().compatible;
+  const tweakable = canMutate() && canBuildTweakFromRun(run, state.snapshot.presets);
+  const mutable = canMutate();
+  const running = ["running", "stopping", "queued", "claimed"].includes(String(run.status || "").toLowerCase());
   const folderValue = normalizeFolderName(draft.folder ?? run.folder ?? "");
   const folderCreating = Boolean(state.runFolderCreatingByRun[run.id] || (folderValue && selectValueForFolder(folderValue) === "__new__"));
   return `
@@ -1855,8 +1975,14 @@ function runDetails(run, { context = "desktop" } = {}) {
       <h3>Safe Remote Actions</h3>
       <div class="button-row wrap">
         <button data-action="tweak-run" ${tweakable ? "" : "disabled"}>Tweak From This Run</button>
-        <button data-action="job-tensorboard" ${canOperate(role()) ? "" : "disabled"}>TensorBoard</button>
-        <button data-action="job-compact-run" ${canOperate(role()) ? "" : "disabled"}>Compact Run</button>
+        <button data-action="resume-run" ${mutable && run.latest_checkpoint ? "" : "disabled"}>Resume</button>
+        <button data-action="stop-run" ${mutable && running ? "" : "disabled"}>Stop</button>
+        <button data-action="job-tensorboard" ${mutable ? "" : "disabled"}>TensorBoard</button>
+        <button data-action="job-export-onnx" ${mutable && run.latest_checkpoint ? "" : "disabled"}>Export ONNX</button>
+        <button data-action="job-drive-export" ${mutable && run.latest_video ? "" : "disabled"}>Drive Export</button>
+        <button data-action="open-run-deploy" ${mutable ? "" : "disabled"}>Deploy Checks</button>
+        <button data-action="job-compact-run" ${mutable ? "" : "disabled"}>Compact Run</button>
+        <button class="danger" data-action="delete-run" ${role() === "admin" && compatibility().compatible ? "" : "disabled"}>Delete</button>
       </div>
     </section>
     ${relatedJobsSection(run)}
@@ -2473,10 +2599,13 @@ function rememberQueuedJob(job, rows = []) {
 }
 
 async function queueTraining() {
+  assertMutationAllowed();
   state.machineId = document.querySelector("#machine-id")?.value || state.machineId;
   localStorage.setItem("redrhex_machine_id", state.machineId);
   const launchFolder = folderSelectValue("run-folder-before-launch", "run-folder-before-launch-new");
   state.trainForm = {
+    ...state.trainForm,
+    training_route: document.querySelector("#training-route")?.value || state.trainForm.training_route || "standard",
     task: document.querySelector("#task")?.value || "Template-Redrhex-ForwardFast-Direct-v0",
     display_name: String(document.querySelector("#run-display-name")?.value || "").trim(),
     folder: launchFolder,
@@ -2484,7 +2613,13 @@ async function queueTraining() {
     max_iterations: Number(document.querySelector("#max-iterations")?.value || 8),
     device: document.querySelector("#device")?.value || "cuda:0",
     seed: document.querySelector("#seed")?.value || "",
+    resume_run_id: document.querySelector("#resume-run")?.value || "",
+    resume_iteration: document.querySelector("#resume-iteration")?.value || "",
+    teacher_iterations: Number(document.querySelector("#teacher-iterations")?.value || state.trainForm.teacher_iterations || 1500),
+    distillation_iterations: Number(document.querySelector("#distillation-iterations")?.value || state.trainForm.distillation_iterations || 800),
+    ppo_iterations: Number(document.querySelector("#ppo-iterations")?.value || state.trainForm.ppo_iterations || 1500),
   };
+  localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
   const presetId = document.querySelector("#train-preset")?.value || state.selectedPresetId;
   state.selectedPresetId = presetId;
   localStorage.setItem("redrhex_child_preset", presetId);
@@ -2497,15 +2632,27 @@ async function queueTraining() {
   }
   const preset = selectedPreset();
   const terrainPreset = selectedTerrainPresetForTraining();
+  const physicsPreset = selectedPhysicsPreset();
   if (state.trainForm.folder) {
     await ensureTeamFolder(state.trainForm.folder);
   }
   const params = {
+    training_route: state.trainForm.training_route,
     task: state.trainForm.task,
     num_envs: state.trainForm.num_envs,
     max_iterations: state.trainForm.max_iterations,
     device: state.trainForm.device,
+    teacher_iterations: state.trainForm.teacher_iterations,
+    distillation_iterations: state.trainForm.distillation_iterations,
+    ppo_iterations: state.trainForm.ppo_iterations,
   };
+  if (state.trainForm.resume_run_id) {
+    params.resume = state.trainForm.training_route === "standard";
+    params.checkpoint_ref = checkpointReference(state.trainForm.resume_run_id, state.trainForm.resume_iteration || null);
+  }
+  if (["sensor_v2_distillation", "sensor_v2_ppo"].includes(state.trainForm.training_route) && !params.checkpoint_ref) {
+    throw new Error("F2 and F3 require a source run and checkpoint iteration.");
+  }
   if (state.trainForm.display_name) params.display_name = state.trainForm.display_name;
   if (state.trainForm.folder) params.folder = state.trainForm.folder;
   if (state.trainForm.seed !== "") params.seed = Number(state.trainForm.seed);
@@ -2520,6 +2667,8 @@ async function queueTraining() {
     params,
     preset,
     terrainPreset,
+    physicsPreset,
+    physicsSchema: state.snapshot.capabilities?.physics?.field_schema || [],
     role: role(),
     userId: state.user?.id,
     requesterLabel: requesterLabel(),
@@ -2533,7 +2682,7 @@ async function queueTraining() {
     state.trainForm.display_name = "";
     const runNameInput = document.querySelector("#run-display-name");
     if (runNameInput) runNameInput.value = "";
-    setTrainQueueNotice(`Queued training with ${preset.name} and ${terrainPreset.name}. It will stay gray in History until mother confirms the run.`, "queue-success");
+    setTrainQueueNotice(`Queued ${state.trainForm.training_route} with ${preset.name}, ${terrainPreset.name}, and ${physicsPreset.name}. It will stay gray in History until mother confirms the run.`, "queue-success");
     refresh({ silent: true, reason: "queue-training" }).catch((error) => {
       setTrainQueueNotice(friendlyErrorMessage(error), "warning");
     });
@@ -2616,7 +2765,7 @@ function editablePresetForKind(kind) {
   const preset = isTerrain ? state.draftTerrainPreset || selectedTerrainPreset() : state.draftPreset || selectedPreset();
   const schemaReady = isTerrain ? Boolean(state.snapshot.schema?.terrainPresets) : Boolean(state.snapshot.schema?.rewardPresets);
   if (!isTerrain && preset?.draft && !state.draftPreset) return null;
-  if (!preset || preset.built_in || !schemaReady || !canEditPreset(role())) return null;
+  if (!preset || preset.built_in || !schemaReady || !canMutate()) return null;
   return preset;
 }
 
@@ -2658,6 +2807,7 @@ async function flushPresetMetadataAutosave(kind) {
 }
 
 async function savePresetMetadata(kind, options = {}) {
+  assertMutationAllowed();
   const keys = presetMetadataStateKeys(kind);
   if (state[keys.saving]) {
     state[keys.queued] = true;
@@ -2720,6 +2870,7 @@ async function savePresetMetadata(kind, options = {}) {
 }
 
 async function savePreset() {
+  assertMutationAllowed();
   const preset = state.draftPreset || selectedPreset();
   if (preset.built_in) return;
   const payload = {
@@ -2741,6 +2892,7 @@ async function savePreset() {
 }
 
 async function deletePreset() {
+  assertMutationAllowed();
   const preset = state.draftPreset || selectedPreset();
   if (!preset || preset.built_in) return;
   if (!window.confirm(`Delete reward preset "${preset.name}"?`)) return;
@@ -2760,6 +2912,7 @@ async function deletePreset() {
 }
 
 function duplicatePreset() {
+  assertMutationAllowed();
   const source = state.draftPreset || selectedPreset();
   const id = slugify(`${source.id || source.name}-copy`);
   if (source.draft) state.tweakDraftPreset = null;
@@ -2777,6 +2930,7 @@ function duplicatePreset() {
 }
 
 async function saveTerrainPreset() {
+  assertMutationAllowed();
   const preset = state.draftTerrainPreset || selectedTerrainPreset();
   if (preset.built_in) return;
   const payload = {
@@ -2798,6 +2952,7 @@ async function saveTerrainPreset() {
 }
 
 async function deleteTerrainPreset() {
+  assertMutationAllowed();
   const preset = state.draftTerrainPreset || selectedTerrainPreset();
   if (!preset || preset.built_in) return;
   if (!window.confirm(`Delete terrain preset "${preset.name}"?`)) return;
@@ -2815,6 +2970,7 @@ async function deleteTerrainPreset() {
 }
 
 function duplicateTerrainPreset() {
+  assertMutationAllowed();
   const source = state.draftTerrainPreset || selectedTerrainPreset();
   const id = slugify(`${source.id || source.name}-copy`);
   state.draftTerrainPreset = {
@@ -2830,6 +2986,7 @@ function duplicateTerrainPreset() {
 }
 
 function newTerrainPreset() {
+  assertMutationAllowed();
   const id = slugify(`team-terrain-${Date.now()}`);
   state.draftTerrainPreset = {
     id,
@@ -2844,6 +3001,7 @@ function newTerrainPreset() {
 }
 
 function newPreset() {
+  assertMutationAllowed();
   const id = slugify(`team-preset-${Date.now()}`);
   state.draftPreset = {
     id,
@@ -2854,6 +3012,73 @@ function newPreset() {
     created_by: state.user?.id || null,
   };
   state.selectedPresetId = id;
+  render();
+}
+
+function selectPhysicsPreset(presetId) {
+  state.selectedPhysicsPresetId = presetId;
+  state.draftPhysicsPreset = null;
+  localStorage.setItem("redrhex_child_physics_preset", presetId);
+  render();
+}
+
+function newPhysicsPreset() {
+  assertMutationAllowed();
+  const id = slugify(`team-physics-${Date.now()}`);
+  state.draftPhysicsPreset = normalizePhysicsPreset({ id, name: "New Physics Preset", values: {}, created_by: state.user?.id });
+  state.selectedPhysicsPresetId = id;
+  render();
+}
+
+function duplicatePhysicsPreset() {
+  assertMutationAllowed();
+  const source = selectedPhysicsPreset();
+  const id = slugify(`${source.id || source.name}-copy-${Date.now()}`);
+  state.draftPhysicsPreset = normalizePhysicsPreset({
+    ...source,
+    id,
+    name: `${source.name} Copy`,
+    built_in: false,
+    created_by: state.user?.id,
+    values: { ...(source.values || {}) },
+  });
+  state.selectedPhysicsPresetId = id;
+  render();
+}
+
+async function savePhysicsPreset() {
+  assertMutationAllowed();
+  const preset = state.draftPhysicsPreset || selectedPhysicsPreset();
+  if (!preset || preset.built_in) return;
+  const schema = state.snapshot.capabilities?.physics?.field_schema || [];
+  const payload = {
+    id: preset.id,
+    name: String(document.querySelector("#physics-preset-name")?.value || preset.name).trim(),
+    description: String(document.querySelector("#physics-preset-description")?.value || ""),
+    values: physicsValuesFromForm(document, schema),
+    built_in: false,
+    created_by: preset.created_by || state.user?.id || null,
+    updated_by: state.user?.id || null,
+    updated_at: new Date().toISOString(),
+  };
+  await upsert("physics_presets", payload);
+  state.draftPhysicsPreset = null;
+  state.selectedPhysicsPresetId = payload.id;
+  localStorage.setItem("redrhex_child_physics_preset", payload.id);
+  await refresh({ silent: true });
+  setMessage(`Saved Physics preset ${payload.name}.`);
+}
+
+async function deletePhysicsPreset() {
+  assertMutationAllowed();
+  const preset = state.draftPhysicsPreset || selectedPhysicsPreset();
+  if (!preset || preset.built_in) return;
+  if (!window.confirm(`Delete Physics preset "${preset.name}"?`)) return;
+  if (!state.draftPhysicsPreset) await remove("physics_presets", `id=eq.${encodeURIComponent(preset.id)}`);
+  state.draftPhysicsPreset = null;
+  state.selectedPhysicsPresetId = "baseline";
+  localStorage.setItem("redrhex_child_physics_preset", "baseline");
+  await refresh({ silent: true });
   render();
 }
 
@@ -2907,6 +3132,7 @@ async function flushRunMetadataAutosave(runId = state.runMetadataQueuedRunId) {
 }
 
 async function saveRun(runId = state.selectedRunId, options = {}) {
+  assertMutationAllowed();
   const targetRunId = runId || state.selectedRunId;
   const run = targetRunId ? runById(targetRunId) : selectedRun({ fallback: false });
   if (!run) return;
@@ -2928,15 +3154,12 @@ async function saveRun(runId = state.selectedRunId, options = {}) {
     if (normalized.folder) {
       await ensureTeamFolder(normalized.folder);
     }
-    await update(
-      "runs",
-      `id=eq.${encodeURIComponent(run.id)}`,
-      buildRunMetadataPatch({
-        displayName: normalized.display_name,
-        folder: normalized.folder,
-        notes: normalized.notes,
-      }),
-    );
+    await rpc("update_run_metadata", {
+      p_run_id: run.id,
+      p_display_name: normalized.display_name,
+      p_folder: normalized.folder,
+      p_notes: normalized.notes,
+    });
     run.display_name = normalized.display_name || null;
     run.folder = normalized.folder || null;
     run.notes = normalized.notes;
@@ -2964,6 +3187,7 @@ async function saveRun(runId = state.selectedRunId, options = {}) {
 }
 
 async function queueRunAction(type, message, payload = {}, runOverride = null) {
+  assertMutationAllowed();
   const run = runOverride || selectedRun();
   if (!run) return;
   const job = buildActionJob({ machineId: state.machineId, type, runId: run.id, role: role(), userId: state.user?.id, payload });
@@ -2987,8 +3211,9 @@ async function checkOrCreateVideo(runOverride = null) {
     "record_video",
     Number.isFinite(iteration) ? `Queued video for iteration ${iteration}.` : "Queued checkpoint video.",
     {
-      checkpoint,
       checkpoint_iteration: Number.isFinite(iteration) ? iteration : null,
+      checkpoint_ref: checkpointReference(run.id, Number.isFinite(iteration) ? iteration : null),
+      client_request_id: createClientRequestId(),
     },
     run,
   );
@@ -3005,6 +3230,86 @@ async function compactSelectedRun() {
   if (!run) return;
   if (!window.confirm(`Compact run "${run.display_name || run.id}"? Older checkpoints and bulky cache files may be removed.`)) return;
   await queueRunAction("compact_run", "Queued run compaction.", { confirmation: run.id });
+}
+
+async function stopSelectedRun() {
+  const run = selectedRun();
+  if (!run) return;
+  await queueRunAction("stop_process", `Stop prioritized for ${run.display_name || run.id}.`, {
+    process_id: run.id,
+    client_request_id: createClientRequestId(),
+  });
+}
+
+function resumeSelectedRun() {
+  const run = selectedRun();
+  if (!run?.latest_checkpoint) return;
+  const iteration = checkpointIteration(run.latest_checkpoint);
+  state.trainForm = {
+    ...state.trainForm,
+    training_route: "standard",
+    resume_run_id: run.id,
+    resume_iteration: Number.isFinite(iteration) ? iteration : "",
+    display_name: `Resume ${run.display_name || run.id}`.slice(0, 120),
+    folder: run.folder || "",
+  };
+  localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
+  setView("train");
+  setMessage(`Resume draft prepared from ${run.display_name || run.id}.`);
+}
+
+async function exportSelectedOnnx() {
+  const run = selectedRun();
+  if (!run?.latest_checkpoint) return;
+  const iteration = checkpointIteration(run.latest_checkpoint);
+  await queueRunAction("export_onnx", "Queued ONNX export.", {
+    checkpoint_ref: checkpointReference(run.id, Number.isFinite(iteration) ? iteration : null),
+    checkpoint_iteration: Number.isFinite(iteration) ? iteration : null,
+    client_request_id: createClientRequestId(),
+  });
+}
+
+async function exportSelectedVideoToDrive() {
+  const run = selectedRun();
+  if (!run) return;
+  const iteration = checkpointIteration(selectedVideoCheckpoint(run));
+  await queueRunAction("export_video_drive", "Queued authenticated Google Drive export.", {
+    checkpoint_iteration: Number.isFinite(iteration) ? iteration : null,
+    client_request_id: createClientRequestId(),
+  });
+}
+
+async function deleteSelectedRun() {
+  const run = selectedRun();
+  if (!run || role() !== "admin") return;
+  const confirmation = window.prompt(`Type the exact run ID to delete ${run.display_name || run.id}:\n${run.id}`) || "";
+  if (confirmation !== run.id) throw new Error("Deletion cancelled: the confirmation did not match the exact run ID.");
+  await queueRunAction("delete_run", `Deletion queued for ${run.id}.`, {
+    confirmation,
+    delete_logs: true,
+    client_request_id: createClientRequestId(),
+  }, run);
+}
+
+function openSelectedRunDeploy() {
+  const run = selectedRun();
+  if (run) state.selectedRunId = run.id;
+  setView("deploy");
+}
+
+async function queueDeployAction(type) {
+  assertMutationAllowed();
+  const runId = document.querySelector("#deploy-run")?.value || state.selectedRunId;
+  const scenario = document.querySelector("#deploy-scenario")?.value || "stand_zero";
+  const payload = buildDeployPayload(type, {
+    runId,
+    scenario,
+    includeRosMock: Boolean(document.querySelector("#deploy-ros-mock")?.checked),
+    allowedScenarios: state.snapshot.capabilities?.deploy?.scenarios || [],
+  });
+  payload.client_request_id = createClientRequestId();
+  const run = runById(runId);
+  await queueRunAction(type, `Queued ${type.replaceAll("_", " ")}.`, payload, run);
 }
 
 function collectNotificationSettings() {
@@ -3039,6 +3344,7 @@ function discordWebhookValidationMessage(webhook) {
 }
 
 async function saveNotificationSettings({ silent = false } = {}) {
+  assertMutationAllowed();
   const payload = collectNotificationSettings();
   state.notificationSettingsDraft = normalizeNotificationSettings(payload);
   state.notificationSaveStatus = "saving";
@@ -3059,6 +3365,7 @@ async function saveNotificationSettings({ silent = false } = {}) {
 }
 
 async function sendTestNotification() {
+  assertMutationAllowed();
   state.notificationTestResult = { results: { discord: { pending: true } } };
   patchConnection();
   try {
@@ -3092,6 +3399,7 @@ async function sendTestNotification() {
 }
 
 async function sendMissedNotifications() {
+  assertMutationAllowed();
   const selectedMode = document.querySelector("#missed-notification-mode")?.value || state.missedNotificationMode;
   state.missedNotificationMode = selectedMode;
   if (selectedMode === "future_only") {
@@ -3156,6 +3464,7 @@ function openHistoryFolder(folderKey) {
     const firstRun = filteredRuns()[0];
     if (firstRun) state.selectedRunId = firstRun.id;
   }
+  syncRoute({ replace: false });
   patchHistory({ forceList: true });
   patchShellStatus();
 }
@@ -3189,6 +3498,10 @@ document.addEventListener("click", async (event) => {
   const action = target.dataset.action;
   try {
     if (action === "toggle-theme") return toggleTheme();
+    if (action === "toggle-mobile-more") {
+      state.mobileMoreOpen = !state.mobileMoreOpen;
+      return render();
+    }
     if (action === "view") return setView(target.dataset.view);
     if (action === "login") { handleLogin(); return; } // handleLogin manages its own try/catch
     if (action === "refresh") return await refresh({ silent: true });
@@ -3209,6 +3522,19 @@ document.addEventListener("click", async (event) => {
       return setMessage("Machine target saved.");
     }
     if (action === "queue-training") return await queueTraining();
+    if (action === "train-default-smoke" || action === "train-default-debug") {
+      state.trainForm = {
+        ...state.trainForm,
+        training_route: "standard",
+        num_envs: action === "train-default-smoke" ? 4 : 16,
+        max_iterations: action === "train-default-smoke" ? 8 : 50,
+        device: "cuda:0",
+        resume_run_id: "",
+        resume_iteration: "",
+      };
+      localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
+      return render();
+    }
     if (action === "tweak-last-run") return tweakFromLastRun();
     if (action === "select-preset") {
       state.selectedPresetId = target.dataset.id;
@@ -3230,6 +3556,11 @@ document.addEventListener("click", async (event) => {
     if (action === "new-terrain-preset") return newTerrainPreset();
     if (action === "save-terrain-preset") return await saveTerrainPreset();
     if (action === "delete-terrain-preset") return await deleteTerrainPreset();
+    if (action === "select-physics-preset") return selectPhysicsPreset(target.dataset.id);
+    if (action === "new-physics-preset") return newPhysicsPreset();
+    if (action === "duplicate-physics-preset") return duplicatePhysicsPreset();
+    if (action === "save-physics-preset") return await savePhysicsPreset();
+    if (action === "delete-physics-preset") return await deletePhysicsPreset();
     if (action === "toggle-editor-group") {
       const group = target.closest(".editor-group");
       group?.classList.toggle("collapsed");
@@ -3264,6 +3595,7 @@ document.addEventListener("click", async (event) => {
           }
         } else {
           state.selectedRunId = target.dataset.id;
+          syncRoute({ replace: false });
           if (previousDraftRunId !== state.selectedRunId && !state.runDrafts[state.selectedRunId]) {
             setRunMetadataSaveStatus("saved");
           }
@@ -3275,6 +3607,7 @@ document.addEventListener("click", async (event) => {
         return;
       }
       state.selectedRunId = target.dataset.id;
+      syncRoute({ replace: false });
       await ensureSelectedVideoSigned();
       await ensureSelectedTensorboardSummarySigned();
       return render();
@@ -3288,8 +3621,23 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "check-video") return await checkOrCreateVideo(runById(target.dataset.runId) || null);
     if (action === "tweak-run") return tweakFromRun(selectedRun()?.id || "");
+    if (action === "resume-run") return resumeSelectedRun();
+    if (action === "stop-run") return await stopSelectedRun();
     if (action === "job-tensorboard") return await queueTensorBoard();
+    if (action === "job-export-onnx") return await exportSelectedOnnx();
+    if (action === "job-drive-export") return await exportSelectedVideoToDrive();
+    if (action === "open-run-deploy") return openSelectedRunDeploy();
     if (action === "job-compact-run") return await compactSelectedRun();
+    if (action === "delete-run") return await deleteSelectedRun();
+    if (action === "deploy-validate") return await queueDeployAction("validate_deploy");
+    if (action === "deploy-export-validate") return await queueDeployAction("export_validate_deploy");
+    if (action === "deploy-mujoco-smoke") return await queueDeployAction("mujoco_smoke");
+    if (action === "deploy-mujoco-video") return await queueDeployAction("record_mujoco_video");
+    if (action === "open-run-from-detection") {
+      state.selectedRunId = target.dataset.runId || "";
+      state.folderFilter = "all";
+      return setView("history");
+    }
     if (action === "save-notification-settings") return await saveNotificationSettings();
     if (action === "send-test-notification") return await sendTestNotification();
     if (action === "send-missed-notifications") return await sendMissedNotifications();
@@ -3299,9 +3647,11 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
-  if (["task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed"].includes(event.target.id)) {
+  if (["training-route", "task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed", "resume-run", "resume-iteration", "teacher-iterations", "distillation-iterations", "ppo-iterations"].includes(event.target.id)) {
     state.trainFolderCreating = document.querySelector("#run-folder-before-launch")?.value === "__new__";
     state.trainForm = {
+      ...state.trainForm,
+      training_route: document.querySelector("#training-route")?.value || state.trainForm.training_route || "standard",
       task: document.querySelector("#task")?.value || "Template-Redrhex-ForwardFast-Direct-v0",
       display_name: String(document.querySelector("#run-display-name")?.value || "").trim(),
       folder: folderSelectValue("run-folder-before-launch", "run-folder-before-launch-new"),
@@ -3309,8 +3659,15 @@ document.addEventListener("change", (event) => {
       max_iterations: Number(document.querySelector("#max-iterations")?.value || 8),
       device: document.querySelector("#device")?.value || "cuda:0",
       seed: document.querySelector("#seed")?.value || "",
+      resume_run_id: document.querySelector("#resume-run")?.value || "",
+      resume_iteration: event.target.id === "resume-run" ? "" : document.querySelector("#resume-iteration")?.value || state.trainForm.resume_iteration || "",
+      teacher_iterations: Number(document.querySelector("#teacher-iterations")?.value || state.trainForm.teacher_iterations || 1500),
+      distillation_iterations: Number(document.querySelector("#distillation-iterations")?.value || state.trainForm.distillation_iterations || 800),
+      ppo_iterations: Number(document.querySelector("#ppo-iterations")?.value || state.trainForm.ppo_iterations || 1500),
     };
+    localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
     document.querySelector('[data-folder-create="run-folder-before-launch"]')?.classList.toggle("hidden", !state.trainFolderCreating);
+    if (["training-route", "resume-run"].includes(event.target.id)) return render();
   }
   if (event.target.id === "train-preset") {
     state.selectedPresetId = event.target.value;
@@ -3331,6 +3688,12 @@ document.addEventListener("change", (event) => {
     } else {
       render();
     }
+  }
+  if (event.target.id === "train-physics-preset") {
+    state.selectedPhysicsPresetId = event.target.value;
+    localStorage.setItem("redrhex_child_physics_preset", state.selectedPhysicsPresetId);
+    const snapshot = document.querySelector("#train-preset-snapshot");
+    if (snapshot) snapshot.innerHTML = trainPresetSnapshot(selectedPreset(), selectedTerrainPresetForTraining(), selectedPhysicsPreset());
   }
   if (event.target.id === "video-checkpoint-select") {
     const panel = event.target.closest("#team-video-panel");
@@ -3363,6 +3726,13 @@ document.addEventListener("change", (event) => {
     state.historySort = normalizeHistorySort(event.target.value);
     localStorage.setItem("redrhex_child_history_sort", state.historySort);
     renderRunListOnly();
+    syncRoute();
+  }
+  if (event.target.id === "history-status") {
+    state.historyStatus = event.target.value;
+    localStorage.setItem("redrhex_child_history_status", state.historyStatus);
+    renderRunListOnly();
+    syncRoute();
   }
   if (event.target.classList.contains("terrain-input") && state.draftTerrainPreset) {
     state.draftTerrainPreset.values[event.target.dataset.key] = parseTerrainValue(event.target);
@@ -3371,6 +3741,15 @@ document.addEventListener("change", (event) => {
     state.missedNotificationMode = event.target.value;
     state.notificationMissedResult = null;
     patchConnection();
+  }
+  if (event.target.id === "deploy-run") {
+    state.selectedRunId = event.target.value;
+    syncRoute();
+    render();
+  }
+  if (event.target.id === "activity-filter") {
+    state.activityFilter = event.target.value;
+    render();
   }
   if (event.target.id?.startsWith("notify-") || event.target.classList.contains("notify-event-toggle")) {
     state.notificationSettingsDraft = normalizeNotificationSettings(collectNotificationSettings());
@@ -3395,6 +3774,12 @@ document.addEventListener("input", (event) => {
   if (event.target.id === "run-search") {
     state.runSearch = event.target.value;
     renderRunListOnly();
+    syncRoute();
+  }
+  if (event.target.id === "physics-search") {
+    state.physicsSearch = event.target.value;
+    render();
+    document.querySelector("#physics-search")?.focus();
   }
   if (["run-name", "run-folder", "run-folder-new", "run-notes"].includes(event.target.id)) {
     const run = runById(event.target.dataset.runId) || selectedRun({ fallback: false });
@@ -3435,6 +3820,13 @@ document.addEventListener("input", (event) => {
   }
   if (event.target.classList.contains("terrain-input") && state.draftTerrainPreset) {
     state.draftTerrainPreset.values[event.target.dataset.key] = parseTerrainValue(event.target);
+  }
+  if (event.target.classList.contains("physics-input") && state.draftPhysicsPreset) {
+    const schema = state.snapshot.capabilities?.physics?.field_schema || [];
+    state.draftPhysicsPreset.values = normalizePhysicsValues(
+      { ...state.draftPhysicsPreset.values, [event.target.dataset.key]: event.target.value },
+      schema,
+    );
   }
   if (event.target.id === "notify-discord-webhook") {
     state.notificationSettingsDraft = normalizeNotificationSettings(collectNotificationSettings());
@@ -3518,6 +3910,17 @@ window.addEventListener("focus", () => {
   }
 });
 
+window.addEventListener("popstate", () => {
+  const route = routeFromLocation();
+  state.view = route.view;
+  state.folderFilter = route.folder;
+  state.selectedRunId = route.run;
+  state.runSearch = route.search;
+  state.historyStatus = route.status;
+  if (route.sort) state.historySort = normalizeHistorySort(route.sort);
+  render();
+});
+
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && state.user) {
     refresh({ silent: true }).catch((error) => {
@@ -3528,3 +3931,6 @@ document.addEventListener("visibilitychange", () => {
     clearTimeout(state.refreshTimer);
   }
 });
+  const physicsPresetId = document.querySelector("#train-physics-preset")?.value || state.selectedPhysicsPresetId;
+  state.selectedPhysicsPresetId = physicsPresetId;
+  localStorage.setItem("redrhex_child_physics_preset", physicsPresetId);

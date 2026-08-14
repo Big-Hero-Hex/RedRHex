@@ -758,11 +758,51 @@ def test_deploy_tab_renders_report_and_controls(panel, page):
     expect(page.locator("#deploy-console-live")).to_contain_text("Idle")
 
 
+def test_deploy_stage_counts_and_report_collapse(panel, page):
+    open_deploy(page, panel["url"])
+
+    # Stage outcome counts belong beside the heading, not buried under the list.
+    expect(page.locator("#deploy-stage-summary")).to_contain_text("1 pass")
+    expect(page.locator("#deploy-stage-summary")).to_contain_text("1 warn")
+
+    # The raw JSON is available but no longer occupies the panel by default.
+    expect(page.locator("#deploy-report-json")).to_be_hidden()
+    page.locator("#deploy-report-details > summary").click()
+    expect(page.locator("#deploy-report-json")).to_be_visible()
+
+    # Runtime knobs stay collapsed until an operator asks for them.
+    expect(page.locator("#deploy-use-tensorrt")).to_be_hidden()
+    page.locator("#deploy-advanced > summary").click()
+    expect(page.locator("#deploy-use-tensorrt")).to_be_visible()
+
+
+def test_deploy_next_step_names_the_next_action(panel, page):
+    open_deploy(page, panel["url"])
+
+    # A run with an ONNX and a warning report should be told to read the stages.
+    expect(page.locator("#deploy-next-step")).to_contain_text("warnings")
+    expect(page.locator("#deploy-next-step")).to_have_class(re.compile("deploy-next-warn"))
+    expect(page.locator("#deploy-artifact-status .status-completed")).to_have_count(2)
+
+    # A run with a checkpoint but no export must be pointed at the export path,
+    # and the action it cannot take has to say why it is disabled.
+    page.select_option("#deploy-run-select", "run_alpha")
+    expect(page.locator("#deploy-next-step")).to_contain_text("Export ONNX + Validate")
+    expect(page.locator("#deploy-validate-existing")).to_be_disabled()
+    expect(page.locator("#deploy-validate-existing")).to_have_attribute(
+        "data-tooltip", re.compile("no exported ONNX")
+    )
+    expect(page.locator("#deploy-export-validate")).to_be_enabled()
+
+
 def test_deploy_mobile_layout_has_no_horizontal_overflow(panel, page):
     page.set_viewport_size({"width": 390, "height": 900})
     open_deploy(page, panel["url"])
 
     expect(page.locator("#deploy-stage-list")).to_contain_text("Export Integrity")
+    page.locator("#deploy-advanced > summary").click()
+    page.locator("#deploy-report-details > summary").click()
+    page.locator("#deploy-console-details > summary").click()
     expect(page.locator("#deploy-report-json")).to_be_visible()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 1
@@ -964,6 +1004,54 @@ def test_malformed_hash_degrades_quietly(panel, page):
     expect(page.locator("#panel-status .toast")).to_have_count(0)
 
 
+def test_convergence_shows_effective_settings_and_unsaved_state(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.click('.nav-button[data-view="convergence"]')
+    page.wait_for_selector("#convergence-presets")
+
+    # Cooldown and the scalar tag are named in Definitions, so the page has to
+    # show what mother is actually using for them.
+    info = page.locator("#convergence-info-grid")
+    expect(info).to_contain_text("200 iterations")
+    expect(info).to_contain_text("60 minutes")
+    expect(info).to_contain_text("Train/mean_reward")
+
+    # A form that matches the saved config offers nothing to save.
+    expect(page.locator("#convergence-dirty-hint")).to_be_hidden()
+    expect(page.locator("#convergence-save")).to_be_disabled()
+
+    page.locator('#convergence-presets [data-preset="strict"]').click()
+    expect(page.locator("#convergence-dirty-hint")).to_be_visible()
+    expect(page.locator("#convergence-save")).to_be_enabled()
+
+    page.locator("#convergence-save").click()
+    expect(page.locator("#convergence-info-grid")).to_contain_text("400 iterations")
+    expect(page.locator("#convergence-dirty-hint")).to_be_hidden()
+
+
+def test_convergence_dependent_controls_follow_their_master_switch(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.click('.nav-button[data-view="convergence"]')
+    page.wait_for_selector("#convergence-presets")
+
+    expect(page.locator("#divergence-patience")).to_be_enabled()
+    expect(page.locator("#divergence-action-hint")).to_contain_text("reported only")
+
+    page.locator("#divergence-auto-stop").check()
+    expect(page.locator("#divergence-action-hint")).to_contain_text("stopped automatically")
+
+    page.locator("#divergence-enabled").uncheck()
+    expect(page.locator("#divergence-patience")).to_be_disabled()
+    expect(page.locator("#divergence-auto-stop")).to_be_disabled()
+    expect(page.locator("#divergence-action-hint")).to_contain_text("keeps training")
+
+    page.locator("#convergence-enabled").uncheck()
+    expect(page.locator('#convergence-presets [data-preset="strict"]')).to_be_disabled()
+    expect(page.locator("#convergence-auto-record")).to_be_disabled()
+
+
 def test_tooltip_is_reachable_by_keyboard(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")
@@ -1009,6 +1097,12 @@ def test_tooltip_is_reachable_by_keyboard(panel, page):
         "document.activeElement === document.querySelector('#convergence-presets [data-preset=\"strict\"]')"
     )
     assert is_focused, "mouse click did not focus the sibling element"
+    # The click leaves the pointer resting on the button, so :hover is still
+    # driving the 160ms fade. Move the pointer away and let the transition
+    # settle, otherwise this reads a mid-fade value rather than the
+    # focus-visible state under test.
+    page.mouse.move(0, 0)
+    page.wait_for_timeout(250)
     click_opacity = strict_button.evaluate("(el) => getComputedStyle(el, '::after').opacity")
     assert float(click_opacity) == 0, (
         f"tooltip should not appear on mouse click focus (opacity={click_opacity})"
@@ -1371,3 +1465,64 @@ def test_run_list_popups_stay_inside_the_scrolling_list(panel, page):
     menu = page.locator(".run-menu[data-open='true']").bounding_box()
     assert menu["y"] >= list_box["y"]
     assert menu["y"] + menu["height"] <= list_box["y"] + list_box["height"] + 1
+
+
+def drag_run_over_folder(page, run_text: str, folder_selector: str):
+    """Dispatch real HTML5 drag events; synthetic mouse moves do not emit them."""
+    transfer = page.evaluate_handle("() => new DataTransfer()")
+    page.locator(".run-card", has_text=run_text).dispatch_event(
+        "dragstart", {"dataTransfer": transfer}
+    )
+    page.locator(folder_selector).dispatch_event("dragover", {"dataTransfer": transfer})
+    return transfer
+
+
+def test_drag_marks_valid_targets_and_states_the_outcome(panel, page):
+    open_history(page, panel["url"])
+    alpha = page.locator(".run-card", has_text="run_alpha")
+    good_runs = page.locator('.folder-item[data-drop-folder="Good Runs"]')
+    uncategorized = page.locator('.folder-item[data-drop-folder="__uncategorized__"]')
+
+    transfer = drag_run_over_folder(page, "run_alpha", '.folder-item[data-drop-folder="Good Runs"]')
+
+    expect(page.locator("body")).to_have_class(re.compile("dragging-runs"))
+    expect(alpha).to_have_class(re.compile("dragging"))
+    expect(good_runs).to_have_attribute("data-drop-label", "Move 1 run here")
+    expect(good_runs).to_have_class(re.compile("drop-target"))
+    # The outcome line is drawn from the attribute the row carries.
+    label = page.evaluate(
+        """() => getComputedStyle(
+             document.querySelector('.folder-item.drop-target'), '::after'
+           ).content"""
+    )
+    assert "Move 1 run here" in label
+    # run_alpha is already uncategorized, so that row cannot receive it.
+    expect(uncategorized).to_have_class(re.compile("drop-unavailable"))
+
+    good_runs.dispatch_event("drop", {"dataTransfer": transfer})
+    expect(page.locator("#panel-status")).to_contain_text("Moved 1 run to Good Runs")
+    expect(page.locator("body")).not_to_have_class(re.compile("dragging-runs"))
+
+
+def test_a_selection_drag_reports_its_whole_count(panel, page):
+    open_history(page, panel["url"])
+    page.locator("#select-visible-runs").click()
+    expect(page.locator("#bulk-selected-count")).to_have_text("3 selected")
+
+    drag_run_over_folder(page, "run_alpha", '.folder-item[data-drop-folder="Good Runs"]')
+    expect(page.locator('.folder-item[data-drop-folder="Good Runs"]')).to_have_attribute(
+        "data-drop-label", "Move 3 runs here"
+    )
+
+
+def test_drag_state_is_cleared_when_a_drag_is_abandoned(panel, page):
+    open_history(page, panel["url"])
+    alpha = page.locator(".run-card", has_text="run_alpha")
+    transfer = page.evaluate_handle("() => new DataTransfer()")
+    alpha.dispatch_event("dragstart", {"dataTransfer": transfer})
+    expect(page.locator("body")).to_have_class(re.compile("dragging-runs"))
+
+    alpha.dispatch_event("dragend", {"dataTransfer": transfer})
+    expect(page.locator("body")).not_to_have_class(re.compile("dragging-runs"))
+    expect(page.locator(".run-card.dragging")).to_have_count(0)
+    assert page.locator("[data-drop-folder][data-drop-label]").count() == 0

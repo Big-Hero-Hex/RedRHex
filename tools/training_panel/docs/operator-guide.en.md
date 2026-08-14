@@ -65,14 +65,25 @@ The Windows and macOS launchers open the panel with an explicit desktop-remote m
 
 Compaction keeps the highest top-level `model_*.pt` and preserves events, parameters, videos, exports, notes, and deployment reports. Deletion requires the exact run ID and is rejected while a related process is active. Bulk deletion requires a typed `DELETE` acknowledgement. A run is shown as deleting only after the confirmation is accepted.
 
-Search, status, sort, and folder selection persist across reloads; the run count reads `N of M` and a **Clear filters** control appears while a filter is hiding runs. Search matches run name, id, task, status, folder, note text, and preset ids. Sorting by status ranks running, stopping, and queued runs above finished ones. Press `/` to focus search, `j`/`k` or the arrow keys to move the selection, and `Escape` to clear search or close a comparison. Shift-click a checkbox to select a range. Drag a run card onto a sidebar folder to move it; dragging a run that is part of the current selection moves the whole selection.
+Search, status, sort, and folder selection persist across reloads; the run count reads `N of M` and a **Clear filters** control appears while a filter is hiding runs. Search matches run name, id, task, status, folder, note text, and preset ids. Sorting by status ranks running, stopping, and queued runs above finished ones. Press `/` to focus search, `j`/`k` or the arrow keys to move the selection, and `Escape` to clear search or close a comparison. Shift-click a checkbox to select a range. Drag a run card onto a sidebar folder to move it; dragging a run that is part of the current selection moves the whole selection. While a drag is in flight, every folder that can receive the runs is marked, a folder that already holds all of them is dimmed and refuses the drop, and the folder under the pointer states the exact outcome before the drop is committed.
 
 **Compare** opens a separate comparison panel beside the run list and does not disturb the run details panel; select **Compare** on another run to swap the compared column. Unsaved notes are kept per run when the selection changes, marked as an unsaved draft, and warn before the page is left.
+
+<a id="deploy"></a>
+## Check deployment readiness
+
+The Deploy view proves an exported policy before Jetson ROS2 bring-up. Select the run, read the artifact row, then run one check. **Checkpoint**, **ONNX**, and **Last report** appear as status pills in the same colour vocabulary as the rest of the panel, and one sentence above the buttons names the single next action: export when the run has a checkpoint but no ONNX, validate when an ONNX exists but no report does, or review the warned or failed stages when a report already exists.
+
+The three checks differ in cost. **Validate Existing ONNX** runs the readiness pipeline against the file already on disk. **Export ONNX + Validate** rebuilds the ONNX from the latest checkpoint first, so use it after further training. **Run MuJoCo Smoke** runs only the advisory physics rollout. A check that cannot run stays disabled and states its own reason on hover, including while another action holds the Isaac/GPU lock. Device, MuJoCo model path, runtime provider selection, and the ROS mock stage are grouped under **Advanced options** and stay collapsed by default.
+
+Readiness stages carry their pass, warn, fail, and skipped counts beside the heading. The full JSON report and the deploy console are collapsed until needed, and the console opens by itself while a process is producing output. Readiness levels and stage meanings are defined in [Deployment readiness](deploy-readiness.en.md).
 
 <a id="convergence"></a>
 ## Monitor convergence
 
-The Convergence view configures divergence detection for non-finite scalar values and sustained reward collapse. Notifications are enabled by the configured channel. Automatic stopping is opt-in: keep the action on `notify` until the detector has been checked against the task's reward scale, then select `stop` only if that behavior is intended.
+The Convergence view holds two separate rules. **Plateau rule** decides when a reward curve has settled: choose Loose, Default, Strict, or Custom, and optionally auto-record a video once training finishes. **Divergence guard** watches for non-finite scalar values and sustained reward collapse. Notifications are sent by the configured channel. Automatic stopping is opt-in: keep the action on `notify` until the detector has been checked against the task's reward scale, then select `stop` only if that behavior is intended. The view states in words which of the two behaviors is currently selected.
+
+Turning off a master switch disables the controls it governs instead of leaving them editable. **Effective Settings** lists what mother has saved, including the window, threshold, minimum iterations, notification cooldown, and the TensorBoard scalar tag. Editing the form marks it **Unsaved** and enables **Save Settings**. Saved values apply to the next training run, not to a run already in flight.
 
 <a id="navigation"></a>
 ## Navigate and diagnose the UI

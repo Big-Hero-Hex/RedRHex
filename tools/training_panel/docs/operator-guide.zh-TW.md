@@ -65,14 +65,25 @@ Windows 與 macOS launcher 會用明確的 desktop-remote marker 開啟 panel。
 
 Compaction 會保留最高編號的 top-level `model_*.pt`，並保留 event、parameter、video、export、note 與 deployment report。刪除需要輸入確切 run ID；相關 process 執行中時會拒絕。批次刪除需要輸入 `DELETE` 確認。只有在確認後，run 才會顯示為刪除中。
 
-Search、status、sort 與 folder 選擇會在重新載入後保留；當 filter 隱藏了 run 時，run 數量顯示為 `N of M`，並出現 **Clear filters**。Search 會比對 run 名稱、id、task、status、folder、note 內容與 preset id。依 status 排序時，running、stopping 與 queued 會排在已結束的 run 之前。按 `/` 聚焦 search，`j`/`k` 或方向鍵移動選擇，`Escape` 清除 search 或關閉 comparison。Shift-click checkbox 可選取範圍。把 run card 拖曳到側邊欄的 folder 即可移動；若拖曳的 run 屬於目前的選取範圍，會移動整組選取。
+Search、status、sort 與 folder 選擇會在重新載入後保留；當 filter 隱藏了 run 時，run 數量顯示為 `N of M`，並出現 **Clear filters**。Search 會比對 run 名稱、id、task、status、folder、note 內容與 preset id。依 status 排序時，running、stopping 與 queued 會排在已結束的 run 之前。按 `/` 聚焦 search，`j`/`k` 或方向鍵移動選擇，`Escape` 清除 search 或關閉 comparison。Shift-click checkbox 可選取範圍。把 run card 拖曳到側邊欄的 folder 即可移動；若拖曳的 run 屬於目前的選取範圍，會移動整組選取。拖曳進行中時，所有可接收的 folder 都會標示，已包含全部拖曳 run 的 folder 會變淡並拒絕放下，游標所在的 folder 則會在放下前顯示確切結果。
 
 **Compare** 會在 run list 旁開啟獨立的 comparison panel，不影響 run details panel；對其他 run 按 **Compare** 可替換被比較的欄位。切換選擇時，未儲存的 notes 會依 run 保留並標示為未儲存草稿，離開頁面前也會提示。
+
+<a id="deploy"></a>
+## 檢查 deployment readiness
+
+Deploy view 用於在 Jetson ROS2 bring-up 之前驗證已匯出的 policy。先選擇 run，讀取 artifact 列，再執行一項檢查。**Checkpoint**、**ONNX** 與 **Last report** 會以 status pill 呈現，沿用面板其餘部分相同的顏色語彙；按鈕上方的一句話會指出下一個唯一動作：run 有 checkpoint 但沒有 ONNX 時先匯出，已有 ONNX 但尚無 report 時先驗證，已有 report 時則檢視警告或失敗的 stage。
+
+三項檢查的成本不同。**Validate Existing ONNX** 直接對磁碟上既有的檔案執行 readiness pipeline。**Export ONNX + Validate** 會先以最新 checkpoint 重新產生 ONNX，適用於再次訓練之後。**Run MuJoCo Smoke** 只執行 advisory 物理 rollout。無法執行的檢查會維持 disabled，並在滑鼠停留時說明自身原因，包含 Isaac/GPU lock 被其他動作占用的情況。Device、MuJoCo model 路徑、runtime provider 選擇與 ROS mock stage 集中在 **Advanced options**，預設為收合。
+
+Readiness stage 的 pass、warn、fail 與 skipped 數量顯示在標題旁。完整 JSON report 與 deploy console 在需要前保持收合；有 process 正在輸出時，console 會自行展開。Readiness level 與各 stage 的意義定義於[部署就緒](deploy-readiness.zh-TW.md)。
 
 <a id="convergence"></a>
 ## 監控 convergence
 
-Convergence view 可設定 non-finite scalar value 與 reward 持續崩塌的 divergence detection，並透過已設定的通知 channel 發送警示。Automatic stop 是 opt-in；先將 action 維持在 `notify`，用目前 task 的 reward scale 驗證 detector，再只在確實需要時選擇 `stop`。
+Convergence view 包含兩條各自獨立的規則。**Plateau rule** 判定 reward 曲線何時趨於穩定：可選擇 Loose、Default、Strict 或 Custom，並可在訓練結束後自動錄製影片。**Divergence guard** 監看 non-finite scalar value 與 reward 持續崩塌，並透過已設定的通知 channel 發送警示。Automatic stop 是 opt-in；先將 action 維持在 `notify`，用目前 task 的 reward scale 驗證 detector，再只在確實需要時選擇 `stop`。此 view 會以文字說明目前選用的是兩種行為中的哪一種。
+
+關閉主開關時，其管轄的控制項會一併 disabled，而不是維持可編輯的外觀。**Effective Settings** 列出 mother 已儲存的內容，包含 window、threshold、最少 iteration 數、通知 cooldown 與 TensorBoard scalar tag。修改表單後會標示 **Unsaved** 並啟用 **Save Settings**。已儲存的值套用於下一次訓練，不影響進行中的 run。
 
 <a id="navigation"></a>
 ## 導覽與診斷 UI

@@ -550,54 +550,86 @@
               <h3>Policy Readiness</h3>
               <span id="deploy-readiness-badge" class="status-badge muted-pill">No Report</span>
             </div>
+            <p class="muted-copy">Prove an exported policy before Jetson ROS2 bring-up: pick a run, confirm its artifacts, then run a readiness check.</p>
             <label>
               Run
               <select id="deploy-run-select"></select>
+              <small>Only runs with a checkpoint can be exported; only runs with an ONNX file can be validated directly.</small>
             </label>
             <div id="deploy-artifact-status" class="deploy-artifact-status"></div>
-            <label>
-              Target
-              <input id="deploy-target" value="Jetson ROS2" readonly />
-            </label>
-            <label>
-              Device
-              <input id="deploy-device" value="cuda:0" />
-            </label>
-            <label>
-              MuJoCo Model
-              <input id="deploy-mujoco-model" />
-            </label>
-            <div id="deploy-mujoco-status" class="deploy-runtime-status"></div>
-            <label class="check-row">
-              <input id="deploy-include-mujoco" type="checkbox" checked />
-              MuJoCo advisory rollout
-            </label>
-            <label class="check-row">
-              <input id="deploy-include-ros" type="checkbox" />
-              ROS mock/fake sensor launch
-            </label>
-            <label class="check-row">
-              <input id="deploy-use-cuda" type="checkbox" />
-              Runtime CUDA provider
-            </label>
-            <label class="check-row">
-              <input id="deploy-use-tensorrt" type="checkbox" />
-              Runtime TensorRT provider
-            </label>
+            <div id="deploy-next-step" class="deploy-next-step" role="status" aria-live="polite"></div>
+
+            <div class="section-header compact-header">
+              <h3>Readiness Checks</h3>
+            </div>
+            <div class="deploy-action-list">
+              <div class="deploy-action">
+                <button type="button" id="deploy-validate-existing" class="primary-button">Validate Existing ONNX</button>
+                <small>Runs the full readiness pipeline against the ONNX already on disk. Nothing is re-exported.</small>
+              </div>
+              <div class="deploy-action">
+                <button type="button" id="deploy-export-validate" class="ghost-button">Export ONNX + Validate</button>
+                <small>Exports a fresh ONNX from the latest checkpoint first, then validates it. Use after new training.</small>
+              </div>
+              <div class="deploy-action">
+                <button type="button" id="deploy-mujoco-smoke" class="ghost-button">Run MuJoCo Smoke</button>
+                <small>Advisory physics rollout only. Skips export and ROS stages, so it is the quickest sanity check.</small>
+              </div>
+            </div>
             <div class="form-actions compact-actions">
-              <button type="button" id="deploy-validate-existing" class="primary-button">Validate Existing ONNX</button>
-              <button type="button" id="deploy-export-validate" class="ghost-button">Export ONNX + Validate</button>
-              <button type="button" id="deploy-mujoco-smoke" class="ghost-button">Run MuJoCo Smoke</button>
               <button type="button" id="deploy-stop" class="danger-button" hidden>Stop Deploy</button>
             </div>
+
+            <details class="advanced-panel deploy-advanced" id="deploy-advanced">
+              <summary>Advanced options</summary>
+              <label>
+                Target
+                <input id="deploy-target" value="Jetson ROS2" readonly />
+                <small>Fixed by the mother configuration. Shown so the report's target is never a guess.</small>
+              </label>
+              <label>
+                Device
+                <input id="deploy-device" value="cuda:0" />
+                <small>Torch device used for the export and validation passes.</small>
+              </label>
+              <label>
+                MuJoCo Model
+                <input id="deploy-mujoco-model" />
+                <small>Path to the MJCF model used by the advisory rollout. Leave empty to use the mother default.</small>
+              </label>
+              <div id="deploy-mujoco-status" class="deploy-runtime-status"></div>
+              <label class="check-row"
+                data-tooltip="Adds an advisory MuJoCo rollout stage to the readiness pipeline. Advisory means it never blocks readiness on its own.">
+                <input id="deploy-include-mujoco" type="checkbox" checked />
+                MuJoCo advisory rollout
+              </label>
+              <label class="check-row"
+                data-tooltip="Launches ROS with mock/fake sensors so the policy's ROS bring-up path is exercised without hardware.">
+                <input id="deploy-include-ros" type="checkbox" />
+                ROS mock/fake sensor launch
+              </label>
+              <label class="check-row"
+                data-tooltip="Validates the ONNX with the CUDA execution provider as well, matching a GPU Jetson runtime.">
+                <input id="deploy-use-cuda" type="checkbox" />
+                Runtime CUDA provider
+              </label>
+              <label class="check-row"
+                data-tooltip="Validates the ONNX with the TensorRT execution provider. Slowest option; use before a TensorRT deployment.">
+                <input id="deploy-use-tensorrt" type="checkbox" />
+                Runtime TensorRT provider
+              </label>
+            </details>
+
             <div class="mujoco-playback-panel">
               <div class="section-header compact-header">
                 <h3>MuJoCo Playback</h3>
                 <span id="deploy-mujoco-playback-state" class="status-badge muted-pill">Idle</span>
               </div>
+              <p class="muted-copy">Watch the exported policy drive the MuJoCo model on a fixed scenario, live or as a recorded MP4.</p>
               <label>
                 Scenario
                 <select id="deploy-mujoco-scenario"></select>
+                <small>Deterministic command profile the policy is replayed against.</small>
               </label>
               <div class="form-actions compact-actions">
                 <button type="button" id="deploy-mujoco-viewer" class="ghost-button">Open MuJoCo Viewer</button>
@@ -605,7 +637,7 @@
                 <button type="button" id="deploy-mujoco-stop" class="danger-button" hidden>Stop MuJoCo</button>
               </div>
               <video id="deploy-mujoco-video" controls preload="metadata"></video>
-              <div class="form-actions compact-actions">
+              <div class="form-actions compact-actions" id="deploy-mujoco-video-actions" hidden>
                 <button type="button" id="deploy-mujoco-open-video" class="ghost-button small-button" hidden>Open Video Folder</button>
                 <button type="button" id="deploy-mujoco-copy-video" class="ghost-button small-button" hidden>Copy Video Path</button>
               </div>
@@ -617,28 +649,35 @@
           <section class="setting-panel deploy-report-panel">
             <div class="section-header">
               <h3>Readiness Stages</h3>
+              <span id="deploy-stage-summary" class="deploy-stage-summary"></span>
               <button type="button" id="deploy-refresh" class="ghost-button small-button">Refresh</button>
             </div>
             <div id="deploy-stage-list" class="deploy-stage-list"></div>
-            <div class="section-header">
-              <h3>Report</h3>
-              <button type="button" id="deploy-copy-report" class="ghost-button small-button">Copy JSON</button>
-            </div>
             <div id="deploy-report-meta" class="debug-status"></div>
-            <pre id="deploy-report-json" class="deploy-report-json"></pre>
+            <details class="advanced-panel deploy-report-details" id="deploy-report-details">
+              <summary>Full JSON report</summary>
+              <p class="muted-copy">The raw readiness document written next to the run. Copy it when filing a bring-up issue.</p>
+              <div class="form-actions compact-actions">
+                <button type="button" id="deploy-copy-report" class="ghost-button small-button">Copy JSON</button>
+              </div>
+              <pre id="deploy-report-json" class="deploy-report-json"></pre>
+            </details>
           </section>
 
           <section class="setting-panel deploy-console-panel">
-            <div class="section-header">
-              <h3>Deploy Console</h3>
-              <span id="deploy-console-live" class="status-badge muted-pill">Idle</span>
-            </div>
-            <div class="form-actions compact-actions">
-              <button type="button" id="deploy-debug-refresh" class="ghost-button small-button">Refresh Output</button>
-              <button type="button" id="deploy-copy-debug" class="ghost-button small-button">Copy Output</button>
-            </div>
-            <div id="deploy-debug-status" class="debug-status"></div>
-            <pre id="deploy-debug-log" class="deploy-debug-log"></pre>
+            <details class="deploy-console-details" id="deploy-console-details">
+              <summary>
+                <span>Deploy Console</span>
+                <span id="deploy-console-live" class="status-badge muted-pill">Idle</span>
+              </summary>
+              <p class="muted-copy">Raw process output from the readiness pipeline and MuJoCo playback. Opens automatically while a process runs.</p>
+              <div class="form-actions compact-actions">
+                <button type="button" id="deploy-debug-refresh" class="ghost-button small-button">Refresh Output</button>
+                <button type="button" id="deploy-copy-debug" class="ghost-button small-button">Copy Output</button>
+              </div>
+              <div id="deploy-debug-status" class="debug-status"></div>
+              <pre id="deploy-debug-log" class="deploy-debug-log"></pre>
+            </details>
           </section>
         </div>
       </section>
@@ -649,17 +688,22 @@
             <div class="card-head">
               <div>
                 <h2>Convergence Detection</h2>
-                <p class="muted-copy">Define when a reward curve is stable enough to inspect or stop tuning manually.</p>
+                <p class="muted-copy">Define when a reward curve is stable enough to inspect, and when a run has failed badly enough to act on.</p>
               </div>
               <span id="convergence-badge" class="status-badge muted-pill">Off</span>
             </div>
 
+            <label class="toggle-row" id="convergence-master-toggle"
+              data-tooltip="Master switch. While off, no plateau is detected and no convergence notification or auto-recording is queued.">
+              <input type="checkbox" id="convergence-enabled" />
+              <span>Enable convergence detection</span>
+            </label>
+
             <div class="convergence-layout">
-              <div>
-                <label class="toggle-row">
-                  <input type="checkbox" id="convergence-enabled" />
-                  <span>Enable convergence detection</span>
-                </label>
+              <div class="setting-panel" id="convergence-plateau-panel">
+                <div class="section-header compact-header">
+                  <h3>Plateau rule</h3>
+                </div>
                 <div class="segmented-control" aria-label="Convergence sensitivity preset" id="convergence-presets">
                   <button type="button" class="segment-button" data-preset="loose"
                     data-tooltip="Triggers after 100 stable iterations at 5% threshold. Fast but may fire on a short plateau.">Loose</button>
@@ -671,17 +715,16 @@
                     data-tooltip="Set your own window size and improvement threshold below.">Custom</button>
                 </div>
                 <p id="convergence-preset-hint" class="muted-copy"></p>
-              </div>
-
-              <div class="setting-panel">
-                <div id="convergence-custom-inputs" style="display:none">
+                <div id="convergence-custom-inputs" hidden>
                   <div class="form-row">
                     <label for="convergence-window">Window (iterations)</label>
                     <input type="number" id="convergence-window" min="50" max="2000" step="10" value="200" />
+                    <small>How many recent iterations are compared as one stability slice.</small>
                   </div>
                   <div class="form-row">
                     <label for="convergence-threshold">Max improvement %</label>
                     <input type="number" id="convergence-threshold" min="0.1" max="20" step="0.1" value="2.0" />
+                    <small>Reward gain allowed inside that window before the run counts as plateaued.</small>
                   </div>
                 </div>
                 <label class="toggle-row"
@@ -689,6 +732,13 @@
                   <input type="checkbox" id="convergence-auto-record" checked />
                   <span>Auto-record video after convergence</span>
                 </label>
+              </div>
+
+              <div class="setting-panel" id="convergence-divergence-panel">
+                <div class="section-header compact-header">
+                  <h3>Divergence guard</h3>
+                </div>
+                <p class="muted-copy">Separate from the plateau rule: this watches for a run that is failing, not one that has settled.</p>
                 <label class="toggle-row"
                   data-tooltip="Watch for NaN losses and sustained reward collapse while training runs.">
                   <input type="checkbox" id="divergence-enabled" checked />
@@ -699,17 +749,26 @@
                   <input type="checkbox" id="divergence-auto-stop" />
                   <span>Auto-stop the run on divergence</span>
                 </label>
+                <p id="divergence-action-hint" class="muted-copy"></p>
                 <div class="form-row">
                   <label for="divergence-patience">Divergence patience (iterations)</label>
                   <input type="number" id="divergence-patience" min="10" max="5000" step="10" value="100" />
-                </div>
-                <div class="form-actions compact-actions">
-                  <button type="button" id="convergence-save" class="primary-button small-button"
-                    data-tooltip="Save convergence detection settings to disk. Takes effect on the next training run.">Save Settings</button>
+                  <small>How long a collapsed reward must persist before it is treated as divergence.</small>
                 </div>
               </div>
             </div>
+
+            <div class="section-header">
+              <h3>Effective Settings</h3>
+              <span id="convergence-dirty-hint" class="status-badge error-pill" hidden>Unsaved</span>
+            </div>
+            <p class="muted-copy">What mother has saved. These values apply to the next training run, not to runs already in flight.</p>
             <div id="convergence-info-grid" class="run-info-grid compact-info-grid"></div>
+
+            <div class="form-actions compact-actions">
+              <button type="button" id="convergence-save" class="primary-button small-button"
+                data-tooltip="Save convergence detection settings to disk. Takes effect on the next training run.">Save Settings</button>
+            </div>
           </article>
 
           <aside class="control-card convergence-definitions">

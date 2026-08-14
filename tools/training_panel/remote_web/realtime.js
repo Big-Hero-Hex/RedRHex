@@ -1,8 +1,8 @@
-import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./config.js?v=3.4.10-sync-health";
-import { sessionStore } from "./api.js?v=3.4.10-sync-health";
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./config.js?v=3.7.0-remote-parity";
+import { sessionStore } from "./api.js?v=3.7.0-remote-parity";
 
 const REALTIME_IMPORT_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
-const TABLES = ["runs", "jobs", "artifacts", "machines", "run_deletions"];
+const TABLES = ["runs", "jobs", "artifacts", "machines", "machine_capabilities", "run_deletions", "team_activity_events"];
 
 function rowMachineId(row = {}) {
   return String(row.machine_id || row.claimed_by || row.machine_id_eq || "");

@@ -35,6 +35,7 @@ const state = {
   notesSavedText: "",
   lastSelectedRunId: null,   // anchor for shift-click range selection
   draggingRunIds: [],        // runs currently being dragged onto a folder
+  folderJustReceived: null,  // folder to re-flag after the post-move re-render
   runStatuses: {},           // run id -> last seen status, for finish notices
   // Search / filter / sort (Module 5)
   searchQuery: "",
@@ -81,6 +82,7 @@ const state = {
   deployData: null,
   deployDebug: null,
   deployDebugTimer: null,
+  convergenceSaved: null,
   remoteStatus: null,
   activityEvents: [],
   activityAnalytics: null,
@@ -1486,6 +1488,47 @@ function progressBarHtml(run) {
   `;
 }
 
+// The cursor carries what is actually moving: the run's own name for one, a
+// count for a selection. The default ghost of a full card reads as noise.
+function setRunDragImage(event, runIds) {
+  const chip = document.createElement("div");
+  chip.className = "run-drag-chip";
+  if (runIds.length === 1) {
+    const run = findRun(runIds[0]);
+    chip.textContent = run ? run.display_name || run.id : runIds[0];
+  } else {
+    chip.textContent = `${runIds.length} runs`;
+  }
+  document.body.append(chip);
+  event.dataTransfer.setDragImage(chip, 14, 14);
+  // Removing it synchronously would cancel the snapshot the browser just took.
+  requestAnimationFrame(() => chip.remove());
+}
+
+// A folder that already holds every dragged run is not a move. Marking it as
+// unavailable up front is honest; letting it glow and then do nothing is not.
+function armFolderDropTargets() {
+  const runIds = state.draggingRunIds;
+  if (!runIds.length) return;
+  document.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    const folder = target.dataset.dropFolder === "__uncategorized__" ? "" : target.dataset.dropFolder;
+    const noop = runIds.every((runId) => (findRun(runId)?.folder || "") === folder);
+    target.classList.toggle("drop-unavailable", noop);
+    target.dataset.dropCount = String(runIds.length);
+    target.dataset.dropLabel = runIds.length === 1 ? "Move 1 run here" : `Move ${runIds.length} runs here`;
+  });
+}
+
+function endRunDrag() {
+  state.draggingRunIds = [];
+  document.body.classList.remove("dragging-runs");
+  document.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    target.classList.remove("drop-target", "drop-unavailable");
+    delete target.dataset.dropCount;
+    delete target.dataset.dropLabel;
+  });
+}
+
 function closeRunMenu({ restoreFocus = false } = {}) {
   const runId = state.openMenuRunId;
   state.openMenuRunId = null;
@@ -1693,18 +1736,17 @@ function renderRuns() {
       state.draggingRunIds = ids;
       card.classList.add("dragging");
       document.body.classList.add("dragging-runs");
+      armFolderDropTargets();
       if (event.dataTransfer) {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData("text/plain", ids.join(","));
+        setRunDragImage(event, ids);
       }
     });
     card.addEventListener("dragend", () => {
       state.draggingRunIds = [];
       card.classList.remove("dragging");
-      document.body.classList.remove("dragging-runs");
-      document
-        .querySelectorAll(".folder-item.drop-target")
-        .forEach((item) => item.classList.remove("drop-target"));
+      endRunDrag();
     });
     card.addEventListener("click", (event) => {
       const checkbox = event.target.closest(".run-select-checkbox");
@@ -2272,6 +2314,30 @@ function renderDeployRunOptions() {
   select.value = state.deploySelectedRunId || "";
 }
 
+// Artifact readiness is the first thing an operator checks, so each row carries
+// the same colour vocabulary as the rest of the panel instead of bare words.
+function deployArtifactPillClass(tone) {
+  if (tone === "ready") return "status-badge status-completed";
+  if (tone === "failed") return "status-badge status-failed";
+  if (tone === "pending") return "status-badge status-queued";
+  return "status-badge muted-pill";
+}
+
+function deployOnnxArtifact(run) {
+  if (run.onnx_path) return ["ready", "ready"];
+  if (run.onnx_status === "failed") return ["failed", "export failed"];
+  if (run.onnx_status === "exporting") return ["exporting", "pending"];
+  return ["missing", "missing"];
+}
+
+function deployReportArtifact(run) {
+  const report = run.deploy_latest_report;
+  if (!report) return ["none", "missing"];
+  const status = String(report.overall_status || "unknown").toLowerCase();
+  const tone = status === "pass" ? "ready" : (status === "fail" ? "failed" : (status === "unknown" ? "missing" : "pending"));
+  return [status, tone, `Readiness level: ${report.readiness_level || "review"}`];
+}
+
 function renderDeployArtifactStatus(run) {
   const target = $("#deploy-artifact-status");
   if (!target) return;
@@ -2279,14 +2345,79 @@ function renderDeployArtifactStatus(run) {
     target.innerHTML = `<article class="empty-panel">Select a run to inspect deploy artifacts.</article>`;
     return;
   }
+  const [onnxText, onnxTone] = deployOnnxArtifact(run);
+  const [reportText, reportTone, reportTooltip] = deployReportArtifact(run);
   const rows = [
-    ["Checkpoint", run.latest_checkpoint ? "ready" : "missing"],
-    ["ONNX", run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing")],
-    ["Last report", run.deploy_latest_report ? `${run.deploy_latest_report.readiness_level || "review"} (${run.deploy_latest_report.overall_status || "unknown"})` : "none"],
+    ["Checkpoint", run.latest_checkpoint ? "ready" : "missing", run.latest_checkpoint ? "ready" : "missing", run.latest_checkpoint || ""],
+    ["ONNX", onnxText, onnxTone, run.onnx_path || ""],
+    ["Last report", reportText, reportTone, reportTooltip || ""],
   ];
   target.innerHTML = rows
-    .map(([key, value]) => `<span class="deploy-artifact-key">${escapeHtml(key)}</span><span>${escapeHtml(value)}</span>`)
+    .map(([key, value, tone, tooltip]) => {
+      const tip = tooltip ? ` data-tooltip="${escapeHtml(tooltip)}"` : "";
+      return (
+        `<span class="deploy-artifact-key">${escapeHtml(key)}</span>` +
+        `<span class="${deployArtifactPillClass(tone)}"${tip}>${escapeHtml(value)}</span>`
+      );
+    })
     .join("");
+}
+
+// The Deploy view offers three similar-looking actions whose availability
+// depends on artifacts the operator cannot see from the button row alone.
+// One sentence naming the single next move keeps the page self-explaining.
+function deployNextStep(run, gpuProcess, active) {
+  if (!run) {
+    return { tone: "info", text: "Select a run to begin. Runs appear here once the panel has seen a checkpoint or an export." };
+  }
+  if (active) {
+    return { tone: "running", text: `Readiness pipeline running for ${run.display_name || run.id}. Live output is in the Deploy Console.` };
+  }
+  if (activeMujocoProcessForRun(run.id)) {
+    return { tone: "running", text: "MuJoCo playback is running. Wait for it to finish before starting a readiness check." };
+  }
+  if (gpuProcess) {
+    return { tone: "warn", text: `${mediaLockMessage(gpuProcess)} Readiness checks stay disabled until the GPU is free.` };
+  }
+  if (!run.latest_checkpoint && !run.onnx_path) {
+    return { tone: "warn", text: "This run has no checkpoint and no ONNX. Train it further before deploying it." };
+  }
+  if (!run.onnx_path) {
+    return { tone: "action", text: "No ONNX yet. Run Export ONNX + Validate to build one from the latest checkpoint." };
+  }
+  const report = state.deployData?.latest?.report;
+  if (!report) {
+    return { tone: "action", text: "ONNX is ready. Run Validate Existing ONNX to produce the first readiness report." };
+  }
+  const status = String(report.overall_status || "").toLowerCase();
+  if (status === "fail") {
+    return { tone: "fail", text: "Readiness is blocked. Fix the failed stages on the right, then re-run the check." };
+  }
+  if (status === "warn") {
+    return { tone: "warn", text: "Readiness passed with warnings. Review the warned stages on the right before Jetson bring-up." };
+  }
+  if (status === "pass") {
+    return { tone: "pass", text: "Readiness passed. This policy is cleared for Jetson ROS2 bring-up." };
+  }
+  return { tone: "info", text: "A readiness report exists but its overall status is unknown. Re-run the check." };
+}
+
+function renderDeployNextStep(run, gpuProcess, active) {
+  const target = $("#deploy-next-step");
+  if (!target) return;
+  const step = deployNextStep(run, gpuProcess, active);
+  target.className = `deploy-next-step deploy-next-${step.tone}`;
+  target.textContent = step.text;
+}
+
+// A disabled button that never says why is the most common complaint about this
+// view, so every disabled state carries its own reason as a tooltip.
+function setDeployActionState(button, disabled, disabledReason, enabledTooltip) {
+  if (!button) return;
+  button.disabled = Boolean(disabled);
+  const tooltip = disabled ? disabledReason : enabledTooltip;
+  if (tooltip) button.dataset.tooltip = tooltip;
+  else delete button.dataset.tooltip;
 }
 
 function activeDeployProcessForRun(runId) {
@@ -2338,7 +2469,21 @@ function renderMujocoPlayback(run, defaults) {
     "Open the live MuJoCo viewer",
     REMOTE_MUJOCO_REASON
   );
-  if (recordButton) recordButton.disabled = !recordReady || Boolean(active);
+  const playbackBlockReason = !run
+    ? "Select a run first."
+    : (!run.onnx_path
+        ? "Export ONNX before MuJoCo playback."
+        : (!defaults.mujoco_installed
+            ? "MuJoCo is not installed on the training PC."
+            : (!defaults.onnxruntime_installed
+                ? "ONNX Runtime is not installed on the training PC."
+                : (active ? "MuJoCo playback is already running for this run." : ""))));
+  setDeployActionState(
+    recordButton,
+    !recordReady || Boolean(active),
+    playbackBlockReason || "The MJPEG renderer or MP4 encoder is unavailable in this environment.",
+    "Records the scenario to an MP4 you can replay here."
+  );
   if (stopButton) {
     stopButton.hidden = !active;
     stopButton.disabled = !active;
@@ -2364,6 +2509,8 @@ function renderMujocoPlayback(run, defaults) {
     setLocalOnlyButtonState(openButton, !run?.latest_mujoco_video, "Open the MuJoCo video folder (local only)");
   }
   if (copyButton) copyButton.hidden = !run?.latest_mujoco_video;
+  const videoActions = $("#deploy-mujoco-video-actions");
+  if (videoActions) videoActions.hidden = !run?.latest_mujoco_video;
   if (status) {
     if (!run) status.textContent = "Select a run to open or record MuJoCo playback.";
     else if (!run.onnx_path) status.textContent = "Export ONNX before MuJoCo playback.";
@@ -2375,6 +2522,24 @@ function renderMujocoPlayback(run, defaults) {
   }
 }
 
+function renderDeployStageSummary(latest) {
+  const target = $("#deploy-stage-summary");
+  if (!target) return;
+  const counts = latest?.stage_counts;
+  const chips = counts
+    ? [
+        ["pass", counts.pass || 0, "status-completed"],
+        ["warn", counts.warn || 0, "status-queued"],
+        ["fail", counts.fail || 0, "status-failed"],
+        ["skipped", counts.skipped || 0, "muted-pill"],
+      ].filter(([, value]) => value > 0)
+    : [];
+  target.hidden = chips.length === 0;
+  target.innerHTML = chips
+    .map(([label, value, cls]) => `<span class="status-badge ${cls}">${value} ${escapeHtml(label)}</span>`)
+    .join("");
+}
+
 function renderDeployReport(data) {
   const latest = data?.latest;
   const report = latest?.report;
@@ -2382,6 +2547,9 @@ function renderDeployReport(data) {
   const meta = $("#deploy-report-meta");
   const json = $("#deploy-report-json");
   const badge = $("#deploy-readiness-badge");
+  const reportDetails = $("#deploy-report-details");
+  renderDeployStageSummary(latest);
+  if (reportDetails) reportDetails.hidden = !report;
   if (!report) {
     if (stageList) {
       stageList.innerHTML = isLoading("deploy") && !state.deployData
@@ -2397,8 +2565,9 @@ function renderDeployReport(data) {
     return;
   }
   if (badge) {
-    badge.textContent = `${report.readiness_level || "review"} · ${report.overall_status || "unknown"}`;
+    badge.textContent = report.overall_status || "unknown";
     badge.className = deployBadgeClass(report.overall_status);
+    badge.dataset.tooltip = `Readiness level: ${report.readiness_level || "review"}`;
   }
   if (stageList) {
     stageList.innerHTML = (report.stages || [])
@@ -2416,12 +2585,10 @@ function renderDeployReport(data) {
       .join("");
   }
   if (meta) {
-    const counts = latest.stage_counts || {};
     meta.innerHTML = [
       ["Pipeline", report.pipeline_id],
       ["Completed", report.completed_at],
       ["Report", latest.path],
-      ["Stages", `pass ${counts.pass || 0} · warn ${counts.warn || 0} · fail ${counts.fail || 0} · skipped ${counts.skipped || 0}`],
     ]
       .map(([key, value]) => `<span class="debug-kv"><strong>${escapeHtml(key)}:</strong> ${escapeHtml(value || "")}</span>`)
       .join("");
@@ -2465,9 +2632,29 @@ function renderDeployPanel() {
   const exportButton = $("#deploy-export-validate");
   const mujocoButton = $("#deploy-mujoco-smoke");
   const stopButton = $("#deploy-stop");
-  if (validateButton) validateButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
-  if (exportButton) exportButton.disabled = !run || !run.latest_checkpoint || Boolean(gpuProcess && !active);
-  if (mujocoButton) mujocoButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
+  renderDeployNextStep(run, gpuProcess && !active ? gpuProcess : null, active);
+  const busy = Boolean(gpuProcess && !active);
+  const busyReason = busy ? mediaLockMessage(gpuProcess) : "";
+  const noRunReason = "Select a run first.";
+  const noOnnxReason = "This run has no exported ONNX yet. Use Export ONNX + Validate to build one.";
+  setDeployActionState(
+    validateButton,
+    !run || !run.onnx_path || busy,
+    !run ? noRunReason : (!run.onnx_path ? noOnnxReason : busyReason),
+    "Runs the readiness pipeline against the ONNX already on disk."
+  );
+  setDeployActionState(
+    exportButton,
+    !run || !run.latest_checkpoint || busy,
+    !run ? noRunReason : (!run.latest_checkpoint ? "This run has no checkpoint to export from." : busyReason),
+    "Exports a fresh ONNX from the latest checkpoint, then validates it."
+  );
+  setDeployActionState(
+    mujocoButton,
+    !run || !run.onnx_path || busy,
+    !run ? noRunReason : (!run.onnx_path ? noOnnxReason : busyReason),
+    "Runs only the advisory MuJoCo rollout stage."
+  );
   if (stopButton) {
     stopButton.hidden = !active;
     stopButton.disabled = !active;
@@ -2611,6 +2798,10 @@ function renderDeployDebug(debug) {
     liveEl.textContent = live ? "Live" : (debug ? "Snapshot" : "Idle");
     liveEl.className = live ? "status-badge live-pill" : "status-badge muted-pill";
   }
+  // Open the console on its own while output is arriving; never close it again,
+  // because an operator who opened it manually is reading a finished log.
+  const consoleDetails = $("#deploy-console-details");
+  if (consoleDetails && live) consoleDetails.open = true;
   const status = $("#deploy-debug-status");
   if (status) {
     status.innerHTML = debug
@@ -5208,12 +5399,25 @@ function renderFolderSidebar() {
       promptRenameFolder(button.dataset.folder).catch(handleActionError);
     });
   });
+  if (state.folderJustReceived) {
+    const received = sidebar.querySelector(
+      `[data-drop-folder="${CSS.escape(state.folderJustReceived)}"]`
+    );
+    state.folderJustReceived = null;
+    if (received) {
+      received.classList.add("drop-received");
+      received.addEventListener("animationend", () => received.classList.remove("drop-received"), {
+        once: true,
+      });
+    }
+  }
   sidebar.querySelectorAll("[data-drop-folder]").forEach((target) => {
     target.addEventListener("dragover", (event) => {
       if (!state.draggingRunIds.length) return;
       event.preventDefault();
-      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-      target.classList.add("drop-target");
+      const unavailable = target.classList.contains("drop-unavailable");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = unavailable ? "none" : "move";
+      if (!unavailable) target.classList.add("drop-target");
     });
     target.addEventListener("dragleave", (event) => {
       // Moving across a child element fires dragleave on the row itself.
@@ -5222,17 +5426,21 @@ function renderFolderSidebar() {
     });
     target.addEventListener("drop", (event) => {
       event.preventDefault();
-      target.classList.remove("drop-target");
+      const unavailable = target.classList.contains("drop-unavailable");
       const runIds = state.draggingRunIds.length
         ? [...state.draggingRunIds]
         : String(event.dataTransfer?.getData("text/plain") || "").split(",").filter(Boolean);
-      state.draggingRunIds = [];
-      document.body.classList.remove("dragging-runs");
-      if (!runIds.length) return;
       const raw = target.dataset.dropFolder;
       const folder = raw === "__uncategorized__" ? "" : raw;
-      const unchanged = runIds.every((runId) => (findRun(runId)?.folder || "") === folder);
-      if (unchanged) return;
+      endRunDrag();
+      if (!runIds.length || unavailable) return;
+      // The row confirms it caught the runs; the list below it is about to
+      // change, and the toast alone is easy to miss at the far corner.
+      state.folderJustReceived = raw;
+      target.classList.add("drop-received");
+      target.addEventListener("animationend", () => target.classList.remove("drop-received"), {
+        once: true,
+      });
       // Only a drag that carried the selection should consume it.
       const clearSelection = runIds.length > 1 || state.selectedRunIds.has(runIds[0]);
       assignRunsToFolder(runIds, folder, { clearSelection }).catch(handleActionError);
@@ -5773,6 +5981,113 @@ async function loadConvergenceSettings() {
   }
 }
 
+// The saved config, kept so the Save button can tell an operator whether the
+// form in front of them still matches what mother is actually running.
+function convergenceFormPayload() {
+  const preset = document.querySelector("#convergence-presets .segment-button.active")?.dataset.preset || "default";
+  const payload = {
+    enabled: Boolean($("#convergence-enabled")?.checked),
+    preset,
+    auto_record_video: Boolean($("#convergence-auto-record")?.checked),
+    divergence_enabled: Boolean($("#divergence-enabled")?.checked),
+    divergence_action: $("#divergence-auto-stop")?.checked ? "stop" : "notify",
+    divergence_patience_iterations: parseInt($("#divergence-patience")?.value || "100", 10),
+  };
+  if (preset === "custom") {
+    const window_iterations = parseInt($("#convergence-window")?.value || "200", 10);
+    const min_improvement_pct = parseFloat($("#convergence-threshold")?.value || "2.0");
+    if (!Number.isNaN(window_iterations)) payload.window_iterations = window_iterations;
+    if (!Number.isNaN(min_improvement_pct)) payload.min_improvement_pct = min_improvement_pct;
+  }
+  return payload;
+}
+
+function convergenceSavedPayload(config) {
+  const payload = {
+    enabled: Boolean(config.enabled),
+    preset: config.preset,
+    auto_record_video: Boolean(config.auto_record_video),
+    divergence_enabled: config.divergence_enabled !== false,
+    divergence_action: config.divergence_action === "stop" ? "stop" : "notify",
+    divergence_patience_iterations: Number(config.divergence_patience_iterations ?? 100),
+  };
+  if (config.preset === "custom") {
+    payload.window_iterations = Number(config.window_iterations);
+    payload.min_improvement_pct = Number(config.min_improvement_pct);
+  }
+  return payload;
+}
+
+function syncConvergenceDirtyState() {
+  const hint = $("#convergence-dirty-hint");
+  const saveButton = $("#convergence-save");
+  if (!state.convergenceSaved) return;
+  const dirty = JSON.stringify(convergenceFormPayload()) !== JSON.stringify(state.convergenceSaved);
+  if (hint) hint.hidden = !dirty;
+  if (saveButton) {
+    saveButton.disabled = !dirty;
+    saveButton.dataset.tooltip = dirty
+      ? "Save convergence detection settings to disk. Takes effect on the next training run."
+      : "The form already matches the saved configuration.";
+  }
+}
+
+// Controls that only mean something while their own master switch is on are
+// disabled rather than left looking editable.
+function syncConvergenceControlAvailability() {
+  const enabled = Boolean($("#convergence-enabled")?.checked);
+  const plateauPanel = $("#convergence-plateau-panel");
+  if (plateauPanel) plateauPanel.classList.toggle("panel-inactive", !enabled);
+  document
+    .querySelectorAll("#convergence-presets .segment-button, #convergence-window, #convergence-threshold, #convergence-auto-record")
+    .forEach((el) => {
+      el.disabled = !enabled;
+    });
+
+  const divergenceEnabled = Boolean($("#divergence-enabled")?.checked);
+  const divergencePanel = $("#convergence-divergence-panel");
+  if (divergencePanel) divergencePanel.classList.toggle("panel-inactive", !divergenceEnabled);
+  ["#divergence-auto-stop", "#divergence-patience"].forEach((selector) => {
+    const el = $(selector);
+    if (el) el.disabled = !divergenceEnabled;
+  });
+
+  const actionHint = $("#divergence-action-hint");
+  if (actionHint) {
+    if (!divergenceEnabled) actionHint.textContent = "Divergence is not watched. A collapsing run keeps training until you stop it.";
+    else if ($("#divergence-auto-stop")?.checked) actionHint.textContent = "Diverging runs will be stopped automatically as well as reported.";
+    else actionHint.textContent = "Diverging runs are reported only. Nothing is stopped for you.";
+  }
+}
+
+// Cooldown and the scalar tag are described in Definitions but were never shown
+// anywhere, so the panel could not answer "what is mother actually using?".
+function renderConvergenceInfoGrid(config) {
+  const grid = $("#convergence-info-grid");
+  if (!grid) return;
+  const rows = [
+    ["Detection", config.enabled ? `on · ${config.preset} preset` : "off"],
+    ["Window", `${config.window_iterations} iterations`],
+    ["Max improvement", `${config.min_improvement_pct}%`],
+    ["Minimum iterations", `${config.min_iterations} before any check runs`],
+    ["Cooldown", `${config.cooldown_minutes} minutes between notifications`],
+    ["Scalar tag", config.primary_tag],
+    ["Auto-record", config.auto_record_video ? "on" : "off"],
+    [
+      "Divergence",
+      config.divergence_enabled === false
+        ? "off"
+        : `${config.divergence_action === "stop" ? "stop the run" : "notify only"} · patience ${config.divergence_patience_iterations} iterations · collapse ${config.divergence_collapse_pct}%`,
+    ],
+  ];
+  grid.innerHTML = rows
+    .map(
+      ([key, value]) =>
+        `<span class="info-key">${escapeHtml(key)}</span><span class="info-val">${escapeHtml(String(value ?? ""))}</span>`
+    )
+    .join("");
+}
+
 function renderConvergenceCard(config, presets) {
   const enabledEl = $("#convergence-enabled");
   if (enabledEl) enabledEl.checked = Boolean(config.enabled);
@@ -5786,7 +6101,7 @@ function renderConvergenceCard(config, presets) {
   if (hint) hint.textContent = CONVERGENCE_PRESET_HINTS[config.preset] || "";
 
   const customDiv = $("#convergence-custom-inputs");
-  if (customDiv) customDiv.style.display = config.preset === "custom" ? "" : "none";
+  if (customDiv) customDiv.hidden = config.preset !== "custom";
 
   const windowEl = $("#convergence-window");
   if (windowEl) windowEl.value = config.window_iterations;
@@ -5813,21 +6128,15 @@ function renderConvergenceCard(config, presets) {
       badge.className = "status-badge info-pill";
     }
   }
+
+  renderConvergenceInfoGrid(config);
+  state.convergenceSaved = convergenceSavedPayload(config);
+  syncConvergenceControlAvailability();
+  syncConvergenceDirtyState();
 }
 
 async function saveConvergenceSettings() {
-  const enabled = Boolean($("#convergence-enabled")?.checked);
-  const preset = document.querySelector("#convergence-presets .segment-button.active")?.dataset.preset || "default";
-  const updates = { enabled, preset, auto_record_video: Boolean($("#convergence-auto-record")?.checked) };
-  if (preset === "custom") {
-    const w = parseInt($("#convergence-window")?.value || "200", 10);
-    const t = parseFloat($("#convergence-threshold")?.value || "2.0");
-    if (!Number.isNaN(w)) updates.window_iterations = w;
-    if (!Number.isNaN(t)) updates.min_improvement_pct = t;
-  }
-  updates.divergence_enabled = Boolean($("#divergence-enabled")?.checked);
-  updates.divergence_action = $("#divergence-auto-stop")?.checked ? "stop" : "notify";
-  updates.divergence_patience_iterations = parseInt($("#divergence-patience")?.value || "100", 10);
+  const updates = convergenceFormPayload();
   const data = await api("/api/convergence/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -6146,11 +6455,21 @@ document.querySelectorAll("#convergence-presets .segment-button").forEach((btn) 
     document.querySelectorAll("#convergence-presets .segment-button").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     const customDiv = $("#convergence-custom-inputs");
-    if (customDiv) customDiv.style.display = btn.dataset.preset === "custom" ? "" : "none";
+    if (customDiv) customDiv.hidden = btn.dataset.preset !== "custom";
     const hint = $("#convergence-preset-hint");
     if (hint) hint.textContent = CONVERGENCE_PRESET_HINTS[btn.dataset.preset] || "";
+    syncConvergenceDirtyState();
   });
 });
+
+const convergenceCard = $("#convergence-card");
+if (convergenceCard) {
+  convergenceCard.addEventListener("change", () => {
+    syncConvergenceControlAvailability();
+    syncConvergenceDirtyState();
+  });
+  convergenceCard.addEventListener("input", () => syncConvergenceDirtyState());
+}
 
 function isTypingTarget(target) {
   if (!target) return false;

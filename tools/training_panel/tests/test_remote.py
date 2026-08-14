@@ -15,6 +15,7 @@ from tools.training_panel.training_panel.notifications import (
     discord_message,
 )
 from tools.training_panel.training_panel.remote_config import (
+    REMOTE_PROTOCOL_VERSION,
     RemoteConfig,
     RemoteStateStore,
     heartbeat_payload,
@@ -31,6 +32,9 @@ from tools.training_panel.training_panel.remote_worker import (
     RemoteWorker,
     run_artifacts,
 )
+
+
+TEST_ACTOR_ID = "11111111-1111-4111-8111-111111111111"
 
 
 class FakeClient:
@@ -89,6 +93,9 @@ class FakeClient:
         if table in self.select_by_table:
             value = self.select_by_table[table]
             return value(query) if callable(value) else value
+        if table == "profiles" and query and str(query.get("id") or "").startswith("eq."):
+            actor_id = str(query["id"])[3:]
+            return [{"id": actor_id, "email": "operator@example.com", "display_name": "Operator", "role": "operator"}]
         return self.select_rows
 
     def delete(self, table, query=None):
@@ -214,7 +221,7 @@ class RemoteTests(unittest.TestCase):
             root = Path(tmp)
             paths = self.make_paths(root)
             config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
-            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "payload": {}})
+            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "actor_id": TEST_ACTOR_ID, "payload": {}})
             worker = RemoteWorker(config, paths, client, executor=FakeExecutor())
             result = worker.poll_once()
             self.assertEqual(result["status"], "completed")
@@ -226,7 +233,7 @@ class RemoteTests(unittest.TestCase):
             root = Path(tmp)
             paths = self.make_paths(root)
             config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
-            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "payload": {}})
+            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "actor_id": TEST_ACTOR_ID, "payload": {}})
             worker = RemoteWorker(config, paths, client, executor=FakeExecutor())
             worker.sync_if_due = MagicMock(return_value="")
             worker.sync_runs = MagicMock(return_value={"runs_changed": 1, "artifacts": 0})
@@ -262,7 +269,7 @@ class RemoteTests(unittest.TestCase):
             root = Path(tmp)
             paths = self.make_paths(root)
             config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
-            client = FakeClient(job={"id": "job_one", "type": "start_training", "actor_role": "operator", "payload": {}})
+            client = FakeClient(job={"id": "job_one", "type": "start_training", "actor_role": "operator", "actor_id": TEST_ACTOR_ID, "payload": {}})
             worker = RemoteWorker(config, paths, client, executor=FakeExecutor())
             result = worker.poll_once()
             self.assertEqual(result["status"], "completed")
@@ -276,7 +283,7 @@ class RemoteTests(unittest.TestCase):
             root = Path(tmp)
             paths = self.make_paths(root)
             config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
-            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "payload": {}})
+            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "actor_id": TEST_ACTOR_ID, "payload": {}})
             client.raise_on_activity_insert = True
             worker = RemoteWorker(config, paths, client, executor=FakeExecutor())
             result = worker.poll_once()
@@ -858,7 +865,7 @@ class RemoteTests(unittest.TestCase):
             onnx.write_text("onnx", encoding="utf-8")
             paths = self.make_paths(root)
             config = RemoteConfig(machine_id="lab-pc", accept_jobs=True)
-            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "payload": {}})
+            client = FakeClient(job={"id": "job_one", "type": "export_onnx", "actor_role": "operator", "actor_id": TEST_ACTOR_ID, "payload": {}})
             client.raise_on_artifacts_upsert = True
             executor = FakeExecutor()
             executor.sync_runs_payload = MagicMock(return_value=[

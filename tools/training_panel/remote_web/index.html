@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex To Go</title>
-    <link rel="stylesheet" href="./remote_styles.css?v=3.4.10-sync-health" />
+    <link rel="stylesheet" href="./remote_styles.css?v=3.7.0-remote-parity" />
   </head>
   <body>
     <main id="app" class="remote-shell">
@@ -15,7 +15,7 @@
       </section>
     </main>
     <script type="module">
-      import("./remote_app.js?v=3.4.10-sync-health").catch((error) => {
+      import("./remote_app.js?v=3.7.0-remote-parity").catch((error) => {
         console.error("RedRHex child app failed to start", error);
         const app = document.querySelector("#app");
         if (!app) return;
