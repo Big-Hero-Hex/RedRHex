@@ -103,6 +103,7 @@ class RepositoryValidationTests(unittest.TestCase):
             "build",
             "dist",
             "site",
+            "docs/generated",
             "docs/governance/templates",
         ):
             self.write(f"{directory}/IGNORED.en.md", "not frontmatter\n")

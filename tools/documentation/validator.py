@@ -38,6 +38,7 @@ _EXCLUDED_DIRECTORY_NAMES = {
     ".nox",
     "build",
     "dist",
+    "generated",
     "site",
 }
 
