@@ -16,7 +16,6 @@ jobs:
   code:
     runs-on: ubuntu-latest
     env:
-      MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPATH: ${{ github.workspace }}
     steps:
@@ -38,9 +37,13 @@ jobs:
           tensorboard==2.20.0
 
       - name: Test Training Panel services
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: python -m pytest -q -o cache_dir=${{ runner.temp }}/pytest-panel tools/training_panel/tests
 
       - name: Test CPU-only sim-to-real contracts
+        env:
+          MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: >-
           python -m pytest -q
           -o cache_dir=${{ runner.temp }}/pytest-sim2real
