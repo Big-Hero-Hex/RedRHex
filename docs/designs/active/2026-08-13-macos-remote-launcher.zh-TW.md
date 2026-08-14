@@ -17,13 +17,13 @@ last_reviewed: 2026-08-14
 <a id="goals-and-non-goals"></a>
 ## 目標與非目標
 
-- 目標：提供單一 macOS `.command` launcher，安裝到目前使用者桌面、啟動或重用 workstation panel、開啟有回應的服務，並保持 tunnel 可見。
-- 非目標：修改既有 Windows launcher、Tailscale、SSH server、Training Panel 內部、Isaac Lab 或 training artifact。
+- 目標：提供單一 macOS `.command` launcher，安裝到目前使用者桌面、啟動或重用 workstation panel、開啟具 on-demand TensorBoard 的 remote-aware panel，並保持 tunnel 可見。
+- 非目標：修改既有 Windows launcher、Tailscale、SSH server、Isaac Lab 或 training artifact。共用 Training Panel change 僅限 marker-driven remote capability presentation。
 
 <a id="proposal-and-interfaces"></a>
 ## 提案與介面
 
-使用 POSIX shell script 與 macOS 內建的 `ssh`、`curl`、`base64`、`open` command。透過 `lab_user1@100.90.246.97`，將本機 `8080` 與 `6006` 轉送到 workstation loopback。SSH 在 foreground 保留 host-key 與 password prompt，background monitor 最多等待 panel 45 秒，再開啟有回應的 browser page。`--install` 不需 administrator 權限，會將 executable launcher 複製至 `~/Desktop/RedRHex Remote.command`。
+使用 POSIX shell script 與 macOS 內建的 `ssh`、`curl`、`base64`、`open` command。透過 `lab_user1@100.90.246.97`，將本機 `8080` 與 `6006` 轉送到 workstation loopback。SSH 在 foreground 保留 host-key 與 password prompt，background monitor 最多等待 45 秒，再開啟 `http://localhost:8080/?remote_client=macos`。此 marker 會透過 `6006` 路由單一 all-runs TensorBoard、強制 headless training，並停用 host-only file-manager 與 live-viewer control。`--install` 不需 administrator 權限，會將 executable launcher 複製至 `~/Desktop/RedRHex Remote.command`。
 
 <a id="failure-modes"></a>
 ## 失敗模式
@@ -34,8 +34,9 @@ last_reviewed: 2026-08-14
 ## 驗收
 
 - [x] 提供 launcher、dependency-free source test，以及成對的 operator 與 developer 文件。
+- [x] 提供 marker-driven capability state 與 fixed-forward TensorBoard 的 browser regression proof。
 - [ ] 在支援的 macOS host 驗證 installation 與 first-launch behavior。
-- [ ] 對 workstation 驗證 interactive authentication、兩個 forward、browser launch、timeout、tunnel shutdown 與 existing-tunnel reuse。
+- [ ] 對 workstation 驗證 interactive authentication、兩個 forward、browser launch、UI capability state、timeout、tunnel shutdown 與 existing-tunnel reuse。
 
 <a id="resolution"></a>
 ## 結果

@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: draft
 owner: panel
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="prerequisites"></a>
@@ -35,7 +35,9 @@ Enter the Ubuntu password only in the `scp` or SSH prompt. Installation requires
 3. If prompted in the visible `RedRHex SSH Tunnel` window, verify the host and enter the Ubuntu password.
 4. Keep that window open while using the forwarded services.
 
-The launcher reuses a responsive tunnel. Otherwise it connects to `lab_user1@100.90.246.97`, forwards local ports `8080` and `6006`, and starts the workstation panel in the `env_isaaclab_bin` environment. It opens the Training Panel at `http://localhost:8080`. It opens TensorBoard at `http://localhost:6006` only when TensorBoard is already responding.
+The launcher reuses a responsive tunnel. Otherwise it connects to `lab_user1@100.90.246.97`, forwards local ports `8080` and `6006`, and starts the workstation panel in the `env_isaaclab_bin` environment. It opens the Training Panel at `http://localhost:8080/?remote_client=windows`. Clicking **TensorBoard** starts or reuses one all-runs TensorBoard on the forwarded `http://localhost:6006` address.
+
+The marker keeps browser-safe actions enabled and makes the remote boundary visible. Training stays Headless. **Play**, **Open MuJoCo Viewer**, and folder-opening buttons are greyed out because their windows would open on the Ubuntu workstation, not the Windows laptop. Use Record Video, Record MuJoCo MP4, Process Console, and the available copy-path controls instead.
 
 <a id="stop"></a>
 ## Stop and remove
@@ -56,4 +58,4 @@ These commands remove only the shortcut and installed launcher copy.
 - Authentication or reachability failure: confirm Tailscale, the workstation address, host-key prompt, and Ubuntu password in the visible tunnel window.
 - Local bind failure: stop the process already using port `8080` or `6006`, then retry.
 - Panel readiness timeout: inspect the SSH window and workstation `tmux` session `redrhex_panel`; without tmux, inspect `logs/training_panel/remote_panel.log`.
-- TensorBoard does not open: start it from the Training Panel, then open `http://localhost:6006`.
+- TensorBoard does not open: confirm local port `6006` is free, click **TensorBoard** in History, and inspect Process Console if startup fails.

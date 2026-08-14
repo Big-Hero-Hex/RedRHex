@@ -32,6 +32,8 @@ History combines panel requests and discovered RSL-RL runs. Select a run to insp
 
 Running cards show iteration progress, throughput, and ETA parsed from the process log. Run details draw mean reward and episode-length curves from local TensorBoard scalars. The run record also captures the Git commit, branch, and dirty state used at launch. A blank seed makes the panel choose and record a seed, so panel-launched runs remain reproducible.
 
+The Windows and macOS launchers open the panel with an explicit desktop-remote marker. In that mode, **TensorBoard** starts or reuses one all-runs server on the forwarded `6006` port. Headless training is enforced. **Play**, **Open MuJoCo Viewer**, and host file-manager buttons are disabled because those windows would open on the training PC, not in the remote browser. Use recorded Isaac videos, recorded MuJoCo MP4s, browser console output, and copy-path controls instead.
+
 Compaction keeps the highest top-level `model_*.pt` and preserves events, parameters, videos, exports, notes, and deployment reports. Deletion requires the exact run ID and is rejected while a related process is active.
 
 <a id="convergence"></a>
