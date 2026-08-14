@@ -21,19 +21,22 @@ BUILT_IN_PRESETS: list[dict] = [
     },
     {
         "id": "speed-focus",
-        "name": "Speed Focus",
+        "name": "Straight Forward Focus",
         "description": (
-            "Emphasises forward velocity and tracking. "
-            "Robot learns to move faster but may be less stable. "
-            "Try this after a baseline run succeeds."
+            "Targets the active simplified reward path for straight forward tracking. "
+            "It reduces raw speed chasing, tightens command tracking and drift control, "
+            "and keeps stall prevention stronger than free leg spinning."
         ),
         "built_in": True,
         "values": {
-            "rew_scale_forward_vel": 5.0,
-            "rew_scale_vel_tracking": 6.0,
-            "rew_scale_ang_vel_tracking": 3.5,
-            "rew_scale_orientation": -0.1,
-            "rew_scale_base_height": -0.1,
+            "v2_reward_scales.forward_progress": 3.0,
+            "v2_reward_scales.velocity_tracking": 6.0,
+            "v2_reward_scales.axis_suppression": 2.0,
+            "v2_reward_scales.height_maintain": 1.0,
+            "v2_reward_scales.height_low_penalty": 1.5,
+            "v2_reward_scales.leg_moving": 0.25,
+            "v2_reward_scales.stall_penalty": -3.0,
+            "v2_reward_scales.energy_per_distance": 0.0005,
         },
     },
     {

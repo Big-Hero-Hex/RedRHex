@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="checkpoint"></a>
@@ -22,10 +22,11 @@ Use a training checkpoint named `model_*.pt`, not a TensorBoard event or exporte
   --task Template-Redrhex-Direct-v0 \
   --load_run RUN_DIRECTORY \
   --checkpoint model_ITERATION.pt \
+  --initial_command forward \
   --num_envs 1
 ```
 
-Keyboard control starts with `stop`. Use `--disable_keyboard_control` to retain sampled commands. A checkpoint path containing `_stage1` through `_stage5` sets `env.stage` automatically unless `--disable_auto_stage_from_checkpoint` is supplied.
+Keyboard control starts with the forward command, equivalent to pressing `W`; `--initial_command forward` makes that intent explicit in saved commands. Use `--initial_command stop` for a stationary start, or `--disable_keyboard_control` to retain sampled environment commands. A checkpoint path containing `_stage1` through `_stage5` sets `env.stage` automatically unless `--disable_auto_stage_from_checkpoint` is supplied.
 
 <a id="export"></a>
 ## Export JIT and ONNX
@@ -49,12 +50,15 @@ The command writes `exported/policy.pt` and `exported/policy.onnx`. Run [deploym
   --task Template-Redrhex-Direct-v0 \
   --load_run RUN_DIRECTORY \
   --checkpoint model_ITERATION.pt \
+  --initial_command forward \
   --video \
   --video_length 1200 \
   --headless
 ```
 
 Add `--camera_follow_robot` when the fixed camera loses the robot. The result is written under the run's `videos/play/` directory.
+
+Training Panel Play and Record Video reuse the selected run's saved task and explicitly start with the forward command. ONNX export also reuses the saved task, but does not need an initial motion command. Confirm the Process Console command contains both the expected `--task` and `--initial_command forward` before diagnosing a stationary clip as a failed policy.
 
 <a id="evaluate"></a>
 ## Evaluate behavior

@@ -6,7 +6,7 @@ audience: shared
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="project-milestones"></a>
@@ -18,6 +18,9 @@ last_reviewed: 2026-08-07
 <a id="component-releases"></a>
 ## Component releases
 
+- [Training Panel 3.6.1](../../tools/training_panel/docs/releases/v3-6-1.en.md)
+- [Training Panel 3.6.0](../../tools/training_panel/docs/releases/v3-6-0.en.md)
+- [Training Panel 3.5.0](../../tools/training_panel/docs/releases/v3-5-0.en.md)
 - [Training Panel 3.4.10](../../tools/training_panel/docs/releases/v3-4-10.en.md)
 
 <a id="versioning-model"></a>

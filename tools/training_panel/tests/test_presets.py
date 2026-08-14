@@ -27,6 +27,21 @@ def test_get_preset_returns_correct_preset(store):
     assert p["built_in"] is True
 
 
+def test_speed_focus_targets_active_simplified_rewards(store):
+    preset = store.get_preset("speed-focus")
+    assert preset is not None
+    assert preset["values"] == {
+        "v2_reward_scales.forward_progress": 3.0,
+        "v2_reward_scales.velocity_tracking": 6.0,
+        "v2_reward_scales.axis_suppression": 2.0,
+        "v2_reward_scales.height_maintain": 1.0,
+        "v2_reward_scales.height_low_penalty": 1.5,
+        "v2_reward_scales.leg_moving": 0.25,
+        "v2_reward_scales.stall_penalty": -3.0,
+        "v2_reward_scales.energy_per_distance": 0.0005,
+    }
+
+
 def test_get_nonexistent_preset_returns_none(store):
     assert store.get_preset("does-not-exist") is None
 

@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="published-evidence"></a>
 ## 已發布證據
 
+- [Explicit 扭轉彈簧數值不穩定](2026-08-14-explicit-torsion-spring-instability.zh-TW.md)
 - [分支重整 V1 完成稽核](2026-08-14-branch-reorganization-v1-audit.zh-TW.md)
 - [純感測器學生蒸餾 V2 程式路徑稽核](2026-08-13-student-distillation-v2-audit.zh-TW.md)
 - [2026-08-13 研究就緒度稽核修正附錄 1](2026-08-13-research-readiness-audit-addendum-1.zh-TW.md)

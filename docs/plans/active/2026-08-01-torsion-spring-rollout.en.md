@@ -6,7 +6,7 @@ audience: developer
 type: plan
 status: active
 owner: sim2real
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="objective"></a>
@@ -17,7 +17,7 @@ Turn the implemented explicit/native spring system into an evidence-backed selec
 <a id="context"></a>
 ## Context
 
-Implementation, profile binding, Panel propagation, fail-closed deployment checks, characterization, and acceptance validators exist. V11 is uncalibrated and selected no backend. Physical spring calibration and holdout are the external blocking inputs.
+Implementation, profile binding, Panel propagation, fail-closed deployment checks, characterization, and acceptance validators exist. V11 is uncalibrated and selected no backend. A deterministic rerun proved that Explicit's current 200 N*m/rad model is numerically unstable at 120 and 240 Hz, so policy training is quarantined while characterization remains available. Physical spring calibration, per-link mass/inertia evidence, and holdout are the external blocking inputs.
 
 <a id="phased-checklist"></a>
 ## Phased checklist
@@ -32,6 +32,8 @@ Implementation, profile binding, Panel propagation, fail-closed deployment check
 <a id="physics"></a>
 ### Physics selection
 
+- [x] Reproduce the Explicit runaway without policy actions, publish the numerical-instability evidence, and quarantine new Explicit policy training.
+- [ ] Audit and correct per-link mass and inertia from reviewed physical evidence; do not promote uniform mass scaling or arbitrary armature as a fix.
 - [ ] Build an authenticated profile that applies the accepted representative stiffness to all six aliases and keeps damping zero.
 - [ ] Run explicit/native `spring-release` characterization at 120 Hz and 240 Hz under identical provenance.
 - [ ] Select a backend only when both implementations pass the deterministic gate; preserve a blocked report otherwise.
@@ -47,7 +49,8 @@ Implementation, profile binding, Panel propagation, fail-closed deployment check
 ### Integration
 
 - [ ] Run the full sim-to-real and Training Panel suites plus real Panel video/export checks with recorded backend reuse.
-- [ ] Update canonical operator/developer documentation and publish evidence-backed release and experiment records.
+- [x] Publish the Explicit-instability experiment, quarantine behavior, operator guidance, and 3.6.1 safety release.
+- [ ] Publish final calibrated-backend documentation and release evidence after selection and policy acceptance.
 - [ ] Resolve this plan and the approved design only after calibrated evidence, selected backend, accepted policies, and reviewed integration all exist.
 
 <a id="verification"></a>
@@ -58,4 +61,4 @@ Required evidence includes immutable source hashes, profile revalidation, four m
 <a id="completion-summary"></a>
 ## Completion summary
 
-Pending physical calibration and holdout; no production backend or deployable torsion policy is currently selected.
+Explicit policy training is quarantined and Native is only the provisional operational default. Physical calibration, per-link mass/inertia evidence, and holdout remain pending; no production backend or deployable torsion policy is selected.

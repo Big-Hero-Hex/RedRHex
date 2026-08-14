@@ -61,6 +61,10 @@ html[data-theme="dark"] {
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
@@ -262,6 +266,33 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
+}
+
+.panel-grid > label {
+  align-content: start;
+}
+
+.training-route-summary {
+  grid-column: span 2;
+  align-self: stretch;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--blue);
+  border-radius: 7px;
+  background: var(--blue-bg);
+  color: var(--text);
+}
+
+.training-route-summary strong {
+  color: var(--blue);
+}
+
+.training-route-summary span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 label {
@@ -487,7 +518,7 @@ html[data-theme="dark"] .status-unknown {
 .history-layout {
   margin-top: 16px;
   display: grid;
-  grid-template-columns: 176px minmax(320px, 1fr) minmax(340px, 0.85fr);
+  grid-template-columns: 200px minmax(320px, 1fr) minmax(340px, 0.85fr);
   gap: 14px;
   align-items: start;
 }
@@ -532,14 +563,31 @@ html[data-theme="dark"] .status-unknown {
 
 .folder-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  padding: 7px 10px;
+  gap: 4px;
+  padding: 0 6px 0 0;
   border-radius: 7px;
-  cursor: pointer;
   font-size: 13px;
   transition: background-color 120ms;
+}
+
+.folder-select {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 4px 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .folder-item:hover {
@@ -549,16 +597,30 @@ html[data-theme="dark"] .status-unknown {
 .folder-item.active {
   background: var(--surface-2);
   border-left: 3px solid var(--red);
-  padding-left: 7px;
   font-weight: 700;
+}
+
+/* The rename/remove buttons are secondary: reveal them on hover or keyboard
+   focus so a column of folders reads as a list of folders, not of controls. */
+.folder-rename-button,
+.folder-delete-button {
+  opacity: 0;
+}
+
+.folder-item:hover .folder-rename-button,
+.folder-item:hover .folder-delete-button,
+.folder-rename-button:focus-visible,
+.folder-delete-button:focus-visible {
+  opacity: 0.75;
 }
 
 .folder-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* A truncated folder name is unusable as a label — wrap instead. */
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.3;
 }
 
 .folder-count {
@@ -569,6 +631,7 @@ html[data-theme="dark"] .status-unknown {
   padding: 1px 5px;
   border-radius: 9px;
   flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .folder-delete-button {
@@ -582,7 +645,6 @@ html[data-theme="dark"] .status-unknown {
   color: var(--muted);
   font-size: 16px;
   line-height: 1;
-  opacity: 0.65;
   flex-shrink: 0;
 }
 
@@ -599,7 +661,6 @@ html[data-theme="dark"] .status-unknown {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
-  opacity: 0.75;
   flex-shrink: 0;
 }
 
@@ -784,6 +845,18 @@ html[data-theme="dark"] .status-unknown {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  position: sticky;
+  top: 96px;
+  max-height: calc(100vh - 112px);
+}
+
+/* Without this the search and filter row scrolls out of reach as soon as the
+   list is long enough to need it. */
+.run-list-col .run-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .history-toolbar {
@@ -826,7 +899,9 @@ html[data-theme="dark"] .status-unknown {
 }
 
 .bulk-toolbar select {
-  min-width: 150px;
+  min-width: 0;
+  flex: 1 1 120px;
+  max-width: 190px;
   padding: 7px 10px;
   border-radius: 7px;
   border: 1px solid var(--line);
@@ -1387,6 +1462,9 @@ html[data-theme="dark"] .comparison-diff {
   width: max-content;
   max-width: min(520px, calc(100vw - 32px));
   white-space: normal;
+  /* A tooltip that carries a filesystem path holds one unbreakable token, which
+     overflows the capped box and widens the document behind the hidden layer. */
+  overflow-wrap: anywhere;
   text-align: left;
   pointer-events: none;
   opacity: 0;
@@ -1398,6 +1476,19 @@ html[data-theme="dark"] .comparison-diff {
 [data-tooltip]:hover::after,
 [data-tooltip]:focus-visible::after {
   opacity: 1;
+}
+
+/* The run list is its own scroll container, so anything drawn outside a card is
+   clipped at the container edge. Popups anchored near a card's top edge open
+   downward instead, which keeps them inside the card's own footprint. */
+.run-list .run-select-checkbox[data-tooltip]::after {
+  top: calc(100% + 6px);
+  bottom: auto;
+  left: 0;
+  transform: none;
+  /* A hidden tooltip still occupies layout, so left-anchoring it needs a width
+     that cannot reach past the viewport on a narrow screen. */
+  max-width: min(260px, calc(100vw - 72px));
 }
 
 /* ==============================
@@ -1544,10 +1635,134 @@ html[data-theme="dark"] .comparison-diff {
 .video-panel video {
   display: block;
   width: 100%;
+  margin-top: 12px;
   max-height: 420px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--code-bg);
+}
+
+.checkpoint-evolution {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.checkpoint-evolution summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.checkpoint-evolution summary::-webkit-details-marker {
+  display: none;
+}
+
+.checkpoint-evolution summary > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.checkpoint-evolution summary small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.checkpoint-evolution summary::after {
+  content: "⌄";
+  color: var(--muted);
+  font-size: 18px;
+  transition: transform 140ms ease;
+}
+
+.checkpoint-evolution[open] summary::after {
+  transform: rotate(180deg);
+}
+
+.checkpoint-evolution-body {
+  padding: 0 10px 10px;
+}
+
+.video-record-hint {
+  margin: -4px 0 10px;
+  color: var(--amber);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.checkpoint-timeline {
+  display: grid;
+  gap: 4px;
+  max-height: min(46vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
+}
+
+.checkpoint-point,
+.checkpoint-latest-button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.checkpoint-point:hover,
+.checkpoint-latest-button:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
+}
+
+.checkpoint-point.active,
+.checkpoint-latest-button.active {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.checkpoint-marker {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border: 2px solid var(--muted);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.checkpoint-point.active .checkpoint-marker,
+.checkpoint-latest-button.active .checkpoint-marker {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.checkpoint-point-copy,
+.checkpoint-point-title {
+  min-width: 0;
+}
+
+.checkpoint-point-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.checkpoint-point-copy small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
 }
 
 .live-pill {
@@ -1621,6 +1836,47 @@ html[data-theme="dark"] .comparison-diff {
 
 .definition-list span {
   color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* A panel whose master switch is off still shows its values, but reads as
+   inert rather than editable. */
+.panel-inactive {
+  opacity: 0.55;
+}
+
+.form-row {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  font-size: 12px;
+}
+
+.form-row small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+#convergence-card .section-header {
+  margin-top: 14px;
+}
+
+#convergence-info-grid {
+  margin-bottom: 10px;
+}
+
+#convergence-plateau-panel .segmented-control {
+  margin-top: 0;
+}
+
+#convergence-divergence-panel .muted-copy,
+#convergence-plateau-panel .muted-copy {
   font-size: 12px;
   line-height: 1.45;
 }
@@ -1843,6 +2099,13 @@ html[data-theme="dark"] .comparison-diff {
   font-weight: 650;
 }
 
+/* Without this the global full-width input rule stretches the box and strands
+   the label against the opposite edge of the row. */
+.toggle-row input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 18px;
+}
+
 .copy-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1979,6 +2242,10 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .training-route-summary {
+    grid-column: auto;
+  }
+
   .control-side-stack {
     position: static;
   }
@@ -2017,11 +2284,188 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .run-list-col {
+    position: static;
+    max-height: none;
+  }
+
+  .run-list-col .run-list {
+    overflow-y: visible;
+    padding-right: 0;
+  }
+
+  .details-panel-wrap {
+    position: static;
+    min-width: 0;
+    max-height: none;
+    overflow: visible;
+    overflow-x: clip;
+  }
+
+  .details-panel {
+    min-width: 0;
+    overflow-x: clip;
+  }
+
   .folder-sidebar {
     flex-direction: row;
     flex-wrap: wrap;
     position: static;
   }
+}
+
+.filtered-pill {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+}
+
+/* ── Dragging runs into folders ──
+   The bold moment is the hovered folder, which states the outcome before the
+   drop is committed. Everything else in the drag stays deliberately quiet. */
+
+.run-card[draggable="true"] {
+  cursor: grab;
+}
+
+.run-card.dragging {
+  cursor: grabbing;
+  opacity: 0.4;
+  border-style: dashed;
+  box-shadow: none;
+  transform: none;
+}
+
+/* What the cursor carries: a name for one run, a count for a selection. */
+.run-drag-chip {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  max-width: 260px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: var(--red);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: var(--shadow);
+}
+
+.run-menu[data-direction="up"] {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+.run-card:has(.run-menu[data-open="true"]) {
+  position: relative;
+  z-index: 5;
+}
+
+/* Every legal destination is marked for the whole drag, so the operator sees
+   where a run can land instead of hunting row by row. */
+body.dragging-runs .folder-item[data-drop-folder] {
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+  transition:
+    background-color 120ms ease,
+    box-shadow 140ms ease,
+    outline-color 120ms ease;
+}
+
+/* A folder that already holds every dragged run is not a move. Saying so up
+   front beats letting it glow and then do nothing. */
+body.dragging-runs .folder-item.drop-unavailable {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+body.dragging-runs .folder-item[data-drop-folder] .folder-rename-button,
+body.dragging-runs .folder-item[data-drop-folder] .folder-delete-button {
+  display: none;
+}
+
+.folder-item.drop-target {
+  background: var(--surface-hover);
+  outline: 2px solid var(--red);
+  outline-offset: -1px;
+  box-shadow: 0 10px 26px rgba(183, 54, 45, 0.24);
+}
+
+html[data-theme="dark"] .folder-item.drop-target {
+  box-shadow: 0 10px 26px rgba(227, 93, 82, 0.26);
+}
+
+.folder-item.drop-target .folder-name {
+  font-weight: 800;
+}
+
+/* The one bold element: the row states the outcome before the drop is
+   committed, in the same words the resulting toast uses. */
+.folder-item.drop-target::after {
+  content: attr(data-drop-label);
+  flex-basis: 100%;
+  padding: 0 10px 7px;
+  color: var(--red);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.folder-item.drop-target .folder-count {
+  background: var(--red);
+  color: #fff;
+}
+
+/* The list under the folder is about to change, so the row confirms it caught
+   the runs rather than leaving that to a toast in the far corner. */
+.folder-item.drop-received {
+  animation: folder-received 520ms ease-out;
+}
+
+@keyframes folder-received {
+  from {
+    outline: 2px solid var(--red);
+    outline-offset: -1px;
+    background: var(--surface-hover);
+  }
+  to {
+    outline: 2px solid transparent;
+    outline-offset: -1px;
+    background: transparent;
+  }
+}
+
+#bulk-selected-count.has-selection {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+}
+
+.draft-flag {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.comparison-pill {
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px dashed var(--line-strong);
+}
+
+.run-card.comparing {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px rgba(49, 94, 159, 0.14);
+}
+
+.empty-panel p {
+  margin-bottom: 10px;
+}
+
+.toast-success {
+  border-left-color: var(--green);
 }
 
 /* ==============================
@@ -2345,6 +2789,109 @@ pre {
   width: 100%;
 }
 
+.physics-toolbar {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.physics-toolbar > label:first-child {
+  flex: 1 1 320px;
+}
+
+.physics-toolbar input[type="search"] {
+  width: 100%;
+}
+
+.physics-changed-filter {
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+}
+
+.physics-note {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.physics-category-header .status-badge {
+  margin-left: auto;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.physics-row {
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 0.7fr);
+  align-items: start;
+}
+
+.physics-row.is-overridden {
+  box-shadow: inset 3px 0 0 var(--amber);
+}
+
+.physics-control-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.physics-input-line {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) minmax(64px, auto) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.physics-row input.physics-row-input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  text-align: right;
+}
+
+.physics-unit,
+.physics-default {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.physics-unit {
+  overflow-wrap: anywhere;
+}
+
+.physics-default {
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .physics-editor-section .reward-editor-actions {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .physics-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .physics-input-line {
+    grid-template-columns: minmax(90px, 1fr) minmax(56px, auto) auto;
+  }
+
+  .physics-category-header {
+    flex-wrap: wrap;
+  }
+}
+
 .reference-section {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -2489,12 +3036,154 @@ pre {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
   gap: 6px 10px;
+  align-items: center;
   padding: 10px;
-  margin: 8px 0 14px;
+  margin: 8px 0 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface-subtle);
+  background: var(--surface);
   font-size: 13px;
+}
+
+.deploy-artifact-status .status-badge {
+  justify-self: start;
+}
+
+/* The single sentence that says what to do next. Same callout idiom as the
+   training route summary so the two pages read as one product. */
+.deploy-next-step {
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.deploy-next-step:empty {
+  display: none;
+}
+
+.deploy-next-action,
+.deploy-next-running {
+  border-left-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.deploy-next-pass {
+  border-left-color: var(--green);
+  background: var(--green-bg);
+}
+
+.deploy-next-warn {
+  border-left-color: var(--amber);
+  background: var(--amber-bg);
+}
+
+.deploy-next-fail {
+  border-left-color: var(--red);
+  background: var(--failed-bg);
+}
+
+/* Three checks that look alike from the button row alone, so each one states
+   what it costs and what it skips. */
+.deploy-action-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.deploy-action {
+  display: grid;
+  gap: 5px;
+}
+
+.deploy-action button {
+  width: 100%;
+}
+
+.deploy-control-panel .ghost-button {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.deploy-action small,
+.deploy-control-panel label small,
+.mujoco-playback-panel label small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.deploy-advanced {
+  margin-bottom: 14px;
+}
+
+.deploy-advanced[open] > summary {
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.deploy-advanced label:last-of-type {
+  margin-bottom: 0;
+}
+
+.deploy-stage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.deploy-report-panel .section-header > button,
+.deploy-report-panel .section-header > .deploy-stage-summary + button {
+  margin-left: auto;
+}
+
+.deploy-report-details {
+  margin-top: 14px;
+}
+
+.deploy-report-details[open] > summary {
+  margin-bottom: 10px;
+}
+
+.deploy-console-details > summary {
+  cursor: pointer;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.deploy-console-details > summary .status-badge {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.deploy-console-details[open] > summary {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* A hidden tooltip still occupies layout. Centred on an element that sits in
+   the right half of a narrow viewport, it pushes the document wider than the
+   screen. Anchoring to the element's right edge makes it grow leftwards, and
+   overflow past the left edge is not scrollable, so the page stays put. */
+@media (max-width: 980px) {
+  #deploy [data-tooltip]::after,
+  #convergence [data-tooltip]::after {
+    left: auto;
+    right: 0;
+    transform: none;
+    max-width: calc(100vw - 48px);
+  }
 }
 
 .deploy-artifact-key {
@@ -2783,6 +3472,8 @@ pre {
 
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
+  .folder-item.drop-received { animation: none; }
+  body.dragging-runs .folder-item[data-drop-folder] { transition: none; }
 }
 
 /* ── Run card overflow menu (V3.6) ── */
@@ -2797,6 +3488,8 @@ pre {
   font-size: 1rem;
 }
 
+/* Direction is chosen at open time against the scrolling list's bounds, because
+   neither direction fits every card: see positionRunMenu(). */
 .run-menu {
   position: absolute;
   right: 0;

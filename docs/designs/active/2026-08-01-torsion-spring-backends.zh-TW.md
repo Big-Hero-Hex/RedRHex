@@ -6,7 +6,7 @@ audience: developer
 type: design
 status: approved
 owner: sim2real
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="problem"></a>
@@ -27,7 +27,7 @@ Training、playback、evaluation、sim-to-real execution 與 Panel processes 只
 - `explicit` 將 PhysX spring gains 歸零，並在每個 physics substep 套用 restoring effort。
 - `native` 把 stiffness 與 damping 寫入固定 neutral-angle target 的 PhysX implicit drives。
 
-兩種 backend 都不增加 spring-law clip、人工 velocity brake 或 policy-controlled spring action。Native applied-torque channel 是 implicit-PD estimate，不是 force-sensor evidence。Repository defaults（`200 N*m/rad`、zero damping、暫定 neutral angles、`explicit`）只是 uncalibrated 起點，不是 production choice。
+兩種 backend 都不增加 spring-law clip、人工 velocity brake 或 policy-controlled spring action。Native applied-torque channel 是 implicit-PD estimate，不是 force-sensor evidence。Physical defaults 仍是未校準的 `200 N*m/rad`、zero damping 與暫定 neutral angles。新的 environment 與 policy-training entry points 暫時預設使用 `native`；這是針對 Explicit 數值 runaway 的 operational quarantine，不是 production backend choice。
 
 <a id="evidence"></a>
 ## 證據與選擇
@@ -37,7 +37,7 @@ Training、playback、evaluation、sim-to-real execution 與 Panel processes 只
 <a id="panel"></a>
 ## Training Panel 傳播
 
-Panel 建立 run 時驗證並儲存 `spring_backend`；train、Play、automatic video、export、deployment validation、history 與 remote synchronization 都重用記錄值。只有 ForwardFast automatic video 會提供 `--initial_command forward`；interactive Play 與完整 Direct recording 保留既有 command behavior。
+Panel 建立 run 時驗證並儲存 `spring_backend`；Play、automatic video、export、deployment validation、history 與 remote synchronization 都重用記錄值。Policy-training entry points 會拒絕 `explicit`，而 deterministic sim-to-real characterization 與歷史 playback 仍保留此 backend。已 stamp 的 uncalibrated checkpoints 現在也會像 calibrated checkpoints 一樣拒絕 backend mismatch。Panel Play 與每個 Panel recording 都會提供 `--initial_command forward`；export 不會新增 motion command。
 
 <a id="non-goals"></a>
 ## 非目標

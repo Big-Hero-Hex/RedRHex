@@ -234,9 +234,9 @@ REDRHEX_CFG = ArticulationCfg(
         # =================================================================
         # 【扭轉彈簧關節】被動式，不由 AI 控制
         # =================================================================
-        # 預設 explicit backend 由環境在每個 physics substep 施加
+        # 選用 explicit backend 時，環境在每個 physics substep 施加
         # tau = -k(q-q0)-c*qdot，因此 PhysX drive gains 必須為零。
-        # native backend 會在 runtime 寫入相同的 k/c 與固定 q0 target。
+        # 暫定預設 native backend 會在 runtime 寫入相同的 k/c 與固定 q0 target。
         "damper": ImplicitActuatorCfg(
             joint_names_expr=[
                 "Revolute_5", "Revolute_8", "Revolute_13",
@@ -1658,7 +1658,10 @@ class RedrhexEnvCfg(DirectRLEnvCfg):
     # =========================================================================
     # 【扭轉彈簧物理常數】同時驅動物理與節能 diagnostics
     # =========================================================================
-    spring_backend = "explicit"
+    # Native is the provisional safe default. Explicit remains available for
+    # deliberate spring-release characterization, but the uncalibrated
+    # 200 N·m/rad law is numerically unstable at the current 120 Hz step.
+    spring_backend = "native"
     spring_stiffness_nm_per_rad = (200.0,) * 6
     spring_damping_nm_s_per_rad = (0.0,) * 6
     spring_calibrated = False
@@ -1769,12 +1772,12 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
     reward_gate_min_base_height = 0.105
     reward_gate_max_body_tilt = 0.70
 
-    # Stage-1-like rewards with slight forward emphasis for faster convergence.
+    # Forward tracking is primary: discourage overspeed, drift, and stationary leg spinning.
     v2_reward_scales = {
-        "forward_progress": 5.5,
-        "velocity_tracking": 4.5,
+        "forward_progress": 3.0,
+        "velocity_tracking": 6.0,
         "mode_specialization": 0.0,
-        "axis_suppression": 1.3,
+        "axis_suppression": 2.0,
         "lateral_drive_soft_penalty": 0.0,
         "lateral_speed_deficit_penalty": 0.0,
         "lateral_speed_target_ratio": 0.70,
@@ -1787,12 +1790,12 @@ class RedrhexForwardFastEnvCfg(RedrhexEnvCfg):
         "forward_prior_duty": 0.9,
         "forward_prior_vel_ratio": 0.9,
         "forward_prior_overlap": 0.7,
-        "height_maintain": 0.9,
+        "height_maintain": 1.0,
         "target_base_height": 0.12,
         "height_sigma": 0.08,
-        "height_low_penalty": 1.2,
-        "leg_moving": 0.35,
-        "stall_penalty": -2.5,
+        "height_low_penalty": 1.5,
+        "leg_moving": 0.25,
+        "stall_penalty": -3.0,
         "fall": -8.0,
         "fall_height_threshold": 0.085,
         "fall_tilt_threshold": 1.70,

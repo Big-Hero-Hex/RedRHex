@@ -290,7 +290,7 @@ def test_production_environment_exposes_two_passive_spring_backends() -> None:
     cfg_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env_cfg.py")
     env_source = _source("source/RedRhex/RedRhex/tasks/direct/redrhex/redrhex_env.py")
 
-    assert 'spring_backend = "explicit"' in cfg_source
+    assert 'spring_backend = "native"' in cfg_source
     assert "spring_stiffness_nm_per_rad = (200.0,) * 6" in cfg_source
     assert "spring_damping_nm_s_per_rad = (0.0,) * 6" in cfg_source
     assert "velocity_limit_sim=1.0," not in cfg_source

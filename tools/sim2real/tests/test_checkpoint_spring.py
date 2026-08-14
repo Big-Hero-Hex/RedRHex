@@ -141,10 +141,24 @@ def test_checkpoint_without_spring_metadata_is_legacy_uncalibrated_compatible(
     assert _validate(tmp_path) == "uncalibrated"
 
 
+def test_checkpoint_without_spring_metadata_rejects_native_reinterpretation(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="legacy checkpoint.*Explicit"):
+        _validate(tmp_path, backend="native")
+
+
 def test_uncalibrated_checkpoint_does_not_require_a_profile(tmp_path: Path) -> None:
     _spring_metadata(tmp_path, backend="explicit", status="uncalibrated")
 
-    assert _validate(tmp_path, backend="native") == "uncalibrated"
+    assert _validate(tmp_path, backend="explicit") == "uncalibrated"
+
+
+def test_uncalibrated_checkpoint_rejects_backend_mismatch(tmp_path: Path) -> None:
+    _spring_metadata(tmp_path, backend="explicit", status="uncalibrated")
+
+    with pytest.raises(ValueError, match="backend mismatch"):
+        _validate(tmp_path, backend="native")
 
 
 def test_deployment_rejects_uncalibrated_or_legacy_checkpoint(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ last_reviewed: 2026-08-14
 <a id="published-evidence"></a>
 ## Published evidence
 
+- [Explicit torsion-spring numerical instability](2026-08-14-explicit-torsion-spring-instability.en.md)
 - [Branch Reorganization V1 completion audit](2026-08-14-branch-reorganization-v1-audit.en.md)
 - [Sensor-only student distillation V2 code-path audit](2026-08-13-student-distillation-v2-audit.en.md)
 - [Correction addendum 1 to the 2026-08-13 research-readiness audit](2026-08-13-research-readiness-audit-addendum-1.en.md)

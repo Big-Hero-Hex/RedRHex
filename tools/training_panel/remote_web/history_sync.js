@@ -1,4 +1,4 @@
-import { jobDisplayStatus } from "./status_catalog.js?v=3.4.10-sync-health";
+import { jobDisplayStatus } from "./status_catalog.js?v=3.7.0-remote-parity";
 
 export const PENDING_SYNTHETIC_JOB_MAX_AGE_MS = 30 * 60 * 1000;
 

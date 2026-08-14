@@ -6,7 +6,7 @@ audience: developer
 type: index
 status: active
 owner: panel
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="operator"></a>
@@ -22,6 +22,11 @@ last_reviewed: 2026-08-13
 
 - [Architecture and contracts](architecture.en.md)
 - [Porting and extension guide](porting.en.md)
+- [Release 3.7.0](releases/v3-7-0.en.md)
+- [Release 3.6.4](releases/v3-6-4.en.md)
+- [Release 3.6.3](releases/v3-6-3.en.md)
+- [Release 3.6.2](releases/v3-6-2.en.md)
+- [Release 3.6.1](releases/v3-6-1.en.md)
 - [Release 3.6.0](releases/v3-6-0.en.md)
 - [Release 3.5.0](releases/v3-5-0.en.md)
 - [Release 3.4.10](releases/v3-4-10.en.md)

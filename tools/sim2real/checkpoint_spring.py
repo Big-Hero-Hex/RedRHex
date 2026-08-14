@@ -66,26 +66,30 @@ def validate_checkpoint_spring_evaluation(
     selected_profile_id: str | None,
     selected_profile_sha256: str | None,
 ) -> str:
-    """Reject physics changes when evaluating a calibrated spring checkpoint."""
+    """Reject backend changes for stamped checkpoints and calibrated profile changes."""
 
     if selected_backend not in _BACKENDS:
         raise ValueError(f"unsupported selected spring backend: {selected_backend}")
     params = Path(run_dir) / "params"
     spring_path = params / "torsion_spring.yaml"
     if not spring_path.is_file():
+        if selected_backend != "explicit":
+            raise ValueError(
+                "legacy checkpoint without torsion-spring metadata must use the "
+                "historical Explicit backend"
+            )
         return "uncalibrated"
 
     spring = _load_spring_metadata(spring_path)
     status = str(spring["calibration_status"])
-    if status == "uncalibrated":
-        return status
-
     checkpoint_backend = str(spring["spring_backend"])
     if selected_backend != checkpoint_backend:
         raise ValueError(
-            "calibrated checkpoint spring backend mismatch: "
+            "checkpoint spring backend mismatch: "
             f"expected {checkpoint_backend}, got {selected_backend}"
         )
+    if status == "uncalibrated":
+        return status
     if selected_profile_id is None or selected_profile_sha256 is None:
         raise ValueError("calibrated checkpoint evaluation requires --physics-profile")
 

@@ -1,6 +1,5 @@
--- RedRHex Training Panel V3.4 Supabase schema
--- Apply in the Supabase SQL editor, then configure Row Level Security policies
--- for your team's auth provider.
+-- RedRHex Training Panel base schema (3.4.10 compatible).
+-- Apply this file first, then migrations/20260814_370_remote_parity.sql for 3.7.0.
 
 do $$
 begin

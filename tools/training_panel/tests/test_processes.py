@@ -80,6 +80,69 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(record["display_name"], "stair warmup")
             self.assertEqual(record["params"]["display_name"], "stair warmup")
 
+    def test_training_writes_valid_run_scoped_physics_profile(self):
+        class FakeProcess:
+            pid = 12345
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history)
+            params = TrainingParams.from_dict(
+                {
+                    "device": "cpu",
+                    "physics_preset_id": "bench-measured",
+                    "physics_overrides": {
+                        "simulation_physics.mass.scale": 1.04,
+                        "simulation_physics.ground.static_friction": 1.3,
+                    },
+                }
+            )
+            with patch.object(registry, "_spawn_shell", return_value=SpawnedProcess(proc=FakeProcess())), patch("threading.Thread") as thread_cls:
+                thread_cls.return_value.start = Mock()
+                run = registry.start_training(params)
+
+            record = history.get_run(run["id"])
+            profile_path = Path(record["physics_profile_file"])
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            self.assertTrue(profile_path.is_relative_to(paths.panel_log_root))
+            self.assertEqual(profile["simulation_physics"]["mass"]["scale"], 1.04)
+            self.assertEqual(profile["simulation_physics"]["ground"]["dynamic_friction"], 1.0)
+            self.assertEqual(record["physics_preset_id"], "bench-measured")
+            self.assertEqual(record["params"]["physics_overrides"], params.physics_overrides)
+            self.assertIn("--physics-profile", record["command"])
+            self.assertIn(str(profile_path), record["command"])
+
+    def test_replay_prefers_the_profile_snapshotted_by_train(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            run_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_one"
+            saved_profile = run_dir / "params" / "physics_profile.json"
+            saved_profile.parent.mkdir(parents=True)
+            saved_profile.write_text('{"schema_version": 1}\n', encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "created_at": "2026-08-13T10:00:00",
+                    "log_dir": str(run_dir),
+                    "params": {
+                        "physics_preset_id": "old-preset",
+                        "physics_overrides": {"simulation_physics.mass.scale": 2.0},
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            self.assertEqual(
+                registry._write_process_physics_profile("play_test", "run_one"),
+                str(saved_profile),
+            )
+
     def test_queue_training_starts_immediately_when_gpu_is_free(self):
         class FakeProcess:
             pid = 12345
@@ -100,6 +163,18 @@ class ProcessRegistryTests(unittest.TestCase):
             record = history.get_run(run["id"])
             self.assertEqual(record["status"], "running")
             self.assertEqual([process["kind"] for process in registry.running_isaac_processes()], ["training"])
+
+    def test_queue_training_rejects_direct_explicit_params_before_writing_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            registry = ProcessRegistry(paths, history)
+
+            with self.assertRaisesRegex(ValueError, "quarantined.*120 Hz"):
+                registry.queue_training(TrainingParams(spring_backend="explicit"))
+
+            self.assertEqual(history.list_runs(), [])
 
     def test_cuda_preflight_blocks_training_before_history_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,6 +422,32 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertEqual(history.get_run(queued["id"])["status"], "queued")
             schedule.assert_called_once()
 
+    def test_start_next_queued_training_fails_legacy_run_before_native_reinterpretation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "queued_explicit",
+                    "source": "training_panel",
+                    "status": "queued",
+                    "created_at": "2026-08-14T10:00:00",
+                    "queued_at": "2026-08-14T10:00:00",
+                    "params": {"task": "Template-Redrhex-Direct-v0"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+
+            with patch.object(registry, "_spawn_shell") as spawn:
+                started = registry.start_next_queued_training()
+
+            self.assertIsNone(started)
+            record = history.get_run("queued_explicit")
+            self.assertEqual(record["status"], "failed")
+            self.assertRegex(record["queue_error"], "quarantined.*120 Hz")
+            spawn.assert_not_called()
+
     def test_cancel_queued_training(self):
         class FakeProcess:
             pid = 12345
@@ -422,7 +523,10 @@ class ProcessRegistryTests(unittest.TestCase):
                     "source": "training_panel",
                     "status": "completed",
                     "log_dir": str(log_dir),
-                    "params": {"spring_backend": "native"},
+                    "params": {
+                        "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                        "spring_backend": "native",
+                    },
                 }
             )
             registry = ProcessRegistry(paths, history)
@@ -435,6 +539,8 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertEqual(debug["source_run_id"], "run_one")
                 self.assertIn("scripts/rsl_rl/play.py", debug["command"])
                 self.assertIn("--spring-backend native", debug["command"])
+                self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", debug["command"])
+                self.assertIn("--initial_command forward", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
                 self.assertIn("--camera_eye -3.0 -2.4 1.6", debug["command"])
@@ -482,7 +588,10 @@ class ProcessRegistryTests(unittest.TestCase):
                     "status": "completed",
                     "created_at": "2026-05-15T11:00:00",
                     "log_dir": str(log_dir),
-                    "params": {"spring_backend": "native"},
+                    "params": {
+                        "task": "Template-Redrhex-ForwardFast-Direct-v0",
+                        "spring_backend": "native",
+                    },
                 }
             )
             registry = ProcessRegistry(paths, history)
@@ -505,7 +614,8 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertIn("--video_height 1080", debug["command"])
                 self.assertIn("--video_fps 30", debug["command"])
                 self.assertIn("--rendering_mode quality", debug["command"])
-                self.assertNotIn("--initial_command", debug["command"])
+                self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", debug["command"])
+                self.assertIn("--initial_command forward", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
                 self.assertIn("--camera_lookat 0.45 0.0 0.35", debug["command"])
@@ -523,6 +633,24 @@ class ProcessRegistryTests(unittest.TestCase):
                 if proc:
                     proc.wait(timeout=8)
                 time.sleep(0.1)
+
+    def test_checkpoint_zero_video_is_tagged_for_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            video = root / "rl-video-step-0.mp4"
+            video.write_bytes(b"video")
+
+            tagged = registry._tag_video_with_checkpoint(
+                video,
+                "video_fixture",
+                {"video_checkpoint_iteration": 0},
+            )
+
+            self.assertEqual(Path(tagged).name, "model_0_video_fixture.mp4")
+            self.assertTrue(Path(tagged).is_file())
+            self.assertFalse(video.exists())
 
     def test_manual_forward_fast_video_recording_starts_forward(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -767,7 +895,9 @@ class ProcessRegistryTests(unittest.TestCase):
 
             with patch.object(
                 registry, "_spawn_shell", return_value=SpawnedProcess(proc=Mock(pid=123))
-            ) as spawn, patch("tools.training_panel.training_panel.processes.threading.Thread") as thread_cls:
+            ) as spawn, patch.object(registry, "_refresh_tensorboard_summary"), patch(
+                "tools.training_panel.training_panel.processes.threading.Thread"
+            ) as thread_cls:
                 thread_cls.return_value.start = Mock()
                 registry._monitor_training("forward_fast", CompletedProcess(), 0)
 
@@ -804,7 +934,8 @@ class ProcessRegistryTests(unittest.TestCase):
             commands = [call.args[1] for call in spawn.call_args_list]
             self.assertTrue(all("--task Template-Redrhex-ForwardFast-Direct-v0" in command for command in commands))
             self.assertTrue(all("--spring-backend native" in command for command in commands))
-            self.assertTrue(all("--initial_command" not in command for command in commands))
+            self.assertIn("--initial_command forward", commands[0])
+            self.assertNotIn("--initial_command", commands[1])
 
     def test_play_and_onnx_export_default_task_for_legacy_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1323,15 +1454,51 @@ class ProcessRegistryTests(unittest.TestCase):
         )
         self.assertFalse(ProcessRegistry._training_commands_match(recorded, observed))
 
+    def test_training_command_match_accepts_same_sensor_v2_pipeline(self):
+        recorded = (
+            "/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_sensor_v2_pipeline.py "
+            "--num_envs 64 --teacher_iterations 1500 --distillation_iterations 800 "
+            "--ppo_iterations 1500 --device cuda:0 --seed 42 --headless"
+        )
+        observed = (
+            "python scripts/rsl_rl/train_sensor_v2_pipeline.py --seed 42 --device cuda:0 "
+            "--ppo_iterations 1500 --distillation_iterations 800 --teacher_iterations 1500 --num_envs 64"
+        )
+        self.assertTrue(ProcessRegistry._training_commands_match(recorded, observed))
+
+    def test_training_command_match_does_not_confuse_pipeline_with_child_stage(self):
+        recorded = (
+            "/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_sensor_v2_pipeline.py "
+            "--num_envs 64 --teacher_iterations 1500 --distillation_iterations 800 "
+            "--ppo_iterations 1500 --device cuda:0 --seed 42 --headless"
+        )
+        observed = (
+            "python scripts/rsl_rl/train.py --task Template-Redrhex-ForwardSensorV2-Direct-v0 "
+            "--num_envs 64 --max_iterations 1500 --device cuda:0 --seed 42 --headless"
+        )
+        self.assertFalse(ProcessRegistry._training_commands_match(recorded, observed))
+
     def test_running_isaac_processes_includes_onnx_exports(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = self.make_paths(root)
-            registry = ProcessRegistry(paths, HistoryStore(paths))
+            history = HistoryStore(paths)
+            history.add_run(
+                {
+                    "id": "run_one",
+                    "source": "training_panel",
+                    "status": "completed",
+                    "params": {"task": "Template-Redrhex-ForwardFast-Direct-v0"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
             result = registry.start_onnx_export("run_one", "/tmp/checkpoint.pt", device="cpu")
             proc = registry._processes.get(result["id"])
             try:
                 self.assertEqual([process["run_id"] for process in registry.running_isaac_processes()], [result["id"]])
+                debug = registry.get_process_debug(result["id"])
+                self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", debug["command"])
+                self.assertNotIn("--initial_command", debug["command"])
             finally:
                 registry.stop(result["id"])
                 if proc:
@@ -1659,6 +1826,18 @@ class ProcessRegistryTests(unittest.TestCase):
             )
             self.assertFalse(registry._is_repo_training_process(command, "123"))
 
+    def test_sensor_v2_pipeline_counts_as_training_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            command = (
+                f"python {paths.repo_root}/scripts/rsl_rl/train_sensor_v2_pipeline.py "
+                "--num_envs 64 --teacher_iterations 1500 --distillation_iterations 800 "
+                "--ppo_iterations 1500 --device cuda:0"
+            )
+            self.assertTrue(registry._is_repo_training_process(command, "123"))
+
     def test_reconcile_links_completed_panel_run_to_discovered_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1937,6 +2116,38 @@ class ProcessRegistryTests(unittest.TestCase):
             with patch("tools.training_panel.training_panel.processes.subprocess.check_output", return_value=""):
                 registry.reconcile_stale_history()
             self.assertEqual(history.get_run("panel_stale")["status"], "interrupted")
+
+    def test_sensor_v2_pipeline_result_resolves_final_ppo_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            final_dir = paths.rsl_rl_log_root / "redrhex_forward_v2_ppo" / "final_run"
+            final_dir.mkdir(parents=True)
+            process_log = paths.process_log_dir / "panel_pipeline.log"
+            result = {
+                "status": "completed",
+                "teacher_log_dir": str(paths.rsl_rl_log_root / "redrhex_forward_v2_teacher" / "teacher"),
+                "distillation_log_dir": str(paths.rsl_rl_log_root / "redrhex_forward_v2_distillation" / "student"),
+                "ppo_log_dir": str(final_dir),
+            }
+            process_log.write_text(
+                f"SENSOR_V2_PIPELINE_RESULT: {json.dumps(result)}\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "panel_pipeline",
+                    "source": "training_panel",
+                    "status": "running",
+                    "process_log": str(process_log),
+                    "params": {"training_route": "sensor_v2_full"},
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            parsed = registry._sensor_v2_pipeline_result("panel_pipeline")
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed["ppo_log_dir"], str(final_dir.resolve()))
 
 
 if __name__ == "__main__":

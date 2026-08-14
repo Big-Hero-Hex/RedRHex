@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="tensorboard"></a>
@@ -22,6 +22,8 @@ Open `http://127.0.0.1:6006`. The Training Panel can also start a run-scoped Ten
 ## Read the main signals
 
 Check reward terms together with `Mean episode length`, `Episode_Termination/terminated`, command tracking errors, and task-specific diagnostics. For energy experiments also inspect mechanical power, cost-of-transport proxy, spring recovery, and motion speed; lower power caused only by slower or failed motion is not an improvement.
+
+For ForwardFast, compare `Episode_Reward/diag_cmd_vx` with `Episode_Reward/diag_forward_vel`, then inspect `diag_main_drive_target_vel_mean`, `diag_main_drive_vel_mean`, `diag_abad_forward_lock_error`, `rew_stall`, and `rew_energy_per_distance`. A stationary Panel clip is not training evidence until its Process Console command is known to include the run's task and `--initial_command forward`.
 
 <a id="artifacts"></a>
 ## Locate artifacts

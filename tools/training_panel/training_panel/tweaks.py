@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .commands import DEFAULT_TASK, resolve_spring_backend
+from .commands import DEFAULT_PANEL_SPRING_BACKEND, DEFAULT_TASK, resolve_spring_backend
 from .rewards import read_reward_scales_from_yaml
 
 
@@ -135,7 +135,14 @@ def build_tweak_payload(
     reward_values = reward_values_for_tweak(run, reward_presets)
     terrain_preset_id = str(params.get("terrain_preset_id") or run.get("terrain_preset_id") or "baseline")
     terrain_values = terrain_values_for_tweak(run, terrain_presets)
-    spring_backend = resolve_spring_backend(run)
+    source_spring_backend = resolve_spring_backend(run)
+    spring_backend = (
+        DEFAULT_PANEL_SPRING_BACKEND
+        if source_spring_backend == "explicit"
+        else source_spring_backend
+    )
+    physics_preset_id = str(params.get("physics_preset_id") or run.get("physics_preset_id") or "baseline")
+    physics_values = _first_dict(params.get("physics_overrides"), run.get("physics_overrides"))
     draft_id = f"tweak-{_slug(source_id or source_label)}"
 
     training_params = {
@@ -152,6 +159,8 @@ def build_tweak_payload(
         "reward_overrides": reward_values,
         "terrain_preset_id": terrain_preset_id,
         "terrain_overrides": terrain_values,
+        "physics_preset_id": physics_preset_id,
+        "physics_overrides": physics_values,
         "tweak_source_run_id": source_id,
         "tweak_source_label": source_label,
     }
@@ -180,5 +189,10 @@ def build_tweak_payload(
         },
         "terrain_preset_id": terrain_preset_id,
         "terrain_overrides": terrain_values,
-        "message": f"Loaded tweak draft from {source_label}.",
+        "message": (
+            f"Loaded tweak draft from {source_label}. "
+            "Its quarantined Explicit backend was changed to Native."
+            if source_spring_backend == "explicit"
+            else f"Loaded tweak draft from {source_label}."
+        ),
     }

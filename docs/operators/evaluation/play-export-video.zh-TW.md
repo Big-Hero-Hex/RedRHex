@@ -6,7 +6,7 @@ audience: operator
 type: how-to
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-14
 ---
 
 <a id="checkpoint"></a>
@@ -22,10 +22,11 @@ last_reviewed: 2026-08-07
   --task Template-Redrhex-Direct-v0 \
   --load_run RUN_DIRECTORY \
   --checkpoint model_ITERATION.pt \
+  --initial_command forward \
   --num_envs 1
 ```
 
-鍵盤控制以 `stop` 開始。若要保留環境取樣命令，請使用 `--disable_keyboard_control`。Checkpoint 路徑若含 `_stage1` 到 `_stage5`，會自動設定 `env.stage`；可用 `--disable_auto_stage_from_checkpoint` 關閉。
+鍵盤控制預設以前進命令開始，等同按下 `W`；在保存的命令中加入 `--initial_command forward` 可明確表達此意圖。若要靜止起步，請使用 `--initial_command stop`；若要保留環境取樣命令，請使用 `--disable_keyboard_control`。Checkpoint 路徑若含 `_stage1` 到 `_stage5`，會自動設定 `env.stage`；可用 `--disable_auto_stage_from_checkpoint` 關閉。
 
 <a id="export"></a>
 ## 匯出 JIT 與 ONNX
@@ -49,12 +50,15 @@ last_reviewed: 2026-08-07
   --task Template-Redrhex-Direct-v0 \
   --load_run RUN_DIRECTORY \
   --checkpoint model_ITERATION.pt \
+  --initial_command forward \
   --video \
   --video_length 1200 \
   --headless
 ```
 
 若固定相機跟不上機器人，可加入 `--camera_follow_robot`。結果會寫入 run 的 `videos/play/` 目錄。
+
+Training Panel 的 Play 與 Record Video 會重用所選 run 保存的 task，並明確以前進命令開始。ONNX export 也會重用保存的 task，但不需要初始移動命令。把靜止影片判定為 policy 失敗前，先在 Process Console 確認命令同時包含預期的 `--task` 與 `--initial_command forward`。
 
 <a id="evaluate"></a>
 ## 評估行為

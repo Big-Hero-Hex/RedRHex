@@ -1,4 +1,4 @@
-import { HEARTBEAT_STALE_MS } from "./config.js?v=3.4.10-sync-health";
+import { HEARTBEAT_STALE_MS } from "./config.js?v=3.7.0-remote-parity";
 import {
   convergenceLabel as catalogConvergenceLabel,
   jobDisplayStatus as catalogJobDisplayStatus,
@@ -7,7 +7,7 @@ import {
   statusDescription as catalogStatusDescription,
   statusLabel as catalogStatusLabel,
   statusTone as catalogStatusTone,
-} from "./status_catalog.js?v=3.4.10-sync-health";
+} from "./status_catalog.js?v=3.7.0-remote-parity";
 
 export const BUILT_IN_REWARD_PRESETS = [
   {
@@ -19,14 +19,17 @@ export const BUILT_IN_REWARD_PRESETS = [
   },
   {
     id: "speed-focus",
-    name: "Speed Focus",
-    description: "Emphasises forward velocity and tracking. Faster but may be less stable.",
+    name: "Straight Forward Focus",
+    description: "Uses the active simplified rewards to track forward speed, suppress drift, and avoid stationary leg spinning.",
     values: {
-      rew_scale_forward_vel: 5.0,
-      rew_scale_vel_tracking: 6.0,
-      rew_scale_ang_vel_tracking: 3.5,
-      rew_scale_orientation: -0.1,
-      rew_scale_base_height: -0.1,
+      "v2_reward_scales.forward_progress": 3.0,
+      "v2_reward_scales.velocity_tracking": 6.0,
+      "v2_reward_scales.axis_suppression": 2.0,
+      "v2_reward_scales.height_maintain": 1.0,
+      "v2_reward_scales.height_low_penalty": 1.5,
+      "v2_reward_scales.leg_moving": 0.25,
+      "v2_reward_scales.stall_penalty": -3.0,
+      "v2_reward_scales.energy_per_distance": 0.0005,
     },
     built_in: true,
   },
@@ -47,6 +50,19 @@ export const BUILT_IN_REWARD_PRESETS = [
 ];
 
 export const REWARD_FIELDS = [
+  {
+    name: "Simplified Forward",
+    fields: [
+      ["v2_reward_scales.forward_progress", "Forward Progress", "Rewards commanded-direction progress without making raw speed the only goal."],
+      ["v2_reward_scales.velocity_tracking", "Forward Tracking", "Rewards matching the commanded forward speed."],
+      ["v2_reward_scales.axis_suppression", "Drift Suppression", "Penalizes uncommanded lateral and yaw motion."],
+      ["v2_reward_scales.height_maintain", "Height Tracking", "Rewards maintaining the target body height."],
+      ["v2_reward_scales.height_low_penalty", "Low Height Penalty", "Penalizes dropping below the target body height."],
+      ["v2_reward_scales.leg_moving", "Useful Leg Motion", "Rewards leg rotation gated by command and forward progress."],
+      ["v2_reward_scales.stall_penalty", "Stall Penalty", "Penalizes commanded motion with almost no progress."],
+      ["v2_reward_scales.energy_per_distance", "Energy Per Distance", "Penalizes energy spent per positive commanded-direction distance."],
+    ],
+  },
   {
     name: "Locomotion Goals",
     fields: [
@@ -689,6 +705,9 @@ export function buildRunMetadataPatch({ displayName = "", folder = "", notes = "
 
 export function friendlyErrorMessage(error) {
   const message = error?.message || String(error || "");
+  if (/client_request_id|idx_jobs_machine_actor_client_request|duplicate key/i.test(message)) {
+    return "This request was already queued. Refresh History instead of submitting it again.";
+  }
   if (/Requested function was not found|NOT_FOUND/i.test(message)) {
     return `${message} Deploy the Supabase notify Edge Function, then reload this page.`;
   }
@@ -714,22 +733,119 @@ export function formatRelativeTime(iso, now = Date.now()) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-export function buildTrainingJob({ machineId, params, preset, terrainPreset, role, userId, requesterLabel = "", clientRequestId = "" }) {
+export const REMOTE_PROTOCOL_VERSION = "3.7.0-remote-parity";
+export const TRAINING_ROUTES = Object.freeze([
+  "standard",
+  "sensor_v2_full",
+  "sensor_v2_teacher",
+  "sensor_v2_distillation",
+  "sensor_v2_ppo",
+]);
+
+export function checkpointReference(runId, checkpointIteration = null) {
+  const normalizedRunId = String(runId || "").trim();
+  if (!normalizedRunId) throw new Error("A run is required for checkpoint selection.");
+  if (checkpointIteration === null || checkpointIteration === undefined || checkpointIteration === "") {
+    return { run_id: normalizedRunId, checkpoint_iteration: null };
+  }
+  const iteration = Number(checkpointIteration);
+  if (!Number.isInteger(iteration) || iteration < 0) throw new Error("Checkpoint iteration must be a non-negative integer.");
+  return { run_id: normalizedRunId, checkpoint_iteration: iteration };
+}
+
+export function sanitizeTrainingParams(raw = {}) {
+  const route = TRAINING_ROUTES.includes(String(raw.training_route || ""))
+    ? String(raw.training_route)
+    : "standard";
+  const common = {
+    training_route: route,
+    num_envs: Number(raw.num_envs || 4),
+    device: String(raw.device || "cuda:0"),
+    spring_backend: "native",
+    headless: true,
+  };
+  for (const key of ["seed", "display_name", "folder", "tweak_source_run_id", "tweak_source_label"]) {
+    if (raw[key] !== undefined && raw[key] !== null && raw[key] !== "") common[key] = raw[key];
+  }
+  if (route === "sensor_v2_full") {
+    common.teacher_iterations = Number(raw.teacher_iterations || 1500);
+    common.distillation_iterations = Number(raw.distillation_iterations || 800);
+    common.ppo_iterations = Number(raw.ppo_iterations || 1500);
+    return common;
+  }
+  common.max_iterations = Number(raw.max_iterations || 1);
+  if (route === "standard") common.task = String(raw.task || "Template-Redrhex-Direct-v0");
+  if (route === "standard" && raw.resume) common.resume = true;
+  if (["standard", "sensor_v2_distillation", "sensor_v2_ppo"].includes(route) && raw.checkpoint_ref) {
+    common.checkpoint_ref = checkpointReference(
+      raw.checkpoint_ref.run_id,
+      raw.checkpoint_ref.checkpoint_iteration,
+    );
+  }
+  return common;
+}
+
+export function normalizePhysicsValues(raw = {}, fieldSchema = []) {
+  const allowed = new Map((fieldSchema || []).map((field) => [String(field.key), field]));
+  const result = {};
+  for (const [key, value] of Object.entries(raw && typeof raw === "object" ? raw : {})) {
+    const field = allowed.get(key);
+    if (!field || value === "" || value === null || value === undefined) continue;
+    const number = Number(value);
+    if (!Number.isFinite(number)) continue;
+    if (field.min !== null && field.min !== undefined && number < Number(field.min)) continue;
+    if (field.max !== null && field.max !== undefined && number > Number(field.max)) continue;
+    result[key] = number;
+  }
+  return result;
+}
+
+export function remoteCompatibility(machine = null, capability = null) {
+  const machineVersion = String(machine?.remote_protocol_version || machine?.panel_version || "");
+  const capabilityVersion = String(capability?.protocol_version || "");
+  const compatible = machineVersion === REMOTE_PROTOCOL_VERSION && capabilityVersion === REMOTE_PROTOCOL_VERSION;
+  return {
+    compatible,
+    mode: compatible ? "read-write" : "read-only",
+    message: compatible
+      ? "Mother, worker, schema, and Child use the 3.7.0 remote protocol."
+      : `Inspection remains available. Apply 20260814_370_remote_parity.sql, update Mother, and restart the worker until both protocol versions report ${REMOTE_PROTOCOL_VERSION}.`,
+  };
+}
+
+export function buildDeployPayload(type, { runId, scenario = "stand_zero", includeRosMock = false, allowedScenarios = [] } = {}) {
+  const allowedTypes = new Set(["validate_deploy", "export_validate_deploy", "mujoco_smoke", "record_mujoco_video"]);
+  if (!allowedTypes.has(type)) throw new Error("Unsupported remote deploy action.");
+  const payload = { run_id: String(runId || "") };
+  if (!payload.run_id) throw new Error("A run is required for deploy validation.");
+  if (["validate_deploy", "export_validate_deploy"].includes(type)) payload.include_ros_mock = Boolean(includeRosMock);
+  if (type === "record_mujoco_video") {
+    if (!allowedScenarios.includes(scenario)) throw new Error("Select a repository-owned MuJoCo scenario.");
+    payload.scenario = scenario;
+  }
+  return payload;
+}
+
+export function buildTrainingJob({ machineId, params, preset, terrainPreset, physicsPreset = null, physicsSchema = [], role, userId, requesterLabel = "", clientRequestId = "" }) {
   const rewardValues = preset?.values && typeof preset.values === "object" ? preset.values : {};
   const terrainValues = terrainPreset?.values && typeof terrainPreset.values === "object" ? terrainPreset.values : {};
+  const physicsValues = normalizePhysicsValues(physicsPreset?.values || {}, physicsSchema);
   const requestId = String(clientRequestId || params?.client_request_id || "").trim();
+  const trainingParams = sanitizeTrainingParams(params);
   return {
     machine_id: machineId || null,
     type: "start_training",
     actor_id: userId || null,
     actor_role: role || "viewer",
+    client_request_id: requestId || null,
     payload: {
-      ...params,
-      headless: true,
+      ...trainingParams,
       reward_preset_id: preset?.id || "baseline",
       reward_overrides: rewardValues,
       terrain_preset_id: terrainPreset?.id || "baseline",
       terrain_overrides: terrainValues,
+      physics_preset_id: physicsPreset?.id || "baseline",
+      physics_overrides: physicsValues,
       requester_id: userId || null,
       requester_label: requesterLabel || "",
       client_request_id: requestId || null,
@@ -836,11 +952,13 @@ export function buildTweakDraftFromRun(run = {}, { presets = [], terrainPresets 
 }
 
 export function buildActionJob({ machineId, type, runId, role, userId, payload = {} }) {
+  const requestId = String(payload.client_request_id || "").trim();
   return {
     machine_id: machineId || null,
     type,
     actor_id: userId || null,
     actor_role: role || "viewer",
+    client_request_id: requestId || null,
     payload: { run_id: runId, ...payload },
   };
 }

@@ -12,12 +12,14 @@ const state = {
   applyingRoute: false,
   currentView: "train",
   selectedRun: null,
+  selectedCheckpointIteration: null,
   runs: [],
   activeProcessMap: {},
   activeProcesses: [],
   activeProcessesByRun: {},
   activeProcessByKind: {},
   cudaHealth: null,
+  googleDriveExport: null,
   debugTarget: null,
   lastDebug: null,
   debugTimer: null,
@@ -27,6 +29,14 @@ const state = {
   openMenuRunId: null,
   renameDirty: false,
   renameDraftRunId: null,
+  // Per-run unsaved notes, keyed by run id. Switching runs must not silently
+  // discard typed text the way an unconditional editor overwrite would.
+  notesDrafts: {},
+  notesSavedText: "",
+  lastSelectedRunId: null,   // anchor for shift-click range selection
+  draggingRunIds: [],        // runs currently being dragged onto a folder
+  folderJustReceived: null,  // folder to re-flag after the post-move re-render
+  runStatuses: {},           // run id -> last seen status, for finish notices
   // Search / filter / sort (Module 5)
   searchQuery: "",
   statusFilter: "",
@@ -58,11 +68,21 @@ const state = {
   selectedTerrainPresetId: null,
   terrainDefaults: {},
   terrainSchema: [],
+  // Physics / sparse CalibrationProfileV1 presets
+  physicsPresets: [],
+  activePhysicsPresetId: "baseline",
+  selectedPhysicsPresetId: null,
+  physicsDraftPreset: null,
+  physicsSchema: [],
+  physicsDraftValues: {},
+  physicsSearch: "",
+  physicsChangedOnly: false,
   deployDefaults: null,
   deploySelectedRunId: "",
   deployData: null,
   deployDebug: null,
   deployDebugTimer: null,
+  convergenceSaved: null,
   remoteStatus: null,
   activityEvents: [],
   activityAnalytics: null,
@@ -147,6 +167,7 @@ async function applyHashRoute() {
 const $ = (selector) => document.querySelector(selector);
 const THEME_KEY = "redrhex-training-panel-theme";
 const NOTIFICATIONS_KEY = "redrhex-training-panel-notifications-v1";
+const HISTORY_FILTERS_KEY = "redrhex-training-panel-history-filters-v1";
 
 function preferredTheme() {
   const stored = localStorage.getItem(THEME_KEY);
@@ -175,6 +196,53 @@ function loadNotificationState() {
     state.notifications.knownRunIds = new Set();
     state.notifications.unreadRunIds = new Set();
   }
+}
+
+function loadHistoryFilters() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_FILTERS_KEY) || "{}");
+    if (typeof parsed.searchQuery === "string") state.searchQuery = parsed.searchQuery;
+    if (typeof parsed.statusFilter === "string") state.statusFilter = parsed.statusFilter;
+    if (typeof parsed.sortKey === "string") state.sortKey = parsed.sortKey;
+    if (parsed.activeFolder === null || typeof parsed.activeFolder === "string") {
+      state.activeFolder = parsed.activeFolder;
+    }
+  } catch {
+    // A corrupt filter blob must never keep History from rendering.
+  }
+}
+
+function saveHistoryFilters() {
+  try {
+    localStorage.setItem(
+      HISTORY_FILTERS_KEY,
+      JSON.stringify({
+        searchQuery: state.searchQuery,
+        statusFilter: state.statusFilter,
+        sortKey: state.sortKey,
+        activeFolder: state.activeFolder,
+      })
+    );
+  } catch {
+    // Filter memory is a convenience; storage failures should not block the panel.
+  }
+}
+
+function historyFiltersActive() {
+  return Boolean(state.searchQuery) || Boolean(state.statusFilter) || state.activeFolder !== null;
+}
+
+function clearHistoryFilters() {
+  state.searchQuery = "";
+  state.statusFilter = "";
+  state.activeFolder = null;
+  const search = $("#run-search");
+  const status = $("#status-filter");
+  if (search) search.value = "";
+  if (status) status.value = "";
+  saveHistoryFilters();
+  renderFolderSidebar();
+  renderRuns();
 }
 
 function saveNotificationState() {
@@ -212,6 +280,28 @@ function markHistoryRead(runId) {
   state.notifications.unreadRunIds.delete(runId);
   saveNotificationState();
   renderNotificationBadges();
+}
+
+const TERMINAL_RUN_STATUSES = ["completed", "failed", "interrupted", "cancelled"];
+
+// A new run id is not the event operators wait hours for — the finish is. Seed
+// the status map on the first poll so a reload never replays old completions.
+function noticeFinishedRuns(runs) {
+  const seeded = Object.keys(state.runStatuses).length > 0;
+  for (const run of runs) {
+    const status = String(run.status || "").toLowerCase();
+    const previous = state.runStatuses[run.id];
+    state.runStatuses[run.id] = status;
+    if (!seeded || previous === undefined || previous === status) continue;
+    if (!TERMINAL_RUN_STATUSES.includes(status)) continue;
+    const label = run.display_name || run.id;
+    markHistoryUnread(run.id);
+    setStatusTone(`Run ${label} ${status}.`, status === "completed" ? "success" : "error");
+  }
+  const ids = new Set(runs.map((run) => run.id));
+  for (const runId of Object.keys(state.runStatuses)) {
+    if (!ids.has(runId)) delete state.runStatuses[runId];
+  }
 }
 
 function reconcileHistoryNotifications(runs) {
@@ -395,6 +485,9 @@ function restoreHistoryScroll(scrollState) {
   });
 }
 
+// `requiredText` gates the confirm button on an exact match (destructive work).
+// `textInput` instead collects a free value — the styled replacement for
+// window.prompt, so folder naming looks like the rest of the panel.
 function confirmAction({
   title,
   body,
@@ -402,9 +495,16 @@ function confirmAction({
   cancelLabel = "Cancel",
   requiredText = "",
   inputLabel = "",
+  textInput = false,
+  initialValue = "",
+  placeholder = "",
 } = {}) {
   const dialog = $("#confirm-dialog");
   if (!dialog || typeof dialog.showModal !== "function") {
+    if (textInput) {
+      const typed = window.prompt(body || title || "", initialValue);
+      return Promise.resolve(typed && typed.trim() ? typed.trim() : null);
+    }
     if (!requiredText) return Promise.resolve(window.confirm(body || title || "") ? true : null);
     const value = window.prompt(`${body || title || ""}\n\nType ${requiredText} to confirm:`, "");
     return Promise.resolve(value === requiredText ? value : null);
@@ -436,7 +536,8 @@ function confirmAction({
       resolve(value);
     };
     function updateConfirmState() {
-      confirmButton.disabled = Boolean(requiredText) && input.value !== requiredText;
+      if (textInput) confirmButton.disabled = !input.value.trim();
+      else confirmButton.disabled = Boolean(requiredText) && input.value !== requiredText;
     }
     function handleInputKeydown(event) {
       if (event.key === "Enter" && !confirmButton.disabled) {
@@ -445,7 +546,8 @@ function confirmAction({
       }
     }
     function handleConfirm() {
-      finish(requiredText ? input.value : true);
+      if (textInput) finish(input.value.trim() || null);
+      else finish(requiredText ? input.value : true);
     }
     function handleCancel(event) {
       if (event) event.preventDefault();
@@ -459,8 +561,9 @@ function confirmAction({
     bodyEl.textContent = body || "";
     confirmButton.textContent = confirmLabel;
     cancelButton.textContent = cancelLabel;
-    input.value = "";
-    inputWrap.hidden = !requiredText;
+    input.value = textInput ? initialValue : "";
+    input.placeholder = placeholder;
+    inputWrap.hidden = !requiredText && !textInput;
     inputHint.textContent = inputLabel || (requiredText ? `Type ${requiredText} to confirm.` : "");
     updateConfirmState();
 
@@ -471,8 +574,12 @@ function confirmAction({
     dialog.addEventListener("cancel", handleCancel);
     dialog.addEventListener("close", handleClose);
     dialog.showModal();
-    if (requiredText) input.focus();
-    else confirmButton.focus();
+    if (requiredText || textInput) {
+      input.focus();
+      if (textInput) input.select();
+    } else {
+      confirmButton.focus();
+    }
   });
 }
 
@@ -488,6 +595,7 @@ function setView(name) {
     train: ["Train", "Start a controlled RSL-RL run with the repo defaults."],
     rewards: ["Rewards", "Tune reward weights with presets and see which settings each run used."],
     terrain: ["Terrain", "Tune terrain generator, curriculum, and sub-terrain mix with presets."],
+    physics: ["Physics", "Tune validated mass, limits, contact, actuator, joint, spring, timing, and calibration quantities."],
     history: ["History", "Review runs, notes, checkpoints, TensorBoard, and playbacks."],
     deploy: ["Deploy", "Validate exported policies before Jetson ROS2 bring-up."],
     convergence: ["Convergence", "Define reward plateau detection and automatic result-video behavior."],
@@ -571,6 +679,20 @@ function terrainOverridesForTraining() {
   return preset?.values || state.activeTerrainPresetOverrides || {};
 }
 
+function physicsPresetIdForTraining() {
+  if (state.selectedPhysicsPresetId && physicsPresetById(state.selectedPhysicsPresetId)) {
+    return state.selectedPhysicsPresetId;
+  }
+  return state.activePhysicsPresetId || "baseline";
+}
+
+function physicsOverridesForTraining() {
+  const presetId = physicsPresetIdForTraining();
+  if (state.selectedPhysicsPresetId === presetId) return { ...state.physicsDraftValues };
+  const preset = physicsPresetById(presetId);
+  return { ...(preset?.values || {}) };
+}
+
 function updateTrainingPresetIndicators() {
   const rewardId = rewardPresetIdForTraining();
   const rewardPreset = rewardPresetById(rewardId) || { name: rewardId };
@@ -581,19 +703,42 @@ function updateTrainingPresetIndicators() {
   const terrainPreset = state.terrainPresets.find((preset) => preset.id === terrainId) || { name: terrainId };
   const terrainEl = $("#train-active-terrain-preset-name");
   if (terrainEl) terrainEl.textContent = terrainPreset.name || terrainId;
+
+  const physicsId = physicsPresetIdForTraining();
+  const physicsPreset = physicsPresetById(physicsId) || { name: physicsId };
+  const physicsEl = $("#train-active-physics-preset-name");
+  if (physicsEl) physicsEl.textContent = physicsPreset.name || physicsId;
 }
 
 function formData(form) {
   const data = Object.fromEntries(new FormData(form).entries());
+  const route = data.training_route || "standard";
+  const isSensor = route.startsWith("sensor_v2");
   data.display_name = String(data.display_name || "").trim();
   data.headless = IS_REMOTE_DESKTOP || form.elements.headless.checked;
   data.resume = Boolean(data.checkpoint);
   data.num_envs = Number(data.num_envs);
-  data.max_iterations = Number(data.max_iterations);
-  data.reward_preset_id = rewardPresetIdForTraining();
-  data.reward_overrides = rewardOverridesForTraining();
-  data.terrain_preset_id = terrainPresetIdForTraining();
-  data.terrain_overrides = terrainOverridesForTraining();
+  if (route === "sensor_v2_full") {
+    delete data.max_iterations;
+    data.teacher_iterations = Number(data.teacher_iterations);
+    data.distillation_iterations = Number(data.distillation_iterations);
+    data.ppo_iterations = Number(data.ppo_iterations);
+  } else {
+    data.max_iterations = Number(data.max_iterations);
+    delete data.teacher_iterations;
+    delete data.distillation_iterations;
+    delete data.ppo_iterations;
+  }
+  if (isSensor) {
+    delete data.task;
+  } else {
+    data.reward_preset_id = rewardPresetIdForTraining();
+    data.reward_overrides = rewardOverridesForTraining();
+    data.terrain_preset_id = terrainPresetIdForTraining();
+    data.terrain_overrides = terrainOverridesForTraining();
+  }
+  data.physics_preset_id = physicsPresetIdForTraining();
+  data.physics_overrides = physicsOverridesForTraining();
   if (state.rewardDraftPreset?.source_run_id && data.reward_preset_id === state.rewardDraftPreset.id) {
     data.tweak_source_run_id = state.rewardDraftPreset.source_run_id;
     data.tweak_source_label = state.rewardDraftPreset.source_label || state.rewardDraftPreset.source_run_id;
@@ -609,8 +754,10 @@ function clearTrainingRunName(form = $("#train-form")) {
 async function loadSystem() {
   const system = await api("/api/system");
   state.cudaHealth = system.cuda_health || null;
+  state.googleDriveExport = system.google_drive_export || null;
   $("#system-info").textContent = JSON.stringify(system, null, 2);
   renderCudaHealthNotice();
+  if (state.selectedRun) renderGoogleDriveVideoExport(state.selectedRun);
 }
 
 function cudaHealthStatusHtml(health, prefix = "CUDA training is blocked.") {
@@ -900,6 +1047,14 @@ function formatRelativeTime(iso) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// "3d ago" is the readable form; the exact stamp is what you cite in a report.
+function absoluteTime(iso) {
+  if (!iso) return "";
+  const timestamp = Date.parse(iso);
+  if (Number.isNaN(timestamp)) return String(iso);
+  return new Date(timestamp).toLocaleString();
+}
+
 function checkpointIteration(path) {
   const match = String(path || "").match(/model_(\d+)\.pt$/);
   return match ? Number(match[1]) : null;
@@ -939,9 +1094,21 @@ function statusLabel(kind, status, context) {
 
 function runParamSummary(run) {
   const parts = [];
-  if (run.params?.task) parts.push(`task: ${run.params.task}`);
-  if (run.params?.num_envs !== undefined) parts.push(`envs: ${run.params.num_envs}`);
-  if (run.params?.max_iterations !== undefined) parts.push(`iters: ${run.params.max_iterations}`);
+  const params = run.params || {};
+  if (params.training_route && params.training_route !== "standard") {
+    parts.push(`route: ${params.training_route}`);
+  }
+  if (params.task) parts.push(`task: ${params.task}`);
+  if (params.num_envs !== undefined) parts.push(`envs: ${params.num_envs}`);
+  if (params.training_route === "sensor_v2_full") {
+    parts.push(
+      `iters: ${params.teacher_iterations}/${params.distillation_iterations}/${params.ppo_iterations}`
+    );
+  } else if (params.max_iterations !== undefined) {
+    parts.push(`iters: ${params.max_iterations}`);
+  }
+  // Kept on every card, default included: the Explicit quarantine makes the
+  // backend a safety-relevant field, not decoration.
   parts.push(`spring backend: ${runSpringBackend(run)}`);
   return parts.join(" · ");
 }
@@ -986,8 +1153,10 @@ function onnxSummary(run) {
   return "";
 }
 
+// Only the abnormal case carries information: a run without a log cannot be
+// opened in TensorBoard, compacted, or inspected.
 function runLogSummary(run) {
-  return run.log_dir ? "training log saved" : "no training log";
+  return run.log_dir ? "" : "no training log";
 }
 
 function runStatusDetail(run) {
@@ -1091,6 +1260,16 @@ function visibleRunIds() {
   return filteredRuns().map((run) => run.id);
 }
 
+const STATUS_SORT_ORDER = [
+  "running",
+  "stopping",
+  "queued",
+  "failed",
+  "interrupted",
+  "cancelled",
+  "completed",
+];
+
 function filteredRuns() {
   let runs = [...state.runs];
   // Folder filter
@@ -1102,12 +1281,22 @@ function filteredRuns() {
   // Search
   if (state.searchQuery) {
     const q = state.searchQuery.toLowerCase();
-    runs = runs.filter(
-      (r) =>
-        (r.display_name || r.id).toLowerCase().includes(q) ||
-        r.id.toLowerCase().includes(q) ||
-        (r.params?.task || "").toLowerCase().includes(q) ||
-        (r.status || "").toLowerCase().includes(q)
+    // Operators search for the words they themselves typed, so folder names and
+    // note bodies matter as much as ids. `notes` ships in the /api/runs payload.
+    runs = runs.filter((r) =>
+      [
+        r.display_name || r.id,
+        r.id,
+        r.params?.task,
+        r.status,
+        r.folder,
+        r.notes,
+        r.reward_preset_id,
+        r.terrain_preset_id,
+        r.physics_preset_id,
+      ]
+        .filter(Boolean)
+        .some((field) => String(field).toLowerCase().includes(q))
     );
   }
   // Status filter
@@ -1119,8 +1308,14 @@ function filteredRuns() {
     switch (state.sortKey) {
       case "oldest":
         return (a.created_at || "").localeCompare(b.created_at || "");
-      case "status":
-        return (a.status || "").localeCompare(b.status || "");
+      case "status": {
+        // Alphabetical order buries a running run under "completed"/"failed".
+        const rank = (run) => {
+          const index = STATUS_SORT_ORDER.indexOf(String(run.status || "").toLowerCase());
+          return index === -1 ? STATUS_SORT_ORDER.length : index;
+        };
+        return rank(a) - rank(b) || (b.created_at || "").localeCompare(a.created_at || "");
+      }
       case "iters-desc": {
         const ai = a.params?.max_iterations ?? 0;
         const bi = b.params?.max_iterations ?? 0;
@@ -1293,6 +1488,47 @@ function progressBarHtml(run) {
   `;
 }
 
+// The cursor carries what is actually moving: the run's own name for one, a
+// count for a selection. The default ghost of a full card reads as noise.
+function setRunDragImage(event, runIds) {
+  const chip = document.createElement("div");
+  chip.className = "run-drag-chip";
+  if (runIds.length === 1) {
+    const run = findRun(runIds[0]);
+    chip.textContent = run ? run.display_name || run.id : runIds[0];
+  } else {
+    chip.textContent = `${runIds.length} runs`;
+  }
+  document.body.append(chip);
+  event.dataTransfer.setDragImage(chip, 14, 14);
+  // Removing it synchronously would cancel the snapshot the browser just took.
+  requestAnimationFrame(() => chip.remove());
+}
+
+// A folder that already holds every dragged run is not a move. Marking it as
+// unavailable up front is honest; letting it glow and then do nothing is not.
+function armFolderDropTargets() {
+  const runIds = state.draggingRunIds;
+  if (!runIds.length) return;
+  document.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    const folder = target.dataset.dropFolder === "__uncategorized__" ? "" : target.dataset.dropFolder;
+    const noop = runIds.every((runId) => (findRun(runId)?.folder || "") === folder);
+    target.classList.toggle("drop-unavailable", noop);
+    target.dataset.dropCount = String(runIds.length);
+    target.dataset.dropLabel = runIds.length === 1 ? "Move 1 run here" : `Move ${runIds.length} runs here`;
+  });
+}
+
+function endRunDrag() {
+  state.draggingRunIds = [];
+  document.body.classList.remove("dragging-runs");
+  document.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    target.classList.remove("drop-target", "drop-unavailable");
+    delete target.dataset.dropCount;
+    delete target.dataset.dropLabel;
+  });
+}
+
 function closeRunMenu({ restoreFocus = false } = {}) {
   const runId = state.openMenuRunId;
   state.openMenuRunId = null;
@@ -1308,6 +1544,22 @@ function closeRunMenu({ restoreFocus = false } = {}) {
   }
 }
 
+// The run list scrolls, so a menu is clipped at the container edge rather than
+// overflowing the page. A menu taller than its own card cannot open upward from
+// the first card, nor downward from the last, so pick the side that fits.
+function positionRunMenu(menu) {
+  const list = $("#runs");
+  const trigger = menu.parentElement?.querySelector(".run-menu-trigger");
+  if (!list || !trigger) return;
+  const listRect = list.getBoundingClientRect();
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuHeight = menu.offsetHeight;
+  const spaceBelow = listRect.bottom - triggerRect.bottom - 8;
+  const spaceAbove = triggerRect.top - listRect.top - 8;
+  const openDown = spaceBelow >= menuHeight || spaceBelow >= spaceAbove;
+  menu.dataset.direction = openDown ? "down" : "up";
+}
+
 function toggleRunMenu(runId) {
   const alreadyOpen = state.openMenuRunId === runId;
   closeRunMenu();
@@ -1315,6 +1567,10 @@ function toggleRunMenu(runId) {
   state.openMenuRunId = runId;
   syncRunMenuState();
   const menu = document.querySelector(`.run-menu[data-run-id="${CSS.escape(runId)}"]`);
+  if (menu) {
+    positionRunMenu(menu);
+    menu.scrollIntoView({ block: "nearest" });
+  }
   const firstItem = menu?.querySelector("button[role='menuitem']:not([disabled])");
   if (firstItem) firstItem.focus();
 }
@@ -1332,16 +1588,44 @@ function syncRunMenuState() {
   trigger.setAttribute("aria-expanded", "true");
 }
 
+// A bare "12 runs" reads the same whether 12 of 12 or 12 of 400 are listed.
+function updateRunCountBadge(visibleCount) {
+  const badge = $("#run-count-badge");
+  const clearButton = $("#clear-run-filters");
+  const total = state.runs.length;
+  const filtered = historyFiltersActive();
+  if (badge) {
+    badge.textContent = filtered
+      ? `${visibleCount} of ${total} run${total !== 1 ? "s" : ""}`
+      : `${visibleCount} run${visibleCount !== 1 ? "s" : ""}`;
+    badge.classList.toggle("filtered-pill", filtered);
+  }
+  if (clearButton) clearButton.hidden = !filtered;
+}
+
 function renderRuns() {
   const runs = filteredRuns();
-  const badge = $("#run-count-badge");
-  if (badge) badge.textContent = `${runs.length} run${runs.length !== 1 ? "s" : ""}`;
+  updateRunCountBadge(runs.length);
   if (!runs.length) {
     $("#runs").innerHTML = isLoading("runs") && !state.runs.length
       ? skeletonHtml(4)
       : state.runs.length
-        ? `<article class="empty-panel">No runs match your search or filter.</article>`
-        : `<article class="empty-panel">No training history found yet.</article>`;
+        ? `<article class="empty-panel">
+             <p>No runs match your search or filter.</p>
+             <button type="button" class="ghost-button small-button" data-empty-action="clear-filters">Clear filters</button>
+           </article>`
+        : `<article class="empty-panel">
+             <p>No training history found yet.</p>
+             <button type="button" class="ghost-button small-button" data-empty-action="go-train">Start your first run</button>
+           </article>`;
+    const emptyAction = $("#runs [data-empty-action]");
+    if (emptyAction) {
+      emptyAction.addEventListener("click", () => {
+        if (emptyAction.dataset.emptyAction === "clear-filters") clearHistoryFilters();
+        else setView("train");
+      });
+    }
+    updateRunCountBadge(0);
     updateBulkToolbar();
     return;
   }
@@ -1363,6 +1647,8 @@ function renderRuns() {
       const trainingProcessId = activeProcessIdForRun(run.id, "training");
       const paramSummary = runParamSummary(run);
       const timeSummary = runTimeSummary(run);
+      const logSummary = runLogSummary(run);
+      const comparing = state.comparisonMode && state.comparisonRun?.id === run.id;
       const videoText = videoProcessId ? "recording video" : videoSummary(run);
       const onnxText = onnxProcessId ? "exporting ONNX" : onnxSummary(run);
       const selected = state.selectedRunIds.has(run.id) || deleting ? "checked" : "";
@@ -1378,18 +1664,19 @@ function renderRuns() {
       const canTweak = !["running", "stopping"].includes(String(run.status || "").toLowerCase());
       const unread = state.notifications.unreadRunIds.has(run.id);
       return `
-        <article class="run-card ${active} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? 'aria-busy="true"' : ""}>
-          <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${busy ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for folder move" data-tooltip="Select for folder move">
+        <article class="run-card ${active} ${comparing ? "comparing" : ""} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? "" : 'draggable="true"'} ${busy ? 'aria-busy="true"' : ""}>
+          <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${busy ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for bulk actions" data-tooltip="Select for bulk move or delete. Shift-click selects a range.">
           <div class="run-top">
             <div class="run-title">
               ${unread ? `<span class="unread-dot" data-tooltip="Unread history update"></span>` : ""}
               <strong>${escapeHtml(title)}</strong>
             </div>
+            ${comparing ? `<span class="pill comparison-pill">comparing</span>` : ""}
             <span class="pill status-pill ${deleting ? statusClass("deleting") : statusClass(run.status)}">${deleting ? "deleting" : escapeHtml(statusLabel("run", run.status))}</span>
           </div>
           ${paramSummary ? `<small>${escapeHtml(paramSummary)}</small>` : ""}
-          ${timeSummary ? `<small>${escapeHtml(timeSummary)}</small>` : ""}
-          <small>${escapeHtml(runLogSummary(run))}</small>
+          ${timeSummary ? `<small title="Created ${escapeHtml(absoluteTime(run.created_at))}">${escapeHtml(timeSummary)}</small>` : ""}
+          ${logSummary ? `<small>${escapeHtml(logSummary)}</small>` : ""}
           ${run.reward_preset_id && run.reward_preset_id !== "baseline"
             ? `<small><span class="reward-diff-badge">preset: ${escapeHtml(run.reward_preset_id)}</span></small>`
             : run.reward_diff_count > 0
@@ -1401,6 +1688,11 @@ function renderRuns() {
               ? `<small><span class="terrain-diff-badge">${escapeHtml(String(run.terrain_diff_count))} terrain override${run.terrain_diff_count !== 1 ? "s" : ""}</span></small>`
               : ""}
           ${progressBarHtml(run)}
+          ${run.physics_preset_id && run.physics_preset_id !== "baseline"
+            ? `<small><span class="terrain-diff-badge">physics: ${escapeHtml(run.physics_preset_id)}</span></small>`
+            : Object.keys(run.physics_overrides || run.params?.physics_overrides || {}).length > 0
+              ? `<small><span class="terrain-diff-badge">${escapeHtml(String(Object.keys(run.physics_overrides || run.params?.physics_overrides || {}).length))} physics overrides</span></small>`
+              : ""}
           ${queued ? `<small>waiting for GPU queue</small>` : ""}
           ${moving ? `<small>moving to folder...</small>` : ""}
           ${compacting ? `<small>compacting checkpoints...</small>` : ""}
@@ -1436,11 +1728,36 @@ function renderRuns() {
     })
     .join("");
   document.querySelectorAll(".run-card").forEach((card) => {
+    card.addEventListener("dragstart", (event) => {
+      const runId = card.dataset.runId;
+      // Dragging a run that is part of the current selection moves the whole
+      // selection; dragging an unselected run moves only that run.
+      const ids = state.selectedRunIds.has(runId) ? [...state.selectedRunIds] : [runId];
+      state.draggingRunIds = ids;
+      card.classList.add("dragging");
+      document.body.classList.add("dragging-runs");
+      armFolderDropTargets();
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", ids.join(","));
+        setRunDragImage(event, ids);
+      }
+    });
+    card.addEventListener("dragend", () => {
+      state.draggingRunIds = [];
+      card.classList.remove("dragging");
+      endRunDrag();
+    });
     card.addEventListener("click", (event) => {
       const checkbox = event.target.closest(".run-select-checkbox");
       if (checkbox) {
         event.stopPropagation();
-        toggleRunSelection(checkbox.dataset.runId, checkbox.checked);
+        if (event.shiftKey && state.lastSelectedRunId) {
+          selectRunRange(state.lastSelectedRunId, checkbox.dataset.runId, checkbox.checked);
+        } else {
+          toggleRunSelection(checkbox.dataset.runId, checkbox.checked);
+        }
+        state.lastSelectedRunId = checkbox.dataset.runId;
         return;
       }
       const menuTrigger = event.target.closest(".run-menu-trigger");
@@ -1463,8 +1780,104 @@ function renderRuns() {
   syncRunMenuState();
 }
 
-function videoUrl(run) {
-  return `/api/runs/${encodeURIComponent(run.id)}/video?v=${encodeURIComponent(run.latest_video || run.updated_at || "")}`;
+function selectedCheckpoint(run) {
+  if (!run || state.selectedCheckpointIteration === null) return null;
+  return (run.checkpoint_history || []).find(
+    (checkpoint) => checkpoint.iteration === state.selectedCheckpointIteration
+  ) || null;
+}
+
+function displayedVideoPath(run) {
+  const checkpoint = selectedCheckpoint(run);
+  return checkpoint ? checkpoint.video || "" : run?.latest_video || "";
+}
+
+function displayedVideoRelativePath(run) {
+  const videoPath = String(displayedVideoPath(run) || "").replaceAll("\\", "/");
+  const logDir = String(run?.log_dir || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  if (!videoPath || !logDir || !videoPath.startsWith(`${logDir}/`)) return "";
+  return videoPath.slice(logDir.length + 1);
+}
+
+function displayedVideoDriveExport(run) {
+  const key = displayedVideoRelativePath(run);
+  if (!key) return null;
+  const exports = run?.google_drive_video_exports;
+  return exports && typeof exports === "object" ? exports[key] || null : null;
+}
+
+function setDisplayedVideoDriveExport(run, record) {
+  const key = displayedVideoRelativePath(run);
+  if (!run || !key || !record) return;
+  run.google_drive_video_exports = {
+    ...(run.google_drive_video_exports || {}),
+    [key]: record,
+  };
+}
+
+function isPrivateGoogleDriveUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" && url.hostname === "drive.google.com";
+  } catch {
+    return false;
+  }
+}
+
+function renderGoogleDriveVideoExport(run) {
+  const exportButton = $("#export-video-drive");
+  const openButton = $("#open-video-drive");
+  const hint = $("#drive-export-hint");
+  if (!exportButton || !openButton || !hint) return;
+  const videoPath = displayedVideoPath(run);
+  exportButton.hidden = !videoPath;
+  openButton.hidden = true;
+  openButton.removeAttribute("href");
+  hint.hidden = true;
+  hint.textContent = "";
+  if (!videoPath) return;
+
+  const readiness = state.googleDriveExport;
+  const exportRecord = displayedVideoDriveExport(run);
+  if (!readiness?.configured) {
+    exportButton.disabled = true;
+    exportButton.textContent = readiness ? "Export to Drive" : "Checking Drive…";
+    hint.textContent = readiness?.remediation || "Checking Google Drive setup on the training PC.";
+    hint.hidden = false;
+    return;
+  }
+
+  const status = String(exportRecord?.status || "");
+  if (["queued", "uploading"].includes(status)) {
+    exportButton.disabled = true;
+    exportButton.textContent = "Exporting…";
+    hint.textContent = `Uploading in the background to ${exportRecord.remote_path || readiness.folder}.`;
+    hint.hidden = false;
+    return;
+  }
+  if (status === "completed") {
+    exportButton.disabled = false;
+    exportButton.textContent = "Export to Drive";
+    if (isPrivateGoogleDriveUrl(exportRecord.web_view_url)) {
+      openButton.hidden = false;
+      openButton.href = exportRecord.web_view_url;
+    }
+    return;
+  }
+  exportButton.disabled = false;
+  exportButton.textContent = ["failed", "interrupted"].includes(status)
+    ? "Retry Drive Export"
+    : "Export to Drive";
+  if (["failed", "interrupted"].includes(status) && exportRecord.error) {
+    hint.textContent = exportRecord.error;
+    hint.hidden = false;
+  }
+}
+
+function videoUrl(run, checkpoint = null) {
+  const params = new URLSearchParams({ v: checkpoint?.video || run.latest_video || run.updated_at || "" });
+  if (checkpoint) params.set("checkpoint_iteration", String(checkpoint.iteration));
+  return `/api/runs/${encodeURIComponent(run.id)}/video?${params.toString()}`;
 }
 
 function clearVideoPlayer() {
@@ -1474,7 +1887,8 @@ function clearVideoPlayer() {
 }
 
 function videoFolder(run) {
-  return run && run.latest_video ? String(run.latest_video).replace(/\/[^/]+$/, "") : "";
+  const video = displayedVideoPath(run);
+  return video ? String(video).replace(/\/[^/]+$/, "") : "";
 }
 
 function onnxFolder(run) {
@@ -1500,51 +1914,147 @@ function videoPresetLabel(preset) {
   return `${name} · ${preset.width}x${preset.height} · ${preset.length} steps`;
 }
 
+function renderCheckpointEvolution(run) {
+  const details = $("#checkpoint-evolution");
+  const count = $("#checkpoint-evolution-count");
+  const help = $("#checkpoint-evolution-help");
+  const timeline = $("#checkpoint-timeline");
+  const latestButton = $("#show-latest-video");
+  const checkpoints = run?.checkpoint_history || [];
+  if (!details || !count || !help || !timeline || !latestButton) return;
+  if (!checkpoints.length) {
+    details.hidden = true;
+    timeline.innerHTML = "";
+    return;
+  }
+  details.hidden = false;
+  const previousScrollTop = details.open ? timeline.scrollTop : 0;
+  count.textContent = `${checkpoints.length} save point${checkpoints.length === 1 ? "" : "s"}`;
+  help.textContent = checkpoints.length === 1
+    ? "One checkpoint is saved. Open it to record or review this point."
+    : "Open only when you want to compare an older save point.";
+  latestButton.classList.toggle("active", state.selectedCheckpointIteration === null);
+  latestButton.setAttribute("aria-pressed", String(state.selectedCheckpointIteration === null));
+  timeline.innerHTML = [...checkpoints]
+    .reverse()
+    .map((checkpoint) => {
+      const selected = checkpoint.iteration === state.selectedCheckpointIteration;
+      const saved = checkpoint.created_at ? `Saved ${formatRelativeTime(checkpoint.created_at)}` : "Saved checkpoint";
+      const videoState = checkpoint.video ? "Video ready" : "No video yet";
+      return `
+        <button type="button" class="checkpoint-point ${selected ? "active" : ""}"
+          data-checkpoint-iteration="${escapeHtml(String(checkpoint.iteration))}"
+          aria-pressed="${selected}">
+          <span class="checkpoint-marker" aria-hidden="true"></span>
+          <span class="checkpoint-point-copy">
+            <span class="checkpoint-point-title">
+              <strong>Iteration ${escapeHtml(String(checkpoint.iteration))}</strong>
+              ${checkpoint.is_latest ? '<span class="status-badge muted-pill">Latest checkpoint</span>' : ""}
+              ${checkpoint.video ? '<span class="status-badge status-completed">Video</span>' : ""}
+            </span>
+            <small>${escapeHtml(saved)} · ${escapeHtml(videoState)}</small>
+          </span>
+        </button>
+      `;
+    })
+    .join("");
+  timeline.scrollTop = previousScrollTop;
+}
+
+function selectCheckpointForVideo(iteration) {
+  state.selectedCheckpointIteration = iteration;
+  renderVideoPanel(state.selectedRun);
+}
+
 function renderVideoPanel(run) {
   const panel = $("#video-panel");
   const stateBadge = $("#video-state");
   const video = $("#result-video");
   const message = $("#video-message");
+  const recordButton = $("#record-video");
+  const recordHint = $("#record-video-hint");
   const hasCheckpoint = Boolean(run && run.latest_checkpoint);
   if (!run || (!run.latest_video && !run.video_status && !hasCheckpoint)) {
     panel.hidden = true;
+    renderCheckpointEvolution(null);
+    renderGoogleDriveVideoExport(null);
     clearVideoPlayer();
     message.textContent = "";
+    if (recordHint) {
+      recordHint.hidden = true;
+      recordHint.textContent = "";
+    }
     return;
   }
   panel.hidden = false;
+  renderCheckpointEvolution(run);
   const gpuProcess = activeGpuProcess();
   const videoProcessId = activeVideoProcessId(run);
-  $("#record-video").disabled = !hasCheckpoint || Boolean(gpuProcess);
+  const checkpoint = selectedCheckpoint(run);
+  const videoPath = displayedVideoPath(run);
+  renderGoogleDriveVideoExport(run);
+  recordButton.disabled = !hasCheckpoint || Boolean(gpuProcess);
+  recordButton.textContent = checkpoint ? `Record Iter ${checkpoint.iteration}` : "Record Latest";
+  recordButton.removeAttribute("data-tooltip");
+  if (recordHint) {
+    const busyLabel = {
+      training: "training",
+      video: "another recording",
+      onnx: "an ONNX export",
+      deploy: "deployment validation",
+      play: "playback",
+    }[gpuProcess?.kind] || "another GPU process";
+    recordHint.textContent = !hasCheckpoint
+      ? "This run has no checkpoint available to record."
+      : gpuProcess
+        ? `GPU busy with ${busyLabel}. Wait for it to finish or stop it before recording this checkpoint.`
+        : "";
+    recordHint.hidden = !recordHint.textContent;
+  }
   $("#stop-recording").hidden = !videoProcessId;
-  $("#open-video-folder").hidden = !run.latest_video;
+  $("#open-video-folder").hidden = !videoPath;
   setLocalOnlyButtonState(
     $("#open-video-folder"),
-    !run.latest_video,
+    !videoPath,
     "Open the folder containing recorded videos (local only)"
   );
-  $("#copy-video-path").hidden = !run.latest_video;
+  $("#copy-video-path").hidden = !videoPath;
   if (videoProcessId || run.video_status === "recording") {
-    if (run.latest_video) {
-      const src = videoUrl(run);
+    if (videoPath) {
+      const src = videoUrl(run, checkpoint);
       if (video.getAttribute("src") !== src) video.setAttribute("src", src);
     } else {
       clearVideoPlayer();
     }
-    stateBadge.textContent = "Recording";
+    const recordingIteration = run.video_checkpoint_iteration;
+    stateBadge.textContent = recordingIteration === undefined || recordingIteration === null
+      ? "Recording"
+      : `Recording Iter ${recordingIteration}`;
     stateBadge.className = "status-badge status-running";
-    message.textContent = "A headless playback is recording now. The video will appear here when it finishes.";
+    message.textContent = "A headless playback is recording now. This save point will update when it finishes.";
     return;
   }
-  if (run.latest_video) {
-    const src = videoUrl(run);
-    stateBadge.textContent = "Video Ready";
+  if (videoPath) {
+    const src = videoUrl(run, checkpoint);
+    stateBadge.textContent = checkpoint ? `Iter ${checkpoint.iteration} Video` : "Latest Video";
     stateBadge.className = "status-badge status-completed";
     if (video.getAttribute("src") !== src) video.setAttribute("src", src);
-    message.textContent = `Saved from the latest checkpoint. ${run.video_params ? videoPresetLabel(run.video_params) : ""}`;
+    if (checkpoint) {
+      message.textContent = `Showing checkpoint iteration ${checkpoint.iteration}. Choose another save point to compare its progress.`;
+    } else {
+      const source = (run.checkpoint_history || []).find((item) => item.video === run.latest_video);
+      const iteration = source ? ` from iteration ${source.iteration}` : "";
+      message.textContent = `Latest recording${iteration}. ${run.video_params ? videoPresetLabel(run.video_params) : ""}`;
+    }
     return;
   }
   clearVideoPlayer();
+  if (checkpoint) {
+    stateBadge.textContent = "Not Recorded";
+    stateBadge.className = "status-badge muted-pill";
+    message.textContent = `Checkpoint iteration ${checkpoint.iteration} is ready. Record it to add this point to the evolution.`;
+    return;
+  }
   if (run.video_status === "missing_checkpoint") {
     stateBadge.textContent = "Waiting";
     stateBadge.className = "status-badge status-interrupted";
@@ -1563,7 +2073,12 @@ function renderVideoPanel(run) {
 }
 
 function renderRunDetails() {
-  if (state.comparisonMode && state.selectedRun && state.comparisonRun) {
+  const detailsPanel = document.querySelector(".details-panel:not(.comparison-panel)");
+  const comparisonPanel = $("#comparison-panel");
+  const comparing = Boolean(state.comparisonMode && state.selectedRun && state.comparisonRun);
+  if (comparisonPanel) comparisonPanel.hidden = !comparing;
+  if (detailsPanel) detailsPanel.hidden = comparing;
+  if (comparing) {
     renderComparisonPanel(state.selectedRun, state.comparisonRun);
     return;
   }
@@ -1599,8 +2114,9 @@ function renderRunDetails() {
     const dur = formatDuration(run.started_at || run.created_at, runEndTime(run));
     if (dur) rows.push(["Duration", dur]);
     if (run.params?.task) rows.push(["Task", run.params.task]);
+    if (run.params?.training_route && run.params.training_route !== "standard")
+      rows.push(["Route", run.params.training_route]);
     if (run.params?.num_envs != null) rows.push(["Envs", run.params.num_envs]);
-    if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
     rows.push(["Spring Backend", runSpringBackend(run)]);
     if (run.params?.seed != null) rows.push(["Seed", run.params.seed]);
     if (run.git?.short) rows.push(["Commit", `${run.git.short}${run.git.dirty ? " (dirty)" : ""}`]);
@@ -1614,6 +2130,12 @@ function renderRunDetails() {
       if (stepsText) rows.push(["Throughput", stepsText]);
       if (typeof progress.mean_reward === "number") rows.push(["Mean reward", progress.mean_reward.toFixed(2)]);
     }
+    if (run.params?.training_route === "sensor_v2_full") {
+      rows.push([
+        "F1/F2/F3 iters",
+        `${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}`,
+      ]);
+    } else if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
     const ckptIter = checkpointIteration(run.latest_checkpoint);
     if (ckptIter !== null) rows.push(["Checkpoint", `iter ${ckptIter}`]);
     const onnxText = onnxProcessId ? "exporting" : (run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing"));
@@ -1622,6 +2144,10 @@ function renderRunDetails() {
       rows.push(["Reward preset", run.reward_preset_id]);
     if (run.terrain_preset_id && run.terrain_preset_id !== "baseline")
       rows.push(["Terrain preset", run.terrain_preset_id]);
+    const physicsPresetId = run.physics_preset_id || run.params?.physics_preset_id;
+    const physicsOverrides = run.physics_overrides || run.params?.physics_overrides || {};
+    if (physicsPresetId && physicsPresetId !== "baseline") rows.push(["Physics preset", physicsPresetId]);
+    if (Object.keys(physicsOverrides).length) rows.push(["Physics overrides", Object.keys(physicsOverrides).length]);
     if (run.convergence_detected)
       rows.push(["Converged", `iter ${run.convergence_iteration} (Δ ${run.convergence_improvement_pct?.toFixed(1)}%)`]);
     if (run.divergence_detected)
@@ -1652,6 +2178,8 @@ function renderRunDetails() {
   const notesEditor = $("#notes-editor");
   notesEditor.disabled = !run || savingNotes || deleting;
   if (!run) notesEditor.value = "";
+  const draftFlag = $("#notes-dirty-flag");
+  if (draftFlag) draftFlag.hidden = !run || !(run.id in state.notesDrafts);
   $("#save-name").disabled = !run || renaming || deleting;
   $("#save-name").textContent = renaming ? "Saving..." : "Save";
   $("#save-notes").disabled = !run || savingNotes || deleting;
@@ -1686,7 +2214,12 @@ function renderRunDetails() {
     !run || runBusy || !run.onnx_path,
     "Open the exported policy folder (local only)"
   );
-  $("#resume-run").disabled = !run || runBusy || !run.latest_checkpoint;
+  const resumeButton = $("#resume-run");
+  const explicitResumeQuarantined = Boolean(run && runSpringBackend(run) === "explicit");
+  resumeButton.disabled = !run || runBusy || !run.latest_checkpoint || explicitResumeQuarantined;
+  resumeButton.title = explicitResumeQuarantined
+    ? "Explicit spring checkpoints cannot be resumed in the Panel at the current 120 Hz physics step."
+    : "Resume training from the latest checkpoint.";
   $("#tweak-run").disabled = !run || runBusy || ["running", "stopping"].includes(String(run.status || "").toLowerCase());
   $("#stop-process").disabled = !state.debugTarget && !run;
   const debugKey = state.debugTarget ? `${state.debugTarget.type}:${state.debugTarget.id}` : "";
@@ -1781,6 +2314,30 @@ function renderDeployRunOptions() {
   select.value = state.deploySelectedRunId || "";
 }
 
+// Artifact readiness is the first thing an operator checks, so each row carries
+// the same colour vocabulary as the rest of the panel instead of bare words.
+function deployArtifactPillClass(tone) {
+  if (tone === "ready") return "status-badge status-completed";
+  if (tone === "failed") return "status-badge status-failed";
+  if (tone === "pending") return "status-badge status-queued";
+  return "status-badge muted-pill";
+}
+
+function deployOnnxArtifact(run) {
+  if (run.onnx_path) return ["ready", "ready"];
+  if (run.onnx_status === "failed") return ["failed", "export failed"];
+  if (run.onnx_status === "exporting") return ["exporting", "pending"];
+  return ["missing", "missing"];
+}
+
+function deployReportArtifact(run) {
+  const report = run.deploy_latest_report;
+  if (!report) return ["none", "missing"];
+  const status = String(report.overall_status || "unknown").toLowerCase();
+  const tone = status === "pass" ? "ready" : (status === "fail" ? "failed" : (status === "unknown" ? "missing" : "pending"));
+  return [status, tone, `Readiness level: ${report.readiness_level || "review"}`];
+}
+
 function renderDeployArtifactStatus(run) {
   const target = $("#deploy-artifact-status");
   if (!target) return;
@@ -1788,14 +2345,79 @@ function renderDeployArtifactStatus(run) {
     target.innerHTML = `<article class="empty-panel">Select a run to inspect deploy artifacts.</article>`;
     return;
   }
+  const [onnxText, onnxTone] = deployOnnxArtifact(run);
+  const [reportText, reportTone, reportTooltip] = deployReportArtifact(run);
   const rows = [
-    ["Checkpoint", run.latest_checkpoint ? "ready" : "missing"],
-    ["ONNX", run.onnx_path ? "ready" : (run.onnx_status === "failed" ? "failed" : "missing")],
-    ["Last report", run.deploy_latest_report ? `${run.deploy_latest_report.readiness_level || "review"} (${run.deploy_latest_report.overall_status || "unknown"})` : "none"],
+    ["Checkpoint", run.latest_checkpoint ? "ready" : "missing", run.latest_checkpoint ? "ready" : "missing", run.latest_checkpoint || ""],
+    ["ONNX", onnxText, onnxTone, run.onnx_path || ""],
+    ["Last report", reportText, reportTone, reportTooltip || ""],
   ];
   target.innerHTML = rows
-    .map(([key, value]) => `<span class="deploy-artifact-key">${escapeHtml(key)}</span><span>${escapeHtml(value)}</span>`)
+    .map(([key, value, tone, tooltip]) => {
+      const tip = tooltip ? ` data-tooltip="${escapeHtml(tooltip)}"` : "";
+      return (
+        `<span class="deploy-artifact-key">${escapeHtml(key)}</span>` +
+        `<span class="${deployArtifactPillClass(tone)}"${tip}>${escapeHtml(value)}</span>`
+      );
+    })
     .join("");
+}
+
+// The Deploy view offers three similar-looking actions whose availability
+// depends on artifacts the operator cannot see from the button row alone.
+// One sentence naming the single next move keeps the page self-explaining.
+function deployNextStep(run, gpuProcess, active) {
+  if (!run) {
+    return { tone: "info", text: "Select a run to begin. Runs appear here once the panel has seen a checkpoint or an export." };
+  }
+  if (active) {
+    return { tone: "running", text: `Readiness pipeline running for ${run.display_name || run.id}. Live output is in the Deploy Console.` };
+  }
+  if (activeMujocoProcessForRun(run.id)) {
+    return { tone: "running", text: "MuJoCo playback is running. Wait for it to finish before starting a readiness check." };
+  }
+  if (gpuProcess) {
+    return { tone: "warn", text: `${mediaLockMessage(gpuProcess)} Readiness checks stay disabled until the GPU is free.` };
+  }
+  if (!run.latest_checkpoint && !run.onnx_path) {
+    return { tone: "warn", text: "This run has no checkpoint and no ONNX. Train it further before deploying it." };
+  }
+  if (!run.onnx_path) {
+    return { tone: "action", text: "No ONNX yet. Run Export ONNX + Validate to build one from the latest checkpoint." };
+  }
+  const report = state.deployData?.latest?.report;
+  if (!report) {
+    return { tone: "action", text: "ONNX is ready. Run Validate Existing ONNX to produce the first readiness report." };
+  }
+  const status = String(report.overall_status || "").toLowerCase();
+  if (status === "fail") {
+    return { tone: "fail", text: "Readiness is blocked. Fix the failed stages on the right, then re-run the check." };
+  }
+  if (status === "warn") {
+    return { tone: "warn", text: "Readiness passed with warnings. Review the warned stages on the right before Jetson bring-up." };
+  }
+  if (status === "pass") {
+    return { tone: "pass", text: "Readiness passed. This policy is cleared for Jetson ROS2 bring-up." };
+  }
+  return { tone: "info", text: "A readiness report exists but its overall status is unknown. Re-run the check." };
+}
+
+function renderDeployNextStep(run, gpuProcess, active) {
+  const target = $("#deploy-next-step");
+  if (!target) return;
+  const step = deployNextStep(run, gpuProcess, active);
+  target.className = `deploy-next-step deploy-next-${step.tone}`;
+  target.textContent = step.text;
+}
+
+// A disabled button that never says why is the most common complaint about this
+// view, so every disabled state carries its own reason as a tooltip.
+function setDeployActionState(button, disabled, disabledReason, enabledTooltip) {
+  if (!button) return;
+  button.disabled = Boolean(disabled);
+  const tooltip = disabled ? disabledReason : enabledTooltip;
+  if (tooltip) button.dataset.tooltip = tooltip;
+  else delete button.dataset.tooltip;
 }
 
 function activeDeployProcessForRun(runId) {
@@ -1847,7 +2469,21 @@ function renderMujocoPlayback(run, defaults) {
     "Open the live MuJoCo viewer",
     REMOTE_MUJOCO_REASON
   );
-  if (recordButton) recordButton.disabled = !recordReady || Boolean(active);
+  const playbackBlockReason = !run
+    ? "Select a run first."
+    : (!run.onnx_path
+        ? "Export ONNX before MuJoCo playback."
+        : (!defaults.mujoco_installed
+            ? "MuJoCo is not installed on the training PC."
+            : (!defaults.onnxruntime_installed
+                ? "ONNX Runtime is not installed on the training PC."
+                : (active ? "MuJoCo playback is already running for this run." : ""))));
+  setDeployActionState(
+    recordButton,
+    !recordReady || Boolean(active),
+    playbackBlockReason || "The MJPEG renderer or MP4 encoder is unavailable in this environment.",
+    "Records the scenario to an MP4 you can replay here."
+  );
   if (stopButton) {
     stopButton.hidden = !active;
     stopButton.disabled = !active;
@@ -1873,6 +2509,8 @@ function renderMujocoPlayback(run, defaults) {
     setLocalOnlyButtonState(openButton, !run?.latest_mujoco_video, "Open the MuJoCo video folder (local only)");
   }
   if (copyButton) copyButton.hidden = !run?.latest_mujoco_video;
+  const videoActions = $("#deploy-mujoco-video-actions");
+  if (videoActions) videoActions.hidden = !run?.latest_mujoco_video;
   if (status) {
     if (!run) status.textContent = "Select a run to open or record MuJoCo playback.";
     else if (!run.onnx_path) status.textContent = "Export ONNX before MuJoCo playback.";
@@ -1884,6 +2522,24 @@ function renderMujocoPlayback(run, defaults) {
   }
 }
 
+function renderDeployStageSummary(latest) {
+  const target = $("#deploy-stage-summary");
+  if (!target) return;
+  const counts = latest?.stage_counts;
+  const chips = counts
+    ? [
+        ["pass", counts.pass || 0, "status-completed"],
+        ["warn", counts.warn || 0, "status-queued"],
+        ["fail", counts.fail || 0, "status-failed"],
+        ["skipped", counts.skipped || 0, "muted-pill"],
+      ].filter(([, value]) => value > 0)
+    : [];
+  target.hidden = chips.length === 0;
+  target.innerHTML = chips
+    .map(([label, value, cls]) => `<span class="status-badge ${cls}">${value} ${escapeHtml(label)}</span>`)
+    .join("");
+}
+
 function renderDeployReport(data) {
   const latest = data?.latest;
   const report = latest?.report;
@@ -1891,6 +2547,9 @@ function renderDeployReport(data) {
   const meta = $("#deploy-report-meta");
   const json = $("#deploy-report-json");
   const badge = $("#deploy-readiness-badge");
+  const reportDetails = $("#deploy-report-details");
+  renderDeployStageSummary(latest);
+  if (reportDetails) reportDetails.hidden = !report;
   if (!report) {
     if (stageList) {
       stageList.innerHTML = isLoading("deploy") && !state.deployData
@@ -1906,8 +2565,9 @@ function renderDeployReport(data) {
     return;
   }
   if (badge) {
-    badge.textContent = `${report.readiness_level || "review"} · ${report.overall_status || "unknown"}`;
+    badge.textContent = report.overall_status || "unknown";
     badge.className = deployBadgeClass(report.overall_status);
+    badge.dataset.tooltip = `Readiness level: ${report.readiness_level || "review"}`;
   }
   if (stageList) {
     stageList.innerHTML = (report.stages || [])
@@ -1925,12 +2585,10 @@ function renderDeployReport(data) {
       .join("");
   }
   if (meta) {
-    const counts = latest.stage_counts || {};
     meta.innerHTML = [
       ["Pipeline", report.pipeline_id],
       ["Completed", report.completed_at],
       ["Report", latest.path],
-      ["Stages", `pass ${counts.pass || 0} · warn ${counts.warn || 0} · fail ${counts.fail || 0} · skipped ${counts.skipped || 0}`],
     ]
       .map(([key, value]) => `<span class="debug-kv"><strong>${escapeHtml(key)}:</strong> ${escapeHtml(value || "")}</span>`)
       .join("");
@@ -1974,9 +2632,29 @@ function renderDeployPanel() {
   const exportButton = $("#deploy-export-validate");
   const mujocoButton = $("#deploy-mujoco-smoke");
   const stopButton = $("#deploy-stop");
-  if (validateButton) validateButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
-  if (exportButton) exportButton.disabled = !run || !run.latest_checkpoint || Boolean(gpuProcess && !active);
-  if (mujocoButton) mujocoButton.disabled = !run || !run.onnx_path || Boolean(gpuProcess && !active);
+  renderDeployNextStep(run, gpuProcess && !active ? gpuProcess : null, active);
+  const busy = Boolean(gpuProcess && !active);
+  const busyReason = busy ? mediaLockMessage(gpuProcess) : "";
+  const noRunReason = "Select a run first.";
+  const noOnnxReason = "This run has no exported ONNX yet. Use Export ONNX + Validate to build one.";
+  setDeployActionState(
+    validateButton,
+    !run || !run.onnx_path || busy,
+    !run ? noRunReason : (!run.onnx_path ? noOnnxReason : busyReason),
+    "Runs the readiness pipeline against the ONNX already on disk."
+  );
+  setDeployActionState(
+    exportButton,
+    !run || !run.latest_checkpoint || busy,
+    !run ? noRunReason : (!run.latest_checkpoint ? "This run has no checkpoint to export from." : busyReason),
+    "Exports a fresh ONNX from the latest checkpoint, then validates it."
+  );
+  setDeployActionState(
+    mujocoButton,
+    !run || !run.onnx_path || busy,
+    !run ? noRunReason : (!run.onnx_path ? noOnnxReason : busyReason),
+    "Runs only the advisory MuJoCo rollout stage."
+  );
   if (stopButton) {
     stopButton.hidden = !active;
     stopButton.disabled = !active;
@@ -2120,6 +2798,10 @@ function renderDeployDebug(debug) {
     liveEl.textContent = live ? "Live" : (debug ? "Snapshot" : "Idle");
     liveEl.className = live ? "status-badge live-pill" : "status-badge muted-pill";
   }
+  // Open the console on its own while output is arriving; never close it again,
+  // because an operator who opened it manually is reading a finished log.
+  const consoleDetails = $("#deploy-console-details");
+  if (consoleDetails && live) consoleDetails.open = true;
   const status = $("#deploy-debug-status");
   if (status) {
     status.innerHTML = debug
@@ -2191,7 +2873,10 @@ function hasActiveRun() {
     state.runs.some((run) =>
       ["queued", "running", "stopping"].includes(run.status) ||
       run.video_status === "recording" ||
-      ["running", "stopping"].includes(run.mujoco_playback_status)
+      ["running", "stopping"].includes(run.mujoco_playback_status) ||
+      Object.values(run.google_drive_video_exports || {}).some((item) =>
+        ["queued", "uploading"].includes(item?.status)
+      )
     )
   );
 }
@@ -2250,6 +2935,7 @@ async function loadRuns() {
     renderFreshness();
     state.runs = runsData.runs;
     if (Array.isArray(runsData.folders)) state.folders = runsData.folders;
+    noticeFinishedRuns(state.runs);
     reconcileHistoryNotifications(state.runs);
     state.activeProcessMap = {};
     state.activeProcesses = [];
@@ -2261,12 +2947,24 @@ async function loadRuns() {
       rememberActiveProcess(process.run_id, process);
       rememberActiveProcess(process.source_run_id, process);
     }
+    if (state.activeFolder && !state.folders.includes(state.activeFolder)) {
+      state.activeFolder = null;
+      saveHistoryFilters();
+    }
     const validRunIds = new Set(state.runs.map((run) => run.id));
     state.selectedRunIds = new Set([...state.selectedRunIds].filter((runId) => validRunIds.has(runId)));
     if (selectedId) {
       const selected = findRun(selectedId);
       if (selected) {
         state.selectedRun = selected;
+        if (
+          state.selectedCheckpointIteration !== null &&
+          !(selected.checkpoint_history || []).some(
+            (item) => item.iteration === state.selectedCheckpointIteration
+          )
+        ) {
+          state.selectedCheckpointIteration = null;
+        }
       } else {
         clearRunDetailState({ render: false });
       }
@@ -2292,6 +2990,24 @@ async function loadRuns() {
   }
 }
 
+// Notes are the one History field with no autosave, so a run switch would
+// otherwise drop whatever was typed. Park it against the run it belongs to.
+function stashNotesDraft() {
+  const run = state.selectedRun;
+  const editor = $("#notes-editor");
+  if (!run || !editor) return;
+  if (editor.value === (state.notesSavedText ?? "")) delete state.notesDrafts[run.id];
+  else state.notesDrafts[run.id] = editor.value;
+}
+
+function hasUnsavedHistoryEdits() {
+  const editor = $("#notes-editor");
+  const dirtyEditor = Boolean(
+    state.selectedRun && editor && editor.value !== (state.notesSavedText ?? "")
+  );
+  return dirtyEditor || Object.keys(state.notesDrafts).length > 0 || state.renameDirty;
+}
+
 async function selectRun(runId) {
   const run = findRun(runId);
   if (!run) {
@@ -2299,13 +3015,20 @@ async function selectRun(runId) {
     return;
   }
   if (!state.selectedRun || state.selectedRun.id !== runId) {
+    stashNotesDraft();
     state.renameDirty = false;
     state.renameDraftRunId = null;
+    state.selectedCheckpointIteration = null;
+    const checkpointEvolution = $("#checkpoint-evolution");
+    if (checkpointEvolution) checkpointEvolution.open = false;
   }
   state.selectedRun = run;
   writeHashRoute();
   markHistoryRead(runId);
   renderRunDetails();
+  const notesEditor = $("#notes-editor");
+  const initialNotesEditorValue = runId in state.notesDrafts ? state.notesDrafts[runId] : "";
+  if (notesEditor) notesEditor.value = initialNotesEditorValue;
   syncRunCurves();
   renderRuns();
   // Hide reward panel until loaded
@@ -2319,7 +3042,18 @@ async function selectRun(runId) {
     run.log_dir ? loadTerrainConfigForRun(runId) : Promise.resolve(),
   ]);
   if (!state.selectedRun || state.selectedRun.id !== runId) return;
-  $("#notes-editor").value = notesData.notes;
+  // A draft, including text entered while the notes request was in flight,
+  // outranks stored text and must survive run switches.
+  const loadedNotesEditor = $("#notes-editor");
+  if (runId in state.notesDrafts) {
+    loadedNotesEditor.value = state.notesDrafts[runId];
+  } else if (loadedNotesEditor.value === initialNotesEditorValue) {
+    loadedNotesEditor.value = notesData.notes;
+  } else {
+    state.notesDrafts[runId] = loadedNotesEditor.value;
+  }
+  state.notesSavedText = notesData.notes;
+  renderRunDetails();
   // No toast here: checkpoint state is metadata, not an event, and the details
   // pane already reports it ("Checkpoint: iter N" / "no checkpoint"). A toast on
   // every run click would evict unread errors three clicks later.
@@ -2425,12 +3159,47 @@ async function openProcessLogFolder() {
 }
 
 async function copyVideoPath() {
-  if (!state.selectedRun || !state.selectedRun.latest_video) {
+  const video = displayedVideoPath(state.selectedRun);
+  if (!video) {
     setStatus("No video path is available yet.");
     return;
   }
-  await copyText(state.selectedRun.latest_video);
-  setStatus(`Video path copied: ${state.selectedRun.latest_video}`);
+  await copyText(video);
+  setStatus(`Video path copied: ${video}`);
+}
+
+async function exportVideoToDrive() {
+  const run = state.selectedRun;
+  const video = displayedVideoPath(run);
+  if (!run || !video) {
+    setStatus("No recorded video is available to export.");
+    return;
+  }
+  if (!state.googleDriveExport?.configured) {
+    setStatusTone(
+      state.googleDriveExport?.remediation || "Google Drive export is not configured on the training PC.",
+      "error",
+    );
+    return;
+  }
+  const data = await api(`/api/runs/${encodeURIComponent(run.id)}/export-video-to-drive`, {
+    method: "POST",
+    body: JSON.stringify(
+      state.selectedCheckpointIteration === null
+        ? {}
+        : { checkpoint_iteration: state.selectedCheckpointIteration },
+    ),
+  });
+  setDisplayedVideoDriveExport(run, data.export);
+  renderVideoPanel(run);
+  if (data.deduplicated) {
+    setStatus("This unchanged video is already exported to Google Drive.");
+  } else if (data.started) {
+    setStatus("Google Drive export started in the background.");
+  } else {
+    setStatus("Google Drive export is already running for this video.");
+  }
+  scheduleRunsRefresh();
 }
 
 async function openOnnxFolder() {
@@ -2585,6 +3354,8 @@ function hideRunConfigPanels() {
 
 function clearRunDetailState({ render = true } = {}) {
   state.selectedRun = null;
+  state.selectedCheckpointIteration = null;
+  state.notesSavedText = "";
   state.comparisonRun = null;
   state.comparisonMode = false;
   state.debugTarget = null;
@@ -2648,12 +3419,15 @@ async function saveNotes() {
     return;
   }
   const runId = state.selectedRun.id;
+  const text = $("#notes-editor").value;
   setPending("notes", runId, true);
   try {
     await api(`/api/runs/${encodeURIComponent(runId)}/notes`, {
       method: "POST",
-      body: JSON.stringify({ notes: $("#notes-editor").value }),
+      body: JSON.stringify({ notes: text }),
     });
+    state.notesSavedText = text;
+    delete state.notesDrafts[runId];
     await loadRuns();
     setStatus("Notes saved.");
   } finally {
@@ -2776,14 +3550,19 @@ async function recordVideo() {
   }
   const data = await api(`/api/runs/${encodeURIComponent(state.selectedRun.id)}/record-video`, {
     method: "POST",
-    body: JSON.stringify({ device: "cuda:0" }),
+    body: JSON.stringify({
+      device: "cuda:0",
+      ...(state.selectedCheckpointIteration === null
+        ? {}
+        : { checkpoint_iteration: state.selectedCheckpointIteration }),
+    }),
   });
   const target = { type: "process", id: data.id };
   setDebugTarget(target);
   setStatus(
     data.attach_command
-      ? `Recording high quality video. Attach with: ${data.attach_command}`
-      : "Recording high quality video."
+      ? `Recording iteration ${data.checkpoint_iteration} in high quality. Attach with: ${data.attach_command}`
+      : `Recording iteration ${data.checkpoint_iteration} in high quality.`
   );
   await loadRuns();
 }
@@ -2821,6 +3600,10 @@ function resumeRun(runId) {
   const run = findRun(runId);
   if (!run || !run.latest_checkpoint) {
     setStatus("No checkpoint available for this run.");
+    return;
+  }
+  if (runSpringBackend(run) === "explicit") {
+    setStatus("This Explicit checkpoint cannot be resumed in the Panel because that backend is quarantined at the current 120 Hz physics step. Start a new Native run or use spring-release characterization.");
     return;
   }
   const form = $("#train-form");
@@ -2971,22 +3754,24 @@ async function deleteSelectedRun() {
     return;
   }
   const runId = state.selectedRun.id;
+  const preview = await api(`/api/runs/${encodeURIComponent(runId)}/delete-preview`);
+  const confirmation = await confirmAction({
+    title: "Delete Run",
+    body: formatDeletePreview(preview),
+    confirmLabel: "Delete Run",
+    requiredText: preview.requires_confirmation || runId,
+    inputLabel: `Type ${preview.requires_confirmation || runId} to permanently delete this run.`,
+  });
+  if (!confirmation) {
+    setStatus("Delete cancelled.");
+    return;
+  }
+  // Marked only now: before this point nothing is being deleted, and the card
+  // must not grey itself out and claim otherwise while the dialog is open.
   state.pendingDeleteRunIds.add(runId);
   renderRuns();
   renderRunDetails();
   try {
-    const preview = await api(`/api/runs/${encodeURIComponent(runId)}/delete-preview`);
-    const confirmation = await confirmAction({
-      title: "Delete Run",
-      body: formatDeletePreview(preview),
-      confirmLabel: "Delete Run",
-      requiredText: preview.requires_confirmation || runId,
-      inputLabel: `Type ${preview.requires_confirmation || runId} to permanently delete this run.`,
-    });
-    if (!confirmation) {
-      setStatus("Delete cancelled.");
-      return;
-    }
     const result = await api(`/api/runs/${encodeURIComponent(runId)}/delete`, {
       method: "POST",
       body: JSON.stringify({ confirmation, delete_logs: true }),
@@ -2996,8 +3781,6 @@ async function deleteSelectedRun() {
     await loadRuns();
     await loadActivity();
     setStatus(`Deleted ${deletedRunId}. Removed ${result.deleted_paths.length} log/note path(s).`);
-  } catch (error) {
-    throw error;
   } finally {
     state.pendingDeleteRunIds.delete(runId);
     renderRuns();
@@ -3030,28 +3813,32 @@ async function deleteSelectedRuns() {
     setStatus("Select one or more runs first.");
     return;
   }
+  const preview = await api("/api/runs/delete-preview", {
+    method: "POST",
+    body: JSON.stringify({ run_ids: runIds, delete_logs: true }),
+  });
+  if (!preview.run_count) {
+    setStatus("No selected runs can be deleted.");
+    return;
+  }
+  // Deleting many runs must not be easier than deleting one, which requires the
+  // exact run id. A typed acknowledgement keeps the two in proportion.
+  const confirmed = await confirmAction({
+    title: "Delete Selected Runs",
+    body: formatBulkDeletePreview(preview),
+    confirmLabel: "Delete Selected",
+    requiredText: "DELETE",
+    inputLabel: `Type DELETE to permanently remove ${preview.run_count} run(s) and their log files.`,
+  });
+  if (!confirmed) {
+    setStatus("Bulk delete cancelled.");
+    return;
+  }
   state.isBulkDeleting = true;
   runIds.forEach((runId) => state.pendingDeleteRunIds.add(runId));
   updateBulkToolbar();
   renderRuns();
   try {
-    const preview = await api("/api/runs/delete-preview", {
-      method: "POST",
-      body: JSON.stringify({ run_ids: runIds, delete_logs: true }),
-    });
-    if (!preview.run_count) {
-      setStatus("No selected runs can be deleted.");
-      return;
-    }
-    const confirmed = await confirmAction({
-      title: "Delete Selected Runs",
-      body: formatBulkDeletePreview(preview),
-      confirmLabel: "Delete Selected",
-    });
-    if (!confirmed) {
-      setStatus("Bulk delete cancelled.");
-      return;
-    }
     const result = await api("/api/runs/delete", {
       method: "POST",
       body: JSON.stringify({ run_ids: runIds, delete_logs: true, confirm: true }),
@@ -3129,12 +3916,18 @@ async function cancelQueuedRun(runId) {
 
 function applyPreset(kind) {
   const form = $("#train-form");
+  const iterations = kind === "smoke" ? 1 : 100;
   if (kind === "smoke") {
     form.elements.num_envs.value = 4;
-    form.elements.max_iterations.value = 1;
   } else {
     form.elements.num_envs.value = 64;
-    form.elements.max_iterations.value = 100;
+  }
+  if (form.elements.training_route.value === "sensor_v2_full") {
+    form.elements.teacher_iterations.value = iterations;
+    form.elements.distillation_iterations.value = iterations;
+    form.elements.ppo_iterations.value = iterations;
+  } else {
+    form.elements.max_iterations.value = iterations;
   }
   form.elements.headless.checked = true;
   form.elements.device.value = "cuda:0";
@@ -3149,19 +3942,114 @@ function applyTrainingParamsToForm(params) {
   const form = $("#train-form");
   if (!form || !params) return;
   form.elements.task.value = params.task || "Template-Redrhex-Direct-v0";
+  form.elements.training_route.value = params.training_route || "standard";
   form.elements.num_envs.value = params.num_envs ?? 4;
   form.elements.max_iterations.value = params.max_iterations ?? 1;
+  form.elements.teacher_iterations.value = params.teacher_iterations ?? 1500;
+  form.elements.distillation_iterations.value = params.distillation_iterations ?? 800;
+  form.elements.ppo_iterations.value = params.ppo_iterations ?? 1500;
   form.elements.device.value = params.device || "cuda:0";
-  form.elements.spring_backend.value = params.spring_backend || "explicit";
+  form.elements.spring_backend.value = params.spring_backend || "native";
   form.elements.seed.value = params.seed ?? "";
   form.elements.checkpoint.value = "";
   form.elements.headless.checked = IS_REMOTE_DESKTOP || params.headless !== false;
+  updateTrainingRouteForm();
+}
+
+function updateTrainingRouteForm() {
+  const form = $("#train-form");
+  if (!form) return;
+  const route = form.elements.training_route.value || "standard";
+  const isSensor = route.startsWith("sensor_v2");
+  const isPipeline = route === "sensor_v2_full";
+  const requiresCheckpoint = route === "sensor_v2_distillation" || route === "sensor_v2_ppo";
+  const routeUi = {
+    standard: {
+      title: "Standard PPO",
+      help: "Trains one policy directly. No teacher/student distillation stages.",
+      iterations: "Iterations",
+      iterationsHelp: "Number of PPO training updates.",
+      checkpoint: "Resume Checkpoint (Optional)",
+      checkpointHelp: "Leave empty for a new run, or select Resume on a compatible History run.",
+      checkpointPlaceholder: "Select Resume on a history run",
+    },
+    sensor_v2_full: {
+      title: "Full Sensor V2 Pipeline",
+      help: "Runs F1 Teacher, F2 Distillation, and F3 Student PPO in sequence. Set only the three stage iteration counts below.",
+    },
+    sensor_v2_teacher: {
+      title: "F1 Teacher Only",
+      help: "Advanced single-stage run that produces a teacher_v2 checkpoint.",
+      iterations: "F1 Teacher Iterations",
+      iterationsHelp: "Number of Teacher PPO updates.",
+      checkpoint: "Resume Teacher Checkpoint (Optional)",
+      checkpointHelp: "Leave empty for a new Teacher, or resume a compatible F1 Teacher checkpoint from History.",
+      checkpointPlaceholder: "Optional: resume an F1 Teacher run from History",
+    },
+    sensor_v2_distillation: {
+      title: "F2 Distillation Only",
+      help: "Advanced single-stage run. Select a completed F1 Teacher checkpoint from History before starting.",
+      iterations: "F2 Distillation Iterations",
+      iterationsHelp: "Number of teacher-to-student distillation updates.",
+      checkpoint: "Teacher Checkpoint",
+      checkpointHelp: "Required: select Resume on a compatible F1 Teacher run in History.",
+      checkpointPlaceholder: "Required: select an F1 Teacher run from History",
+    },
+    sensor_v2_ppo: {
+      title: "F3 Student PPO Only",
+      help: "Advanced single-stage run. Select a completed F2 distilled-student checkpoint from History before starting.",
+      iterations: "F3 Student PPO Iterations",
+      iterationsHelp: "Number of Student PPO refinement updates.",
+      checkpoint: "Distilled Student Checkpoint",
+      checkpointHelp: "Required: select Resume on a compatible F2 Distillation run in History.",
+      checkpointPlaceholder: "Required: select an F2 Distillation run from History",
+    },
+  }[route];
+  if (isSensor) {
+    form.elements.task.value = "Template-Redrhex-ForwardSensorV2-Direct-v0";
+  } else if (form.elements.task.value === "Template-Redrhex-ForwardSensorV2-Direct-v0") {
+    form.elements.task.value = "Template-Redrhex-ForwardFast-Direct-v0";
+  }
+  const taskField = $("#training-task-field");
+  if (taskField) taskField.hidden = isSensor;
+  if (isPipeline) form.elements.checkpoint.value = "";
+  document.querySelectorAll(".sensor-v2-pipeline-field").forEach((element) => {
+    element.hidden = !isPipeline;
+    const input = element.querySelector("input");
+    if (input) input.disabled = !isPipeline;
+  });
+  const singleIterations = $("#single-stage-iterations-field");
+  if (singleIterations) singleIterations.hidden = isPipeline;
+  form.elements.max_iterations.disabled = isPipeline;
+  const checkpointField = $("#training-checkpoint-field");
+  if (checkpointField) checkpointField.hidden = isPipeline;
+  form.elements.checkpoint.disabled = isPipeline;
+  form.elements.checkpoint.required = requiresCheckpoint;
+  document.querySelectorAll("#train-form .preset-indicator").forEach((element) => {
+    element.hidden = isSensor && !element.querySelector("#train-active-physics-preset-name");
+  });
+  const clearResumeButton = $("#clear-resume");
+  if (clearResumeButton) clearResumeButton.hidden = isPipeline;
+  const title = $("#training-route-summary-title");
+  const help = $("#training-route-help");
+  if (title) title.textContent = routeUi?.title || "Training Mode";
+  if (help) help.textContent = routeUi?.help || "";
+  const iterationsLabel = $("#single-stage-iterations-label");
+  const iterationsHelp = $("#single-stage-iterations-help");
+  if (iterationsLabel) iterationsLabel.textContent = routeUi?.iterations || "Iterations";
+  if (iterationsHelp) iterationsHelp.textContent = routeUi?.iterationsHelp || "";
+  const checkpointLabel = $("#training-checkpoint-label");
+  const checkpointHelp = $("#training-checkpoint-help");
+  if (checkpointLabel) checkpointLabel.textContent = routeUi?.checkpoint || "";
+  if (checkpointHelp) checkpointHelp.textContent = routeUi?.checkpointHelp || "";
+  form.elements.checkpoint.placeholder = routeUi?.checkpointPlaceholder || "";
 }
 
 async function applyTweakPayload(payload) {
   if (!payload || !payload.training_params || !payload.reward_preset) return;
   if (!state.presets.length) await loadRewardsPage();
   if (!state.terrainPresets.length) await loadTerrainPage();
+  if (!state.physicsPresets.length) await loadPhysicsPage();
   const params = payload.training_params;
   applyTrainingParamsToForm(params);
   state.rewardDraftPreset = {
@@ -3176,8 +4064,20 @@ async function applyTweakPayload(payload) {
   state.activeTerrainPresetId = params.terrain_preset_id || "baseline";
   state.selectedTerrainPresetId = state.activeTerrainPresetId;
   state.activeTerrainPresetOverrides = params.terrain_overrides || {};
+  state.physicsDraftPreset = {
+    id: `physics-${state.rewardDraftPreset.id}`,
+    name: `Physics from ${state.rewardDraftPreset.source_label || "run"}`,
+    description: `Unsaved physical overrides copied from ${state.rewardDraftPreset.source_label || "run"}.`,
+    values: { ...(params.physics_overrides || {}) },
+    built_in: false,
+    draft: true,
+  };
+  state.selectedPhysicsPresetId = state.physicsDraftPreset.id;
+  state.activePhysicsPresetId = state.physicsDraftPreset.id;
+  state.physicsDraftValues = { ...state.physicsDraftPreset.values };
   renderPresets();
   renderTerrainPresets();
+  renderPhysicsPresets();
   setView("rewards");
   selectPresetForEdit(state.rewardDraftPreset.id);
   $("#train-status").textContent = payload.message || `Loaded tweak draft from ${state.rewardDraftPreset.source_label || "run"}.`;
@@ -3208,6 +4108,14 @@ async function tweakFromRun(runId) {
 const REWARD_MAX_SCALE = 8; // denominator for bar fill percentage
 
 const REWARD_META = {
+  "v2_reward_scales.forward_progress":       { label: "Forward Progress",          category: "Simplified Forward",       sign: "positive", description: "Rewards commanded-direction progress without making raw speed the only goal." },
+  "v2_reward_scales.velocity_tracking":      { label: "Forward Tracking",          category: "Simplified Forward",       sign: "positive", description: "Rewards matching the commanded forward speed." },
+  "v2_reward_scales.axis_suppression":       { label: "Drift Suppression",          category: "Simplified Forward",       sign: "positive", description: "Penalises uncommanded lateral and yaw motion; the stored weight is a positive penalty magnitude." },
+  "v2_reward_scales.height_maintain":        { label: "Height Tracking",            category: "Simplified Forward",       sign: "positive", description: "Rewards maintaining the target body height." },
+  "v2_reward_scales.height_low_penalty":     { label: "Low Height Penalty",         category: "Simplified Forward",       sign: "positive", description: "Penalises dropping below the target body height; the stored weight is a positive penalty magnitude." },
+  "v2_reward_scales.leg_moving":             { label: "Useful Leg Motion",          category: "Simplified Forward",       sign: "positive", description: "Rewards leg rotation gated by command and forward progress." },
+  "v2_reward_scales.stall_penalty":          { label: "Stall Penalty",              category: "Simplified Forward",       sign: "negative", description: "Penalises commanded motion with almost no progress." },
+  "v2_reward_scales.energy_per_distance":    { label: "Energy Per Distance",        category: "Simplified Forward",       sign: "positive", description: "Penalises energy spent per positive commanded-direction distance; the stored weight is a positive penalty magnitude." },
   rew_scale_forward_vel:       { label: "Forward Velocity",          category: "Locomotion Goals",      sign: "positive", description: "Rewards moving in the commanded direction. Higher = robot pushes harder to move but may sacrifice stability." },
   rew_scale_vel_tracking:      { label: "Velocity Tracking (Linear)", category: "Locomotion Goals",      sign: "positive", description: "Rewards precisely matching the commanded XY speed (exponential loss). Higher = tighter speed following." },
   rew_scale_ang_vel_tracking:  { label: "Velocity Tracking (Turn)",  category: "Locomotion Goals",      sign: "positive", description: "Rewards matching the commanded turn rate. Higher = robot follows rotation commands more closely." },
@@ -3235,7 +4143,7 @@ const REWARD_META = {
 };
 
 const REWARD_CATEGORY_ORDER = [
-  "Locomotion Goals", "Rotation Mode", "Leg Motion",
+  "Simplified Forward", "Locomotion Goals", "Rotation Mode", "Leg Motion",
   "Stability Penalties", "Gait Coordination", "ABAD Control",
   "Survival & Smoothness", "Collision",
 ];
@@ -3865,6 +4773,286 @@ async function createNewTerrainPreset() {
   setTerrainStatus(`Created terrain preset ${preset.name}.`);
 }
 
+// ============================================================
+// Physics & sparse CalibrationProfileV1 presets
+// ============================================================
+
+function setPhysicsStatus(message) {
+  const status = $("#physics-status");
+  if (status) status.textContent = message;
+}
+
+function physicsPresetById(presetId) {
+  if (state.physicsDraftPreset?.id === presetId) return state.physicsDraftPreset;
+  return state.physicsPresets.find((preset) => preset.id === presetId);
+}
+
+function physicsDefaultText(meta) {
+  if (meta.default === null || meta.default === undefined) return "repository / USD default";
+  return `${meta.default}${meta.unit ? ` ${meta.unit}` : ""}`;
+}
+
+function updatePhysicsChangeSummary() {
+  const count = Object.keys(state.physicsDraftValues || {}).length;
+  const summary = $("#physics-change-summary");
+  if (summary) summary.textContent = `${count} override${count === 1 ? "" : "s"}`;
+}
+
+function renderPhysicsPresets() {
+  const list = $("#physics-preset-list");
+  if (!list) return;
+  const presets = state.physicsDraftPreset
+    ? [state.physicsDraftPreset, ...state.physicsPresets.filter((preset) => preset.id !== state.physicsDraftPreset.id)]
+    : state.physicsPresets;
+  list.innerHTML = presets.map((preset) => `
+    <div class="preset-card ${preset.id === state.selectedPhysicsPresetId ? "selected" : ""} ${preset.draft ? "draft-preset" : ""}"
+         data-physics-preset-id="${escapeHtml(preset.id)}"
+         title="${escapeHtml(preset.description || "")}">
+      <div class="preset-card-name">${escapeHtml(preset.name)}${preset.draft ? ` <span class="draft-badge">Draft</span>` : ""}</div>
+      <div class="preset-card-desc">${escapeHtml(preset.description || "No description")}</div>
+      <small>${Object.keys(preset.values || {}).length} override${Object.keys(preset.values || {}).length === 1 ? "" : "s"}</small>
+    </div>`).join("");
+  list.querySelectorAll("[data-physics-preset-id]").forEach((card) => {
+    card.addEventListener("click", () => selectPhysicsPresetForEdit(card.dataset.physicsPresetId));
+  });
+  updateTrainingPresetIndicators();
+}
+
+function renderPhysicsEditor() {
+  const preset = physicsPresetById(state.selectedPhysicsPresetId);
+  const container = $("#physics-categories");
+  if (!container || !preset) {
+    if (container) container.innerHTML = "";
+    updatePhysicsChangeSummary();
+    return;
+  }
+  const search = state.physicsSearch.trim().toLowerCase();
+  const grouped = new Map();
+  for (const meta of state.physicsSchema) {
+    const overridden = Object.hasOwn(state.physicsDraftValues, meta.key);
+    if (state.physicsChangedOnly && !overridden) continue;
+    const haystack = `${meta.label} ${meta.key} ${meta.category} ${meta.description} ${meta.unit}`.toLowerCase();
+    if (search && !haystack.includes(search)) continue;
+    if (!grouped.has(meta.category)) grouped.set(meta.category, []);
+    grouped.get(meta.category).push({ meta, overridden });
+  }
+  const editable = !preset.built_in;
+  container.innerHTML = [...grouped.entries()].map(([category, fields]) => `
+    <div class="reward-category physics-category">
+      <div class="reward-category-header physics-category-header" data-physics-category-header>
+        <span class="category-arrow">▼</span>
+        <span>${escapeHtml(category)}</span>
+        <span class="status-badge muted-pill">${fields.filter((item) => item.overridden).length}/${fields.length} changed</span>
+      </div>
+      <div class="reward-category-body">
+        ${fields.map(({ meta, overridden }) => {
+          const value = overridden ? state.physicsDraftValues[meta.key] : "";
+          const min = meta.min === null || meta.min === undefined ? "" : `min="${escapeHtml(meta.min)}"`;
+          const max = meta.max === null || meta.max === undefined ? "" : `max="${escapeHtml(meta.max)}"`;
+          return `<div class="reward-row physics-row ${overridden ? "is-overridden" : ""}">
+            <div class="reward-row-meta physics-row-meta">
+              <div class="reward-row-label">${escapeHtml(meta.label)}</div>
+              <div class="reward-row-desc">${escapeHtml(meta.description || "")}</div>
+              <div class="reward-row-varname">${escapeHtml(meta.key)}</div>
+            </div>
+            <div class="physics-control-cell">
+              <div class="physics-input-line">
+                <input class="physics-row-input" data-physics-key="${escapeHtml(meta.key)}" type="number"
+                  step="${escapeHtml(meta.step ?? 0.01)}" ${min} ${max}
+                  value="${escapeHtml(value)}" placeholder="Inherit" ${editable ? "" : "disabled"} />
+                ${meta.unit ? `<span class="physics-unit">${escapeHtml(meta.unit)}</span>` : ""}
+                <button type="button" class="ghost-button small-button physics-reset" data-physics-reset="${escapeHtml(meta.key)}"
+                  ${editable && overridden ? "" : "disabled"}>Reset</button>
+              </div>
+              <small class="physics-default">Inherited value: ${escapeHtml(physicsDefaultText(meta))}</small>
+            </div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>`).join("");
+  if (!grouped.size) {
+    container.innerHTML = `<article class="empty-panel">No physical quantities match this filter.</article>`;
+  }
+  container.querySelectorAll("[data-physics-category-header]").forEach((header) => {
+    header.addEventListener("click", () => togglePhysicsCategory(header));
+  });
+  container.querySelectorAll("[data-physics-key]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const key = input.dataset.physicsKey;
+      if (!key) return;
+      if (input.value === "") {
+        delete state.physicsDraftValues[key];
+      } else {
+        const value = Number(input.value);
+        if (Number.isFinite(value)) state.physicsDraftValues[key] = value;
+      }
+      input.closest(".physics-row")?.classList.toggle("is-overridden", Object.hasOwn(state.physicsDraftValues, key));
+      const reset = input.closest(".physics-control-cell")?.querySelector("[data-physics-reset]");
+      if (reset) reset.disabled = !Object.hasOwn(state.physicsDraftValues, key);
+      const category = input.closest(".physics-category");
+      const categoryBadge = category?.querySelector(".physics-category-header .status-badge");
+      if (categoryBadge) {
+        const changed = category.querySelectorAll(".physics-row.is-overridden").length;
+        const total = category.querySelectorAll(".physics-row").length;
+        categoryBadge.textContent = `${changed}/${total} changed`;
+      }
+      updatePhysicsChangeSummary();
+      setPhysicsStatus("Unsaved overrides are selected for the next training run; save to keep this preset.");
+    });
+  });
+  container.querySelectorAll("[data-physics-reset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      delete state.physicsDraftValues[button.dataset.physicsReset];
+      renderPhysicsEditor();
+      setPhysicsStatus("Override reset to the inherited value. Save to keep this preset.");
+    });
+  });
+  updatePhysicsChangeSummary();
+  updateCategoryToggleButton("#physics-categories", "#physics-preset-collapse-all-btn");
+}
+
+function togglePhysicsCategory(header) {
+  header.classList.toggle("collapsed");
+  header.nextElementSibling?.classList.toggle("collapsed");
+  updateCategoryToggleButton("#physics-categories", "#physics-preset-collapse-all-btn");
+}
+
+function togglePhysicsCategoriesCollapsed() {
+  toggleCategoryGroupCollapsed("#physics-categories", "#physics-preset-collapse-all-btn");
+}
+
+function selectPhysicsPresetForEdit(presetId) {
+  const preset = physicsPresetById(presetId);
+  if (!preset) return;
+  state.selectedPhysicsPresetId = presetId;
+  state.physicsDraftValues = { ...(preset.values || {}) };
+  renderPhysicsPresets();
+  $("#physics-editor-title").textContent = preset.name;
+  $("#physics-editor-title").hidden = false;
+  $("#physics-editor-desc").textContent = preset.description || "";
+  $("#physics-editor-desc").hidden = !preset.description;
+  $("#physics-profile-name").value = preset.name || "";
+  $("#physics-profile-name").disabled = Boolean(preset.built_in);
+  $("#physics-profile-description").value = preset.description || "";
+  $("#physics-profile-description").disabled = Boolean(preset.built_in);
+  $("#physics-preset-builtin-badge").hidden = !preset.built_in && !preset.draft;
+  $("#physics-preset-builtin-badge").textContent = preset.draft ? "Unsaved Draft" : "Built-in";
+  $("#physics-preset-collapse-all-btn").disabled = false;
+  $("#physics-preset-duplicate-btn").disabled = false;
+  $("#physics-preset-delete-btn").disabled = Boolean(preset.built_in) && !preset.draft;
+  $("#physics-preset-delete-btn").textContent = preset.draft ? "Discard Draft" : "Delete";
+  $("#physics-preset-save-btn").disabled = Boolean(preset.built_in) && !preset.draft;
+  $("#physics-preset-save-btn").textContent = preset.draft ? "Save as Preset" : "Save Changes";
+  $("#physics-search").disabled = false;
+  $("#physics-changed-only").disabled = false;
+  renderPhysicsEditor();
+  updateTrainingPresetIndicators();
+}
+
+async function loadPhysicsPage() {
+  try {
+    const [catalog, presets] = await Promise.all([api("/api/physics"), api("/api/physics/presets")]);
+    state.physicsSchema = catalog.field_schema || [];
+    state.physicsPresets = presets.presets || [];
+    state.activePhysicsPresetId = presets.active_preset_id || "baseline";
+    const selected = physicsPresetById(state.selectedPhysicsPresetId)
+      ? state.selectedPhysicsPresetId
+      : state.activePhysicsPresetId;
+    renderPhysicsPresets();
+    selectPhysicsPresetForEdit(selected);
+    setPhysicsStatus(`${catalog.field_count || state.physicsSchema.length} validated physical quantities available.`);
+  } catch (error) {
+    state.physicsSchema = [];
+    state.physicsPresets = [];
+    $("#physics-preset-list").innerHTML = `<article class="empty-panel">Physics API is unavailable. Restart the local panel so its backend reloads this feature.</article>`;
+    $("#physics-categories").innerHTML = "";
+    setPhysicsStatus(error.message);
+  }
+}
+
+async function duplicatePhysicsPreset(sourcePresetId) {
+  const source = physicsPresetById(sourcePresetId);
+  if (!source) return;
+  const name = window.prompt(`Name for the new physics preset (copy of ${source.name}):`, `${source.name} (copy)`);
+  if (!name) return;
+  const values = sourcePresetId === state.selectedPhysicsPresetId ? state.physicsDraftValues : source.values;
+  const created = await api("/api/physics/presets", {
+    method: "POST",
+    body: JSON.stringify({ name, description: source.description || "", values: values || {} }),
+  });
+  await loadPhysicsPage();
+  selectPhysicsPresetForEdit(created.id);
+  setPhysicsStatus(`Created physics preset ${created.name}.`);
+}
+
+async function createNewPhysicsPreset() {
+  const name = window.prompt("New physics preset name:");
+  if (!name?.trim()) return;
+  const created = await api("/api/physics/presets", {
+    method: "POST",
+    body: JSON.stringify({ name: name.trim(), description: "", values: {} }),
+  });
+  await loadPhysicsPage();
+  selectPhysicsPresetForEdit(created.id);
+  setPhysicsStatus(`Created physics preset ${created.name}.`);
+}
+
+async function savePhysicsPresetChanges(presetId) {
+  const preset = physicsPresetById(presetId);
+  if (!preset || preset.built_in) return;
+  if (preset.draft) {
+    const created = await api("/api/physics/presets", {
+      method: "POST",
+      body: JSON.stringify({
+        name: $("#physics-profile-name").value || preset.name,
+        description: $("#physics-profile-description").value || "",
+        values: state.physicsDraftValues,
+      }),
+    });
+    state.physicsDraftPreset = null;
+    state.selectedPhysicsPresetId = created.id;
+    await loadPhysicsPage();
+    selectPhysicsPresetForEdit(created.id);
+    await loadActivity();
+    setPhysicsStatus("Tweak draft saved as a physics preset.");
+    return;
+  }
+  const updated = await api(`/api/physics/presets/${encodeURIComponent(presetId)}/update`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: $("#physics-profile-name").value,
+      description: $("#physics-profile-description").value,
+      values: state.physicsDraftValues,
+    }),
+  });
+  await loadPhysicsPage();
+  selectPhysicsPresetForEdit(updated.id);
+  await loadActivity();
+  setPhysicsStatus("Physics preset saved and selected for the next training run.");
+}
+
+async function deletePhysicsPreset(presetId) {
+  const preset = physicsPresetById(presetId);
+  if (!preset || preset.built_in) return;
+  if (preset.draft) {
+    state.physicsDraftPreset = null;
+    if (state.activePhysicsPresetId === presetId) state.activePhysicsPresetId = "baseline";
+    state.selectedPhysicsPresetId = state.activePhysicsPresetId || "baseline";
+    selectPhysicsPresetForEdit(state.selectedPhysicsPresetId);
+    setPhysicsStatus("Physics tweak draft discarded.");
+    return;
+  }
+  if (!window.confirm(`Delete physics preset "${preset.name}"? This cannot be undone.`)) return;
+  await api(`/api/physics/presets/${encodeURIComponent(presetId)}/delete`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  state.selectedPhysicsPresetId = null;
+  await loadPhysicsPage();
+  await loadActivity();
+  setPhysicsStatus(`Deleted physics preset ${preset.name}.`);
+}
+
 // Run detail: reward config panel
 function updateRewardCompareToggle() {
   document.querySelectorAll("#reward-compare-mode [data-compare-mode]").forEach((button) => {
@@ -3988,6 +5176,7 @@ function startComparison(runId) {
 }
 
 function exitComparison() {
+  if (!state.comparisonMode && !state.comparisonRun) return;
   state.comparisonRun = null;
   state.comparisonMode = false;
   renderRunDetails();
@@ -4027,22 +5216,16 @@ function renderComparisonPanel(runA, runB) {
     comparisonRowHtml("Has notes", runA.has_notes ? "Yes" : "No", runB.has_notes ? "Yes" : "No"),
     comparisonRowHtml("Has video", runA.has_video ? "Yes" : "No", runB.has_video ? "Yes" : "No"),
   ];
-  const panel = document.querySelector(".details-panel");
-  if (!panel) return;
-  panel.innerHTML = `
-    <div class="comparison-header">
-      <h2>Comparing Runs</h2>
-      <button type="button" id="exit-comparison-btn" class="ghost-button small-button">✕ Close Comparison</button>
-    </div>
-    <div class="comparison-grid">
-      <div class="comparison-label comparison-col-header"></div>
-      <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runA.display_name || runA.id)}</strong></div>
-      <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runB.display_name || runB.id)}</strong></div>
-      ${rows.join("")}
-    </div>
+  // Only the grid is replaced. The comparison panel is a sibling of
+  // .details-panel precisely so this never destroys ids the app still holds.
+  const grid = $("#comparison-grid");
+  if (!grid) return;
+  grid.innerHTML = `
+    <div class="comparison-label comparison-col-header"></div>
+    <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runA.display_name || runA.id)}</strong></div>
+    <div class="comparison-val comparison-col-header"><strong>${escapeHtml(runB.display_name || runB.id)}</strong></div>
+    ${rows.join("")}
   `;
-  const exitBtn = $("#exit-comparison-btn");
-  if (exitBtn) exitBtn.addEventListener("click", exitComparison);
 }
 
 // ============================================================
@@ -4062,9 +5245,16 @@ function updateBulkToolbar() {
   const move = $("#move-selected-runs");
   const clear = $("#clear-selected-runs");
   const deleteButton = $("#delete-selected-runs");
+  const selectVisible = $("#select-visible-runs");
+  const folderSelect = $("#bulk-folder-select");
   const selectedCount = state.selectedRunIds.size;
   const bulkBusy = state.isBulkDeleting || isPending("folder", "bulk");
-  if (count) count.textContent = `${selectedCount} selected`;
+  if (count) {
+    count.textContent = `${selectedCount} selected`;
+    count.classList.toggle("has-selection", selectedCount > 0);
+  }
+  if (selectVisible) selectVisible.disabled = bulkBusy || !state.runs.length;
+  if (folderSelect) folderSelect.disabled = selectedCount === 0 || bulkBusy;
   if (move) {
     move.disabled = selectedCount === 0 || bulkBusy;
     move.textContent = isPending("folder", "bulk") ? "Moving..." : "Move selected";
@@ -4080,7 +5270,26 @@ function toggleRunSelection(runId, checked) {
   if (!runId) return;
   if (checked) state.selectedRunIds.add(runId);
   else state.selectedRunIds.delete(runId);
+  state.lastSelectedRunId = runId;
   updateBulkToolbar();
+}
+
+// Shift-click applies the clicked checkbox's new state across the visible span
+// between the anchor and the clicked run, matching every other list UI.
+function selectRunRange(anchorRunId, runId, checked) {
+  const visible = visibleRunIds();
+  const from = visible.indexOf(anchorRunId);
+  const to = visible.indexOf(runId);
+  if (from === -1 || to === -1) {
+    toggleRunSelection(runId, checked);
+    return;
+  }
+  const [start, end] = from <= to ? [from, to] : [to, from];
+  for (const id of visible.slice(start, end + 1)) {
+    if (checked) state.selectedRunIds.add(id);
+    else state.selectedRunIds.delete(id);
+  }
+  renderRuns();
 }
 
 function selectVisibleRuns() {
@@ -4149,32 +5358,37 @@ function renderFolderSidebar() {
   for (const folder of state.folders) {
     folderCounts[folder] = state.runs.filter((r) => r.folder === folder).length;
   }
-  const uncatActive = state.activeFolder === "" ? "active" : "";
-  const allActive = state.activeFolder === null ? "active" : "";
+  // "All Runs" is a view, not a destination, so it is the one row that does not
+  // accept a drop.
+  const folderRow = (key, label, count, extras = "") => {
+    const active = state.activeFolder === (key === "__all__" ? null : key === "__uncategorized__" ? "" : key);
+    const droppable = key !== "__all__";
+    return `<div class="folder-item ${active ? "active" : ""}" ${droppable ? `data-drop-folder="${escapeHtml(key)}"` : ""}>
+      <button type="button" class="folder-select" data-folder="${escapeHtml(key)}" aria-pressed="${active}" title="${escapeHtml(label)}">
+        <span class="folder-name">${escapeHtml(label)}</span>
+        <span class="folder-count">${escapeHtml(String(count))}</span>
+      </button>
+      ${extras}
+    </div>`;
+  };
   const folderItems = state.folders
-    .map((f) => {
-      const active = state.activeFolder === f ? "active" : "";
-      return `<div class="folder-item ${active}" data-folder="${escapeHtml(f)}">
-        <span class="folder-name">${escapeHtml(f)}</span>
-        <span class="folder-count">${folderCounts[f] || 0}</span>
-        <button type="button" class="folder-rename-button" data-folder="${escapeHtml(f)}" data-tooltip="Rename folder">Rename</button>
-        <button type="button" class="folder-delete-button" data-folder="${escapeHtml(f)}" data-tooltip="Remove folder">×</button>
-      </div>`;
-    })
+    .map((f) =>
+      folderRow(
+        f,
+        f,
+        folderCounts[f] || 0,
+        `<button type="button" class="folder-rename-button" data-folder="${escapeHtml(f)}" aria-label="Rename folder ${escapeHtml(f)}" data-tooltip="Rename folder">Rename</button>
+         <button type="button" class="folder-delete-button" data-folder="${escapeHtml(f)}" aria-label="Remove folder ${escapeHtml(f)}" data-tooltip="Remove folder">×</button>`
+      )
+    )
     .join("");
   sidebar.innerHTML = `
     <button type="button" id="create-folder-btn" class="folder-create-button" data-tooltip="Create empty folder">
       <span class="folder-create-symbol">+</span>
       <span>New Folder</span>
     </button>
-    <div class="folder-item ${uncatActive}" data-folder="__uncategorized__">
-      <span class="folder-name">Uncategorized</span>
-      <span class="folder-count">${uncategorized}</span>
-    </div>
-    <div class="folder-item ${allActive}" data-folder="__all__">
-      <span class="folder-name">All Runs</span>
-      <span class="folder-count">${total}</span>
-    </div>
+    ${folderRow("__all__", "All Runs", total)}
+    ${folderRow("__uncategorized__", "Uncategorized", uncategorized)}
     ${folderItems}
   `;
   const createButton = sidebar.querySelector("#create-folder-btn");
@@ -4196,12 +5410,60 @@ function renderFolderSidebar() {
       promptRenameFolder(button.dataset.folder).catch(handleActionError);
     });
   });
-  sidebar.querySelectorAll(".folder-item").forEach((item) => {
+  if (state.folderJustReceived) {
+    const received = sidebar.querySelector(
+      `[data-drop-folder="${CSS.escape(state.folderJustReceived)}"]`
+    );
+    state.folderJustReceived = null;
+    if (received) {
+      received.classList.add("drop-received");
+      received.addEventListener("animationend", () => received.classList.remove("drop-received"), {
+        once: true,
+      });
+    }
+  }
+  sidebar.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    target.addEventListener("dragover", (event) => {
+      if (!state.draggingRunIds.length) return;
+      event.preventDefault();
+      const unavailable = target.classList.contains("drop-unavailable");
+      if (event.dataTransfer) event.dataTransfer.dropEffect = unavailable ? "none" : "move";
+      if (!unavailable) target.classList.add("drop-target");
+    });
+    target.addEventListener("dragleave", (event) => {
+      // Moving across a child element fires dragleave on the row itself.
+      if (target.contains(event.relatedTarget)) return;
+      target.classList.remove("drop-target");
+    });
+    target.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const unavailable = target.classList.contains("drop-unavailable");
+      const runIds = state.draggingRunIds.length
+        ? [...state.draggingRunIds]
+        : String(event.dataTransfer?.getData("text/plain") || "").split(",").filter(Boolean);
+      const raw = target.dataset.dropFolder;
+      const folder = raw === "__uncategorized__" ? "" : raw;
+      endRunDrag();
+      if (!runIds.length || unavailable) return;
+      // The row confirms it caught the runs; the list below it is about to
+      // change, and the toast alone is easy to miss at the far corner.
+      state.folderJustReceived = raw;
+      target.classList.add("drop-received");
+      target.addEventListener("animationend", () => target.classList.remove("drop-received"), {
+        once: true,
+      });
+      // Only a drag that carried the selection should consume it.
+      const clearSelection = runIds.length > 1 || state.selectedRunIds.has(runIds[0]);
+      assignRunsToFolder(runIds, folder, { clearSelection }).catch(handleActionError);
+    });
+  });
+  sidebar.querySelectorAll(".folder-select").forEach((item) => {
     item.addEventListener("click", () => {
       const raw = item.dataset.folder;
       if (raw === "__all__") state.activeFolder = null;
       else if (raw === "__uncategorized__") state.activeFolder = "";
       else state.activeFolder = raw;
+      saveHistoryFilters();
       renderFolderSidebar();
       renderRuns();
     });
@@ -4213,15 +5475,23 @@ async function deleteFolder(folderName) {
   if (!folder) return;
   const count = state.runs.filter((run) => run.folder === folder).length;
   const message = count
-    ? `Remove folder "${folder}"? ${count} run${count !== 1 ? "s" : ""} will move to Uncategorized.`
+    ? `Remove folder "${folder}"? ${count} run${count !== 1 ? "s" : ""} will move to Uncategorized. The runs themselves are kept.`
     : `Remove empty folder "${folder}"?`;
-  if (!window.confirm(message)) return;
+  const confirmed = await confirmAction({
+    title: "Remove Folder",
+    body: message,
+    confirmLabel: "Remove Folder",
+  });
+  if (!confirmed) return;
   const data = await api("/api/folders/delete", {
     method: "POST",
     body: JSON.stringify({ folder }),
   });
   state.folders = data.folders || state.folders.filter((item) => item !== folder);
-  if (state.activeFolder === folder) state.activeFolder = "";
+  if (state.activeFolder === folder) {
+    state.activeFolder = null;
+    saveHistoryFilters();
+  }
   await loadRuns();
   await loadActivity();
   setStatus(`Removed folder ${folder}. Moved ${data.moved_count || 0} run${data.moved_count === 1 ? "" : "s"} to Uncategorized.`);
@@ -4243,9 +5513,16 @@ async function renameFolder(oldName, newName) {
 async function promptRenameFolder(folderName) {
   const oldName = String(folderName || "").trim();
   if (!oldName) return;
-  const nextName = window.prompt("Rename folder:", oldName);
-  if (!nextName || !nextName.trim() || nextName.trim() === oldName) return;
-  await renameFolder(oldName, nextName.trim());
+  const nextName = await confirmAction({
+    title: "Rename Folder",
+    body: `Rename "${oldName}". Runs stay in the folder.`,
+    confirmLabel: "Rename",
+    textInput: true,
+    initialValue: oldName,
+    inputLabel: "Folder name",
+  });
+  if (!nextName || nextName === oldName) return;
+  await renameFolder(oldName, nextName);
 }
 
 function renderFolderOptions() {
@@ -4289,9 +5566,16 @@ async function createFolder(folderName) {
 }
 
 async function promptCreateFolder() {
-  const name = window.prompt("New folder name:");
-  if (!name || !name.trim()) return;
-  const folder = await createFolder(name.trim());
+  const name = await confirmAction({
+    title: "New Folder",
+    body: "Folders group runs in History. They do not move anything on disk.",
+    confirmLabel: "Create Folder",
+    textInput: true,
+    placeholder: "e.g. forward-fast-sweep",
+    inputLabel: "Folder name",
+  });
+  if (!name) return;
+  const folder = await createFolder(name);
   const bulkSelect = $("#bulk-folder-select");
   if (bulkSelect) bulkSelect.value = folder;
 }
@@ -4683,7 +5967,7 @@ async function loadActivity() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadActivity(), loadDeployDefaults()]);
+  await Promise.all([loadSystem(), loadRemoteStatus(), loadConvergenceSettings(), loadRewardsPage(), loadTerrainPage(), loadPhysicsPage(), loadActivity(), loadDeployDefaults()]);
   await loadRuns();
   if (state.selectedRun) setDebugTarget({ type: "run", id: state.selectedRun.id });
 }
@@ -4708,6 +5992,113 @@ async function loadConvergenceSettings() {
   }
 }
 
+// The saved config, kept so the Save button can tell an operator whether the
+// form in front of them still matches what mother is actually running.
+function convergenceFormPayload() {
+  const preset = document.querySelector("#convergence-presets .segment-button.active")?.dataset.preset || "default";
+  const payload = {
+    enabled: Boolean($("#convergence-enabled")?.checked),
+    preset,
+    auto_record_video: Boolean($("#convergence-auto-record")?.checked),
+    divergence_enabled: Boolean($("#divergence-enabled")?.checked),
+    divergence_action: $("#divergence-auto-stop")?.checked ? "stop" : "notify",
+    divergence_patience_iterations: parseInt($("#divergence-patience")?.value || "100", 10),
+  };
+  if (preset === "custom") {
+    const window_iterations = parseInt($("#convergence-window")?.value || "200", 10);
+    const min_improvement_pct = parseFloat($("#convergence-threshold")?.value || "2.0");
+    if (!Number.isNaN(window_iterations)) payload.window_iterations = window_iterations;
+    if (!Number.isNaN(min_improvement_pct)) payload.min_improvement_pct = min_improvement_pct;
+  }
+  return payload;
+}
+
+function convergenceSavedPayload(config) {
+  const payload = {
+    enabled: Boolean(config.enabled),
+    preset: config.preset,
+    auto_record_video: Boolean(config.auto_record_video),
+    divergence_enabled: config.divergence_enabled !== false,
+    divergence_action: config.divergence_action === "stop" ? "stop" : "notify",
+    divergence_patience_iterations: Number(config.divergence_patience_iterations ?? 100),
+  };
+  if (config.preset === "custom") {
+    payload.window_iterations = Number(config.window_iterations);
+    payload.min_improvement_pct = Number(config.min_improvement_pct);
+  }
+  return payload;
+}
+
+function syncConvergenceDirtyState() {
+  const hint = $("#convergence-dirty-hint");
+  const saveButton = $("#convergence-save");
+  if (!state.convergenceSaved) return;
+  const dirty = JSON.stringify(convergenceFormPayload()) !== JSON.stringify(state.convergenceSaved);
+  if (hint) hint.hidden = !dirty;
+  if (saveButton) {
+    saveButton.disabled = !dirty;
+    saveButton.dataset.tooltip = dirty
+      ? "Save convergence detection settings to disk. Takes effect on the next training run."
+      : "The form already matches the saved configuration.";
+  }
+}
+
+// Controls that only mean something while their own master switch is on are
+// disabled rather than left looking editable.
+function syncConvergenceControlAvailability() {
+  const enabled = Boolean($("#convergence-enabled")?.checked);
+  const plateauPanel = $("#convergence-plateau-panel");
+  if (plateauPanel) plateauPanel.classList.toggle("panel-inactive", !enabled);
+  document
+    .querySelectorAll("#convergence-presets .segment-button, #convergence-window, #convergence-threshold, #convergence-auto-record")
+    .forEach((el) => {
+      el.disabled = !enabled;
+    });
+
+  const divergenceEnabled = Boolean($("#divergence-enabled")?.checked);
+  const divergencePanel = $("#convergence-divergence-panel");
+  if (divergencePanel) divergencePanel.classList.toggle("panel-inactive", !divergenceEnabled);
+  ["#divergence-auto-stop", "#divergence-patience"].forEach((selector) => {
+    const el = $(selector);
+    if (el) el.disabled = !divergenceEnabled;
+  });
+
+  const actionHint = $("#divergence-action-hint");
+  if (actionHint) {
+    if (!divergenceEnabled) actionHint.textContent = "Divergence is not watched. A collapsing run keeps training until you stop it.";
+    else if ($("#divergence-auto-stop")?.checked) actionHint.textContent = "Diverging runs will be stopped automatically as well as reported.";
+    else actionHint.textContent = "Diverging runs are reported only. Nothing is stopped for you.";
+  }
+}
+
+// Cooldown and the scalar tag are described in Definitions but were never shown
+// anywhere, so the panel could not answer "what is mother actually using?".
+function renderConvergenceInfoGrid(config) {
+  const grid = $("#convergence-info-grid");
+  if (!grid) return;
+  const rows = [
+    ["Detection", config.enabled ? `on · ${config.preset} preset` : "off"],
+    ["Window", `${config.window_iterations} iterations`],
+    ["Max improvement", `${config.min_improvement_pct}%`],
+    ["Minimum iterations", `${config.min_iterations} before any check runs`],
+    ["Cooldown", `${config.cooldown_minutes} minutes between notifications`],
+    ["Scalar tag", config.primary_tag],
+    ["Auto-record", config.auto_record_video ? "on" : "off"],
+    [
+      "Divergence",
+      config.divergence_enabled === false
+        ? "off"
+        : `${config.divergence_action === "stop" ? "stop the run" : "notify only"} · patience ${config.divergence_patience_iterations} iterations · collapse ${config.divergence_collapse_pct}%`,
+    ],
+  ];
+  grid.innerHTML = rows
+    .map(
+      ([key, value]) =>
+        `<span class="info-key">${escapeHtml(key)}</span><span class="info-val">${escapeHtml(String(value ?? ""))}</span>`
+    )
+    .join("");
+}
+
 function renderConvergenceCard(config, presets) {
   const enabledEl = $("#convergence-enabled");
   if (enabledEl) enabledEl.checked = Boolean(config.enabled);
@@ -4721,7 +6112,7 @@ function renderConvergenceCard(config, presets) {
   if (hint) hint.textContent = CONVERGENCE_PRESET_HINTS[config.preset] || "";
 
   const customDiv = $("#convergence-custom-inputs");
-  if (customDiv) customDiv.style.display = config.preset === "custom" ? "" : "none";
+  if (customDiv) customDiv.hidden = config.preset !== "custom";
 
   const windowEl = $("#convergence-window");
   if (windowEl) windowEl.value = config.window_iterations;
@@ -4748,21 +6139,15 @@ function renderConvergenceCard(config, presets) {
       badge.className = "status-badge info-pill";
     }
   }
+
+  renderConvergenceInfoGrid(config);
+  state.convergenceSaved = convergenceSavedPayload(config);
+  syncConvergenceControlAvailability();
+  syncConvergenceDirtyState();
 }
 
 async function saveConvergenceSettings() {
-  const enabled = Boolean($("#convergence-enabled")?.checked);
-  const preset = document.querySelector("#convergence-presets .segment-button.active")?.dataset.preset || "default";
-  const updates = { enabled, preset, auto_record_video: Boolean($("#convergence-auto-record")?.checked) };
-  if (preset === "custom") {
-    const w = parseInt($("#convergence-window")?.value || "200", 10);
-    const t = parseFloat($("#convergence-threshold")?.value || "2.0");
-    if (!Number.isNaN(w)) updates.window_iterations = w;
-    if (!Number.isNaN(t)) updates.min_improvement_pct = t;
-  }
-  updates.divergence_enabled = Boolean($("#divergence-enabled")?.checked);
-  updates.divergence_action = $("#divergence-auto-stop")?.checked ? "stop" : "notify";
-  updates.divergence_patience_iterations = parseInt($("#divergence-patience")?.value || "100", 10);
+  const updates = convergenceFormPayload();
   const data = await api("/api/convergence/settings", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4884,6 +6269,13 @@ $("#record-video").addEventListener("click", () => recordVideo().catch(handleAct
 $("#stop-recording").addEventListener("click", () => stopVideoRecording().catch(handleActionError));
 $("#open-video-folder").addEventListener("click", () => openVideoFolder().catch(handleActionError));
 $("#copy-video-path").addEventListener("click", () => copyVideoPath().catch(handleActionError));
+$("#export-video-drive").addEventListener("click", () => exportVideoToDrive().catch(handleActionError));
+$("#show-latest-video").addEventListener("click", () => selectCheckpointForVideo(null));
+$("#checkpoint-timeline").addEventListener("click", (event) => {
+  const point = event.target.closest("[data-checkpoint-iteration]");
+  if (!point) return;
+  selectCheckpointForVideo(Number(point.dataset.checkpointIteration));
+});
 $("#debug-refresh").addEventListener("click", refreshDebug);
 $("#copy-debug").addEventListener("click", () => copyDebugOutput().catch(handleActionError));
 $("#copy-command").addEventListener("click", () => copyLaunchCommand().catch(handleActionError));
@@ -4962,18 +6354,40 @@ $("#terrain-preset-save-btn").addEventListener("click", () => {
   if (state.selectedTerrainPresetId) saveTerrainPresetChanges(state.selectedTerrainPresetId).catch(handleActionError);
 });
 $("#terrain-preset-collapse-all-btn").addEventListener("click", toggleTerrainCategoriesCollapsed);
+// Physics page event listeners
+$("#physics-preset-duplicate-btn").addEventListener("click", () => {
+  if (state.selectedPhysicsPresetId) duplicatePhysicsPreset(state.selectedPhysicsPresetId).catch(handleActionError);
+});
+$("#physics-preset-delete-btn").addEventListener("click", () => {
+  if (state.selectedPhysicsPresetId) deletePhysicsPreset(state.selectedPhysicsPresetId).catch(handleActionError);
+});
+$("#physics-preset-save-btn").addEventListener("click", () => {
+  if (state.selectedPhysicsPresetId) savePhysicsPresetChanges(state.selectedPhysicsPresetId).catch(handleActionError);
+});
+$("#physics-preset-collapse-all-btn").addEventListener("click", togglePhysicsCategoriesCollapsed);
+$("#physics-search").addEventListener("input", (event) => {
+  state.physicsSearch = event.target.value || "";
+  renderPhysicsEditor();
+});
+$("#physics-changed-only").addEventListener("change", (event) => {
+  state.physicsChangedOnly = event.target.checked;
+  renderPhysicsEditor();
+});
 // Search / filter / sort toolbar
 const runSearch = $("#run-search");
 const statusFilterEl = $("#status-filter");
 const sortRunsEl = $("#sort-runs");
-if (runSearch) runSearch.addEventListener("input", () => { state.searchQuery = runSearch.value; renderRuns(); });
-if (statusFilterEl) statusFilterEl.addEventListener("change", () => { state.statusFilter = statusFilterEl.value; renderRuns(); });
-if (sortRunsEl) sortRunsEl.addEventListener("change", () => { state.sortKey = sortRunsEl.value; renderRuns(); });
+if (runSearch) runSearch.addEventListener("input", () => { state.searchQuery = runSearch.value; saveHistoryFilters(); renderRuns(); });
+if (statusFilterEl) statusFilterEl.addEventListener("change", () => { state.statusFilter = statusFilterEl.value; saveHistoryFilters(); renderRuns(); });
+if (sortRunsEl) sortRunsEl.addEventListener("change", () => { state.sortKey = sortRunsEl.value; saveHistoryFilters(); renderRuns(); });
+const clearFiltersBtn = $("#clear-run-filters");
+if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", clearHistoryFilters);
+const exitComparisonBtn = $("#exit-comparison-btn");
+if (exitComparisonBtn) exitComparisonBtn.addEventListener("click", exitComparison);
 
 $("#new-preset-btn").addEventListener("click", () => createNewPreset().catch(handleActionError));
 $("#new-terrain-preset-btn").addEventListener("click", () => createNewTerrainPreset().catch(handleActionError));
-const newFolderBtn = $("#new-folder-btn");
-if (newFolderBtn) newFolderBtn.addEventListener("click", () => promptCreateFolder().catch(handleActionError));
+$("#new-physics-preset-btn").addEventListener("click", () => createNewPhysicsPreset().catch(handleActionError));
 const folderSelect = $("#run-folder-select");
 if (folderSelect) folderSelect.addEventListener("change", () => assignRunToFolder(folderSelect.value).catch(handleActionError));
 const selectVisibleBtn = $("#select-visible-runs");
@@ -4988,6 +6402,10 @@ const trainChangePreset = $("#train-change-preset");
 if (trainChangePreset) trainChangePreset.addEventListener("click", () => setView("rewards"));
 const trainChangeTerrainPreset = $("#train-change-terrain-preset");
 if (trainChangeTerrainPreset) trainChangeTerrainPreset.addEventListener("click", () => setView("terrain"));
+const trainChangePhysicsPreset = $("#train-change-physics-preset");
+if (trainChangePhysicsPreset) trainChangePhysicsPreset.addEventListener("click", () => setView("physics"));
+const trainingRoute = $("#training-route");
+if (trainingRoute) trainingRoute.addEventListener("change", updateTrainingRouteForm);
 const activityRefresh = $("#activity-refresh");
 if (activityRefresh) activityRefresh.addEventListener("click", () => loadActivity().catch(handleActionError));
 document.addEventListener("click", (event) => {
@@ -5048,14 +6466,92 @@ document.querySelectorAll("#convergence-presets .segment-button").forEach((btn) 
     document.querySelectorAll("#convergence-presets .segment-button").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     const customDiv = $("#convergence-custom-inputs");
-    if (customDiv) customDiv.style.display = btn.dataset.preset === "custom" ? "" : "none";
+    if (customDiv) customDiv.hidden = btn.dataset.preset !== "custom";
     const hint = $("#convergence-preset-hint");
     if (hint) hint.textContent = CONVERGENCE_PRESET_HINTS[btn.dataset.preset] || "";
+    syncConvergenceDirtyState();
   });
 });
 
+const convergenceCard = $("#convergence-card");
+if (convergenceCard) {
+  convergenceCard.addEventListener("change", () => {
+    syncConvergenceControlAvailability();
+    syncConvergenceDirtyState();
+  });
+  convergenceCard.addEventListener("input", () => syncConvergenceDirtyState());
+}
+
+function isTypingTarget(target) {
+  if (!target) return false;
+  if (target.isContentEditable) return true;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+}
+
+// Move the History selection by one visible run. Wraps at neither end: running
+// off the list should feel like a wall, not a jump back to the other side.
+function stepRunSelection(delta) {
+  const visible = visibleRunIds();
+  if (!visible.length) return;
+  const current = state.selectedRun ? visible.indexOf(state.selectedRun.id) : -1;
+  const next = current === -1
+    ? (delta > 0 ? 0 : visible.length - 1)
+    : Math.min(visible.length - 1, Math.max(0, current + delta));
+  const runId = visible[next];
+  if (!runId || (state.selectedRun && runId === state.selectedRun.id)) return;
+  selectRun(runId).catch(handleActionError);
+  requestAnimationFrame(() => {
+    document
+      .querySelector(`.run-card[data-run-id="${CSS.escape(runId)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  });
+}
+
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.openMenuRunId) closeRunMenu({ restoreFocus: true });
+  if (event.key === "Escape") {
+    if (state.openMenuRunId) {
+      closeRunMenu({ restoreFocus: true });
+      return;
+    }
+    if (isTypingTarget(event.target)) return;
+    if (state.comparisonMode) {
+      exitComparison();
+      return;
+    }
+  }
+  if (state.currentView !== "history") return;
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const search = $("#run-search");
+  if (event.key === "Escape" && event.target === search && search.value) {
+    search.value = "";
+    state.searchQuery = "";
+    saveHistoryFilters();
+    renderRuns();
+    return;
+  }
+  if (isTypingTarget(event.target)) return;
+  if (event.key === "/") {
+    event.preventDefault();
+    search?.focus();
+    search?.select();
+    return;
+  }
+  if (event.key === "j" || event.key === "ArrowDown") {
+    event.preventDefault();
+    stepRunSelection(1);
+    return;
+  }
+  if (event.key === "k" || event.key === "ArrowUp") {
+    event.preventDefault();
+    stepRunSelection(-1);
+  }
+});
+
+// Notes and a renamed run are the only History edits with no autosave.
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedHistoryEdits()) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 document.addEventListener("click", (event) => {
@@ -5069,11 +6565,16 @@ window.addEventListener("hashchange", () => {
 });
 
 loadNotificationState();
+loadHistoryFilters();
+if (runSearch) runSearch.value = state.searchQuery;
+if (statusFilterEl) statusFilterEl.value = state.statusFilter;
+if (sortRunsEl) sortRunsEl.value = state.sortKey;
 renderNotificationBadges();
 renderRunDetails();
 updateBulkToolbar();
 startCurvesPolling();
 setInterval(renderFreshness, FRESHNESS_TICK_MS);  // text only — no fetch
+updateTrainingRouteForm();
 refreshAll()
   .catch((error) => setStatusTone(error.message, "error"))
   .then(() => applyHashRoute().catch(handleActionError));

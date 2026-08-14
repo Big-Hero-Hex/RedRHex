@@ -4,19 +4,26 @@ import argparse
 import json
 import re
 import time
+from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID
 
-from .activity import category_for_job_type, outcome_for_status, score_activity_event
+from .activity import ActivityStore, category_for_job_type, outcome_for_status, score_activity_event
 from .commands import DEFAULT_VIDEO_PRESET, TrainingParams, VideoParams
 from .config import PanelPaths
+from .convergence import ConvergenceChecker, DEFAULT_SCALAR_TAGS, downsample, load_convergence_config
+from .deploy import deploy_defaults, latest_deploy_report
+from .google_drive import GoogleDriveExporter
 from .history import HistoryStore, checkpoint_inventory
+from .mujoco_rollout import default_scenarios
 from .notifications import notification_events_for_run
+from .physics import normalize_physics_values, physics_catalog
 from .processes import ProcessRegistry
 from .remote_config import (
+    REMOTE_PROTOCOL_VERSION,
     RemoteConfig,
     RemoteStateStore,
     heartbeat_payload,
@@ -27,12 +34,13 @@ from .tensorboard_summary import ensure_tensorboard_summary, tensorboard_summary
 
 VIDEO_BUCKET = "redrhex-videos"
 TENSORBOARD_SUMMARY_CONTENT_TYPE = "image/png"
-GPU_JOB_TYPES = {"start_training", "record_video", "export_onnx"}
+GPU_JOB_TYPES = {"start_training", "record_video", "export_onnx", "export_validate_deploy"}
 FINISHED_RUN_STATUSES = {"completed", "failed", "interrupted"}
 MEDIA_SYNC_INTERVAL_SECONDS = 3.0
 MEDIA_SYNC_RECENT_SECONDS = 20 * 60
 MEDIA_SYNC_STATUSES = {"recording", "completed", "failed", "missing_checkpoint"}
 MAX_VIDEO_ITERATIONS_PER_RUN = 8
+MAX_REMOTE_SCALAR_POINTS = 400
 NOTIFICATION_SETTING_KEYS = {
     "training_converged": "notify_training_converged",
     "training_completed": "notify_training_completed",
@@ -88,8 +96,8 @@ def run_artifacts(run: dict) -> list[dict]:
     add_artifact("checkpoint", run.get("latest_checkpoint"), latest_checkpoint_iteration)
     add_artifact("video", run.get("latest_video"), _checkpoint_iteration(str(run.get("latest_video") or "")) or latest_checkpoint_iteration)
     add_artifact("onnx", run.get("onnx_path"))
-    add_artifact("process_log", run.get("process_log"))
     add_artifact("tensorboard_summary", run.get("tensorboard_summary_path"))
+    add_artifact("mujoco_video", run.get("latest_mujoco_video"))
     log_dir = Path(str(run.get("log_dir") or ""))
     if log_dir.is_dir():
         summary = tensorboard_summary_path(log_dir)
@@ -119,6 +127,131 @@ def run_artifacts(run: dict) -> list[dict]:
                 ):
                     add_artifact("video", str(video), iteration)
     return artifacts
+
+
+def remote_capabilities(paths: PanelPaths, *, drive_status: dict | None = None) -> dict:
+    """Return the host-safe, versioned capability contract consumed by Child."""
+
+    deploy = deploy_defaults(paths)
+    convergence = asdict(load_convergence_config(paths.convergence_config_file))
+    scenarios = [scenario.name for scenario in default_scenarios()]
+    return {
+        "machine_id": "",
+        "protocol_version": REMOTE_PROTOCOL_VERSION,
+        "feature_flags": {
+            "physics_presets": True,
+            "checkpoint_references": True,
+            "bounded_metrics": True,
+            "remote_deploy": True,
+            "mujoco_recording": True,
+            "drive_export": True,
+            "activity_projection": True,
+            "metadata_rpc": True,
+            "queued_job_cancellation": True,
+        },
+        "training_routes": [
+            "standard",
+            "sensor_v2_full",
+            "sensor_v2_teacher",
+            "sensor_v2_distillation",
+            "sensor_v2_ppo",
+        ],
+        "physics": physics_catalog(),
+        "deploy": {
+            "target": deploy.get("target"),
+            "target_runtime": deploy.get("target_runtime"),
+            "report_version": deploy.get("report_version"),
+            "include_ros_mock_default": bool(deploy.get("include_ros_mock_default")),
+            "include_mujoco_default": bool(deploy.get("include_mujoco_default")),
+            "onnx_installed": bool(deploy.get("onnx_installed")),
+            "onnx_version": deploy.get("onnx_version"),
+            "onnxruntime_installed": bool(deploy.get("onnxruntime_installed")),
+            "onnxruntime_version": deploy.get("onnxruntime_version"),
+            "mujoco_installed": bool(deploy.get("mujoco_installed")),
+            "mujoco_version": deploy.get("mujoco_version"),
+            "mujoco_renderer_available": bool(deploy.get("mujoco_renderer_available")),
+            "mujoco_encoder_available": bool(deploy.get("mujoco_encoder_available")),
+            "mujoco_calibrated": bool(deploy.get("mujoco_calibrated")),
+            "scenarios": scenarios,
+            "playback_defaults": deploy.get("mujoco_playback_defaults") or {},
+        },
+        "detection": convergence,
+        "integration_readiness": {
+            "google_drive": drive_status or {},
+            "ros_mock": True,
+            "physical_robot_deployment": False,
+            "terminal": False,
+            "host_paths": False,
+            "gui_viewer": False,
+        },
+    }
+
+
+def _bounded_progress(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "iteration", "max_iterations", "percent", "elapsed_seconds", "eta_seconds",
+        "fps", "updated_at", "mean_reward", "mean_episode_length",
+    }
+    result = {key: value[key] for key in allowed if key in value}
+    if result.get("percent") is not None:
+        try:
+            result["percent"] = min(100.0, max(0.0, float(result["percent"])))
+        except (TypeError, ValueError):
+            result.pop("percent", None)
+    return result
+
+
+def _safe_deploy_projection(run: dict) -> dict:
+    state = {
+        "status": run.get("deploy_status"),
+        "overall_status": run.get("deploy_overall_status"),
+        "readiness_level": run.get("deploy_readiness_level"),
+        "completed_at": run.get("deploy_completed_at"),
+        "error": run.get("deploy_error"),
+    }
+    try:
+        latest = latest_deploy_report(run)
+    except Exception:
+        latest = None
+    report = latest.get("report") if isinstance(latest, dict) else None
+    if isinstance(report, dict):
+        stages = []
+        for stage in report.get("stages") or []:
+            if not isinstance(stage, dict):
+                continue
+            stages.append({
+                key: stage.get(key)
+                for key in ("name", "label", "title", "status", "summary", "duration_ms", "error")
+                if stage.get(key) not in (None, "")
+            })
+        state["report"] = {
+            "version": report.get("version"),
+            "created_at": report.get("created_at"),
+            "completed_at": report.get("completed_at"),
+            "overall_status": report.get("overall_status"),
+            "readiness_level": report.get("readiness_level"),
+            "stages": stages,
+            "operator_checklist": list(report.get("operator_checklist") or [])[:20],
+            "assumptions": list(report.get("assumptions") or [])[:20],
+        }
+    return {key: value for key, value in state.items() if value not in (None, "", [])}
+
+
+def _safe_drive_projection(run: dict) -> list[dict]:
+    values = run.get("google_drive_video_exports")
+    if not isinstance(values, list):
+        return []
+    allowed = {
+        "id", "status", "checkpoint_iteration", "created_at", "updated_at",
+        "completed_at", "bytes", "web_view_url", "error",
+    }
+    return [
+        {key: item.get(key) for key in allowed if item.get(key) not in (None, "")}
+        for item in values[-20:]
+        if isinstance(item, dict)
+    ]
 
 
 def _parse_time(value: str | None) -> float:
@@ -208,6 +341,7 @@ class RemoteJobExecutor:
         self.paths = paths
         self.history = HistoryStore(paths)
         self.processes = ProcessRegistry(paths, self.history, cuda_preflight=True)
+        self.google_drive = GoogleDriveExporter(paths, self.history)
 
     def gpu_locked(self) -> bool:
         return bool(self.processes.running_isaac_processes())
@@ -222,7 +356,13 @@ class RemoteJobExecutor:
             raise RuntimeError("Another Isaac/GPU action is already running")
 
         if job_type == "start_training":
-            params = TrainingParams.from_dict(payload)
+            training_payload = dict(payload)
+            if training_payload.get("checkpoint"):
+                raise ValueError("Remote training accepts checkpoint_ref, not a host checkpoint path")
+            checkpoint_ref = training_payload.pop("checkpoint_ref", None)
+            if checkpoint_ref:
+                training_payload["checkpoint"] = str(self._checkpoint_for_reference(checkpoint_ref))
+            params = TrainingParams.from_dict(training_payload)
             requester_id = _requester_id_for_job(job)
             if requester_id:
                 params.requester_id = requester_id
@@ -260,6 +400,54 @@ class RemoteJobExecutor:
             result["checkpoint"] = str(checkpoint)
             result["checkpoint_iteration"] = _checkpoint_iteration(str(checkpoint))
             return RemoteJobResult(local_run_id=str(run["id"]), process_id=result.get("id"), payload=result)
+
+        if job_type == "export_video_drive":
+            run = self.history.get_run(str(payload.get("run_id") or "")) or {}
+            if not run:
+                raise ValueError("Run was not found")
+            video, iteration = self._video_for_payload(run, payload)
+            record, started, reused = self.google_drive.start_export(
+                str(run["id"]), video, checkpoint_iteration=iteration
+            )
+            return RemoteJobResult(
+                local_run_id=str(run["id"]),
+                payload={**record, "started": bool(started), "reused": bool(reused)},
+            )
+
+        if job_type in {"validate_deploy", "export_validate_deploy", "mujoco_smoke"}:
+            run_id = str(payload.get("run_id") or "")
+            run = self.history.get_run(run_id) or {}
+            if not run:
+                raise ValueError("Run was not found")
+            include_ros_mock = bool(payload.get("include_ros_mock", False))
+            if job_type == "validate_deploy" and not run.get("onnx_path"):
+                raise ValueError("Export ONNX before validating the existing model")
+            result = self.processes.start_deploy_validation(
+                run_id,
+                export_first=job_type == "export_validate_deploy",
+                device="cuda:0",
+                include_ros_mock=include_ros_mock,
+                include_mujoco=True,
+                use_cuda=False,
+                use_tensorrt=False,
+                mujoco_only=job_type == "mujoco_smoke",
+            )
+            return RemoteJobResult(local_run_id=run_id, process_id=result.get("id"), payload=result)
+
+        if job_type == "record_mujoco_video":
+            run_id = str(payload.get("run_id") or "")
+            if not self.history.get_run(run_id):
+                raise ValueError("Run was not found")
+            scenario = str(payload.get("scenario") or "stand_zero")
+            allowed = {item.name for item in default_scenarios()}
+            if scenario not in allowed:
+                raise ValueError(f"scenario must be one of: {', '.join(sorted(allowed))}")
+            result = self.processes.start_mujoco_playback(
+                run_id,
+                mode="record",
+                scenario=scenario,
+            )
+            return RemoteJobResult(local_run_id=run_id, process_id=result.get("id"), payload=result)
 
         if job_type == "tensorboard":
             run_id = str(payload.get("run_id") or "")
@@ -300,7 +488,16 @@ class RemoteJobExecutor:
         return run
 
     def _checkpoint_for_payload(self, run: dict, payload: dict) -> Path:
-        requested = str(payload.get("checkpoint") or "").strip()
+        if payload.get("checkpoint"):
+            raise ValueError("Remote actions accept checkpoint_ref, not a host checkpoint path")
+        checkpoint_ref = payload.get("checkpoint_ref")
+        if checkpoint_ref:
+            expected_run_id = str(run.get("id") or "")
+            referenced_run_id = str(checkpoint_ref.get("run_id") or "") if isinstance(checkpoint_ref, dict) else ""
+            if referenced_run_id != expected_run_id:
+                raise ValueError("checkpoint_ref run_id must match the selected run")
+            return self._checkpoint_for_reference(checkpoint_ref)
+        requested = ""
         log_dir_value = str(run.get("log_dir") or "")
         log_dir = Path(log_dir_value) if log_dir_value else None
         if requested:
@@ -330,8 +527,37 @@ class RemoteJobExecutor:
             raise ValueError(f"No checkpoint found for iteration {target_iteration}")
         return Path(str(run["latest_checkpoint"]))
 
+    def _checkpoint_for_reference(self, checkpoint_ref: dict) -> Path:
+        if not isinstance(checkpoint_ref, dict):
+            raise ValueError("checkpoint_ref must contain run_id and checkpoint_iteration")
+        run_id = str(checkpoint_ref.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("checkpoint_ref.run_id is required")
+        run = self._run_with_checkpoint(run_id)
+        reference_payload = {"checkpoint_iteration": checkpoint_ref.get("checkpoint_iteration")}
+        return self._checkpoint_for_payload(run, reference_payload)
+
+    def _video_for_payload(self, run: dict, payload: dict) -> tuple[Path, int | None]:
+        iteration = payload.get("checkpoint_iteration")
+        if iteration is not None:
+            try:
+                iteration = int(iteration)
+            except (TypeError, ValueError):
+                raise ValueError("checkpoint_iteration must be an integer") from None
+        candidates = [
+            artifact for artifact in run_artifacts(run)
+            if artifact.get("kind") == "video" and (iteration is None or artifact.get("checkpoint_iteration") == iteration)
+        ]
+        if not candidates:
+            raise ValueError("No recorded MP4 found for the selected checkpoint")
+        video = Path(str(candidates[0].get("local_path") or ""))
+        if not video.is_file():
+            raise ValueError("No recorded MP4 found for the selected checkpoint")
+        return video, candidates[0].get("checkpoint_iteration")
+
     def sync_runs_payload(self, run_ids: set[str] | None = None) -> list[dict]:
         runs = self.history.list_runs()
+        scalar_reader = ConvergenceChecker()
         if run_ids is not None:
             normalized_ids = {str(run_id) for run_id in run_ids if str(run_id)}
             runs = [run for run in runs if str(run.get("id") or "") in normalized_ids]
@@ -391,7 +617,31 @@ class RemoteJobExecutor:
                 "compacted_deleted_count": run.get("compacted_deleted_count"),
                 "compacted_bytes_freed": run.get("compacted_bytes_freed"),
                 "artifacts": run_artifacts(run),
+                "progress": _bounded_progress(run.get("progress")),
+                "git_provenance": run.get("git") if isinstance(run.get("git"), dict) else {},
+                "effective_spring_backend": run.get("effective_spring_backend") or (run.get("params") or {}).get("spring_backend") or "native",
+                "divergence_detected": bool(run.get("divergence_detected")),
+                "divergence_iteration": run.get("divergence_iteration"),
+                "divergence_kind": run.get("divergence_kind"),
+                "divergence_reason": run.get("divergence_reason"),
+                "deploy_state": _safe_deploy_projection(run),
+                "mujoco_state": {
+                    key: run.get(key)
+                    for key in (
+                        "mujoco_playback_status", "mujoco_returncode", "mujoco_error",
+                        "mujoco_completed_at",
+                    )
+                    if run.get(key) not in (None, "")
+                },
+                "google_drive_video_exports": _safe_drive_projection(run),
             }
+            metrics: dict[str, list[list[float | int]]] = {}
+            if log_dir.is_dir():
+                for tag in DEFAULT_SCALAR_TAGS:
+                    points = downsample(scalar_reader.read_scalars(log_dir, tag), MAX_REMOTE_SCALAR_POINTS)
+                    if points:
+                        metrics[tag] = [[int(step), float(value)] for step, value in points]
+            record["metrics"] = metrics
             # Include metadata only when the mother has an explicit local opinion.
             # Empty values are important: they clear stale child/Supabase metadata
             # after a mother-side rename, uncategorize, or note clear. Purely
@@ -420,6 +670,7 @@ class RemoteWorker:
         self.client = client
         self.executor = executor or RemoteJobExecutor(paths)
         self.history = getattr(self.executor, "history", HistoryStore(paths))
+        self.activity = ActivityStore(paths)
         self.state_store = state_store or RemoteStateStore(paths.remote_state_file)
         self.active_job_id: str | None = None
         self.last_sync_at = 0.0
@@ -451,6 +702,73 @@ class RemoteWorker:
             )
         self.client.heartbeat(payload)
         return payload
+
+    def sync_capabilities(self) -> bool:
+        try:
+            drive_status = self.executor.google_drive.status() if hasattr(self.executor, "google_drive") else {}
+            payload = remote_capabilities(self.paths, drive_status=drive_status)
+            payload["machine_id"] = self.config.machine_id
+            payload["updated_at"] = _now_iso()
+            self.client.upsert("machine_capabilities", payload)
+            return True
+        except Exception:
+            # Additive rollout: an older schema must keep heartbeat and inspection alive.
+            return False
+
+    def sync_local_activity(self) -> int:
+        records = []
+        known_run_ids = {str(run.get("id") or "") for run in self.history.list_runs()}
+        category_map = {
+            "artifact": "media",
+            "preset": "organization",
+            "metadata": "organization",
+            "admin": "organization",
+        }
+        safe_metadata_keys = {
+            "job_type", "type", "status", "run_id", "reward_preset_id",
+            "terrain_preset_id", "physics_preset_id", "folder", "source_run_id",
+        }
+        for event in self.activity.local_events(limit=250):
+            source_id = str(event.get("id") or "").strip()
+            event_type = re.sub(r"[^a-z0-9_.-]+", "_", str(event.get("event_type") or "activity").lower())[:120]
+            if not source_id or not event_type:
+                continue
+            raw_metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else event.get("payload")
+            raw_metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            metadata = {
+                key: raw_metadata[key]
+                for key in safe_metadata_keys
+                if key in raw_metadata and isinstance(raw_metadata[key], (str, int, float, bool, type(None)))
+            }
+            run_id = str(event.get("subject_id") or metadata.get("run_id") or "").strip()
+            category = category_map.get(str(event.get("category") or "system"), str(event.get("category") or "system"))
+            records.append({
+                "machine_id": self.config.machine_id,
+                "actor_id": None,
+                "actor_name": str(event.get("actor_name") or "Mother operator")[:160],
+                "actor_role": "admin",
+                "event_type": event_type,
+                "category": category[:80],
+                "outcome": outcome_for_status(str(event.get("outcome") or "info"))[:40],
+                "run_id": run_id if run_id in known_run_ids else None,
+                "job_id": None,
+                "points": int(event.get("points") or 0),
+                "metadata": metadata,
+                "source_type": "mother_activity",
+                "source_id": source_id[:200],
+                "created_at": event.get("created_at") or _now_iso(),
+            })
+        if not records:
+            return 0
+        try:
+            self.client.upsert(
+                "team_activity_events",
+                records,
+                query={"on_conflict": "machine_id,source_type,source_id"},
+            )
+        except Exception:
+            return 0
+        return len(records)
 
     def pull_remote_run_metadata(self) -> int:
         try:
@@ -616,6 +934,8 @@ class RemoteWorker:
         sync_aliases: bool = True,
     ) -> dict:
         started = time.time()
+        capabilities_synced = self.sync_capabilities()
+        activity_synced = self.sync_local_activity()
         if pull_metadata:
             self.pull_remote_run_metadata()
             folder_summary = self.sync_folders(sync_deletions=sync_deletions)
@@ -735,7 +1055,9 @@ class RemoteWorker:
             "artifact_repair_runs": len(artifact_repair_runs),
             "videos_uploaded": int(getattr(self, "_sync_videos_uploaded", 0)),
             "storage_reused": int(getattr(self, "_sync_storage_reused", 0)),
-            "schema": "3.4.10-sync-health",
+            "schema": REMOTE_PROTOCOL_VERSION,
+            "capabilities_synced": capabilities_synced,
+            "activity_synced": activity_synced,
             **deletion_summary,
             **alias_summary,
             **folder_summary,
@@ -1096,9 +1418,14 @@ class RemoteWorker:
 
     def _execute_job(self, job: dict) -> RemoteJobResult:
         job_type = str(job.get("type") or job.get("job_type") or "")
-        actor_role = str(job.get("actor_role") or job.get("role") or "viewer")
+        profile = self._profile_for_job(job)
+        actor_role = str(profile.get("role") or "viewer").strip().lower()
+        if not profile.get("id"):
+            raise PermissionError("Remote job actor does not have an authoritative profile")
         if not role_allows(actor_role, job_type):
             raise PermissionError(f"Role '{actor_role}' cannot run remote job '{job_type}'")
+        job["actor_role"] = actor_role
+        job["actor_name"] = str(profile.get("display_name") or profile.get("email") or profile.get("id"))
         if job_type == "send_missed_notifications":
             return RemoteJobResult(payload=self._send_missed_notifications(job))
         return self.executor.execute(job)
@@ -1325,8 +1652,8 @@ class RemoteWorker:
             record["bytes"] = Path(local_path).stat().st_size
         if artifact.get("public_url"):
             record["public_url"] = str(artifact["public_url"])
-        if kind == "video":
-            storage_path = self._ensure_video_storage_path(run_id, local_path)
+        if kind in {"video", "mujoco_video"}:
+            storage_path = self._ensure_video_storage_path(run_id, local_path, kind=kind)
             if storage_path:
                 record["storage_path"] = storage_path
         elif kind == "tensorboard_summary":
@@ -1340,15 +1667,16 @@ class RemoteWorker:
                 )
         return record
 
-    def _ensure_video_storage_path(self, run_id: str, local_path: str) -> str | None:
+    def _ensure_video_storage_path(self, run_id: str, local_path: str, *, kind: str = "video") -> str | None:
         path = Path(local_path)
         if not path.is_file():
             return None
-        existing = self._existing_artifact(run_id, "video", local_path)
+        existing = self._existing_artifact(run_id, kind, local_path)
         if existing and existing.get("storage_path"):
             self._sync_storage_reused = getattr(self, "_sync_storage_reused", 0) + 1
             return str(existing["storage_path"])
-        storage_path = f"runs/{_storage_safe(run_id)}/videos/{_storage_safe(path.name)}"
+        folder = "mujoco" if kind == "mujoco_video" else "videos"
+        storage_path = f"runs/{_storage_safe(run_id)}/{folder}/{_storage_safe(path.name)}"
         self.client.upload_storage_object(VIDEO_BUCKET, storage_path, path, content_type="video/mp4")
         self._sync_videos_uploaded = getattr(self, "_sync_videos_uploaded", 0) + 1
         return storage_path
@@ -1448,6 +1776,7 @@ class RemoteWorker:
                 "process_id": result.get("process_id") or result_payload.get("id") or "",
                 "reward_preset_id": payload.get("reward_preset_id") or "",
                 "terrain_preset_id": payload.get("terrain_preset_id") or "",
+                "physics_preset_id": payload.get("physics_preset_id") or "",
                 "error": error,
             }
             record = {
@@ -1462,6 +1791,8 @@ class RemoteWorker:
                 "job_id": _uuid_or_none(str(job.get("id") or "")),
                 "points": score_activity_event(job_type, outcome=normalized_outcome, category=category, job_type=job_type),
                 "metadata": metadata,
+                "source_type": "worker_job",
+                "source_id": f"{job.get('id') or 'unknown'}:{normalized_outcome}",
                 "created_at": _now_iso(),
             }
             self.client.insert("team_activity_events", record, prefer="return=minimal")

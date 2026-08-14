@@ -69,7 +69,12 @@ def make_fixture_root(root: Path) -> dict:
     (beta / "params" / "env.yaml").write_text("env: test\n", encoding="utf-8")
     (beta / "params" / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
     (beta / "videos" / "play").mkdir(parents=True)
-    (beta / "videos" / "play" / "rl-video-step-0.mp4").write_text("video", encoding="utf-8")
+    old_video = beta / "videos" / "play" / "model_0_video_fixture.mp4"
+    latest_video = beta / "videos" / "play" / "rl-video-step-0.mp4"
+    old_video.write_text("old video", encoding="utf-8")
+    latest_video.write_text("latest video", encoding="utf-8")
+    os.utime(old_video, (100, 100))
+    os.utime(latest_video, (200, 200))
     (beta / "exported").mkdir()
     (beta / "exported" / "policy.onnx").write_text("onnx", encoding="utf-8")
     (beta / "deploy").mkdir()
@@ -211,10 +216,88 @@ def open_deploy(page, url: str) -> None:
     expect(page.locator("#deploy-artifact-status")).to_contain_text("ready")
 
 
+def open_physics(page, url: str) -> None:
+    page.goto(url)
+    page.locator('.nav-button[data-view="physics"]').click()
+    page.wait_for_selector('[data-physics-key="simulation_physics.mass.scale"]')
+
+
+def test_training_route_only_shows_relevant_controls(panel, page):
+    page.goto(panel["url"])
+
+    route = page.locator("#training-route")
+    single_iterations = page.locator("#single-stage-iterations-field")
+    pipeline_iterations = page.locator(".sensor-v2-pipeline-field")
+    checkpoint = page.locator("#training-checkpoint-field")
+    task = page.locator("#training-task-field")
+    reward_preset = page.locator("#train-reward-preset")
+    terrain_preset = page.locator("#train-terrain-preset")
+    physics_preset = page.locator("#train-physics-preset")
+
+    expect(route).to_have_value("standard")
+    expect(page.locator("#training-route-summary-title")).to_have_text("Standard PPO")
+    expect(task).to_be_visible()
+    expect(single_iterations).to_be_visible()
+    expect(single_iterations).to_contain_text("Iterations")
+    for field in pipeline_iterations.all():
+        expect(field).to_be_hidden()
+    expect(checkpoint).to_be_visible()
+    expect(reward_preset).to_be_visible()
+    expect(terrain_preset).to_be_visible()
+    expect(physics_preset).to_be_visible()
+
+    route.select_option("sensor_v2_full")
+    expect(page.locator("#training-route-summary-title")).to_have_text("Full Sensor V2 Pipeline")
+    expect(task).to_be_hidden()
+    expect(single_iterations).to_be_hidden()
+    for field in pipeline_iterations.all():
+        expect(field).to_be_visible()
+    expect(checkpoint).to_be_hidden()
+    expect(reward_preset).to_be_hidden()
+    expect(terrain_preset).to_be_hidden()
+    expect(physics_preset).to_be_visible()
+    page.locator("#smoke-button").click()
+    expect(page.locator('input[name="teacher_iterations"]')).to_have_value("1")
+    expect(page.locator('input[name="distillation_iterations"]')).to_have_value("1")
+    expect(page.locator('input[name="ppo_iterations"]')).to_have_value("1")
+    full_payload = page.evaluate("formData(document.querySelector('#train-form'))")
+    assert "max_iterations" not in full_payload
+    assert full_payload["teacher_iterations"] == 1
+    assert full_payload["distillation_iterations"] == 1
+    assert full_payload["ppo_iterations"] == 1
+    assert "task" not in full_payload
+    assert "reward_preset_id" not in full_payload
+    assert "reward_overrides" not in full_payload
+    assert "terrain_preset_id" not in full_payload
+    assert "terrain_overrides" not in full_payload
+
+    route.select_option("sensor_v2_teacher")
+    expect(single_iterations).to_be_visible()
+    expect(page.locator("#single-stage-iterations-label")).to_have_text("F1 Teacher Iterations")
+    expect(checkpoint).to_be_visible()
+    expect(page.locator('input[name="checkpoint"]')).not_to_have_attribute("required", "")
+
+    route.select_option("sensor_v2_distillation")
+    expect(page.locator("#single-stage-iterations-label")).to_have_text("F2 Distillation Iterations")
+    expect(page.locator("#training-checkpoint-label")).to_have_text("Teacher Checkpoint")
+    expect(page.locator('input[name="checkpoint"]')).to_have_attribute("required", "")
+    stage_payload = page.evaluate("formData(document.querySelector('#train-form'))")
+    assert "teacher_iterations" not in stage_payload
+    assert "distillation_iterations" not in stage_payload
+    assert "ppo_iterations" not in stage_payload
+
+    route.select_option("sensor_v2_ppo")
+    expect(page.locator("#single-stage-iterations-label")).to_have_text("F3 Student PPO Iterations")
+    expect(page.locator("#training-checkpoint-label")).to_have_text("Distilled Student Checkpoint")
+    expect(page.locator('input[name="checkpoint"]')).to_have_attribute("required", "")
+
+
 def test_history_defaults_to_all_runs_and_filters(panel, page):
     open_history(page, panel["url"])
 
-    all_class = page.locator('.folder-item[data-folder="__all__"]').get_attribute("class") or ""
+    all_class = (
+        page.locator('.folder-item:has(.folder-select[data-folder="__all__"])').get_attribute("class") or ""
+    )
     assert "active" in all_class
     expect(page.locator("#runs")).to_contain_text("run_alpha")
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
@@ -230,12 +313,270 @@ def test_history_defaults_to_all_runs_and_filters(panel, page):
     expect(page.locator("#runs")).not_to_contain_text("queued_run")
 
     page.select_option("#status-filter", "")
-    page.locator('.folder-item[data-folder="Good Runs"] .folder-name').click()
+    page.locator('.folder-select[data-folder="Good Runs"]').click()
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
     expect(page.locator("#runs")).not_to_contain_text("run_alpha")
 
-    page.locator('.folder-item[data-folder="__all__"]').click()
+    page.locator('.folder-select[data-folder="__all__"]').click()
     expect(page.locator("#runs")).to_contain_text("run_alpha")
+
+
+def test_history_checkpoint_evolution_is_manual_and_records_selected_save_point(panel, page):
+    recorded_requests = []
+
+    def record_selected(route, request):
+        recorded_requests.append(json.loads(request.post_data or "{}"))
+        route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps({"id": "video_fixture", "checkpoint_iteration": 0}),
+        )
+
+    page.route("**/api/runs/panel_run_beta/record-video", record_selected)
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+
+    evolution = page.locator("#checkpoint-evolution")
+    expect(evolution).to_be_visible()
+    expect(evolution).not_to_have_attribute("open", "")
+    expect(page.locator("#checkpoint-timeline")).not_to_be_visible()
+    expect(page.locator("#video-state")).to_have_text("Latest Video")
+    expect(page.locator("#result-video")).not_to_have_attribute("src", re.compile("checkpoint_iteration"))
+    expect(page.locator("#record-video")).to_have_text("Record Latest")
+
+    evolution.locator("summary").click()
+    expect(page.locator("#checkpoint-timeline")).to_be_visible()
+    expect(page.locator("#checkpoint-timeline")).to_contain_text("Iteration 10")
+    expect(page.locator("#checkpoint-timeline")).to_contain_text("Iteration 0")
+    page.locator('[data-checkpoint-iteration="0"]').click()
+
+    expect(page.locator("#video-state")).to_have_text("Iter 0 Video")
+    expect(page.locator("#result-video")).to_have_attribute("src", re.compile("checkpoint_iteration=0"))
+    expect(page.locator("#record-video")).to_have_text("Record Iter 0")
+    page.locator("#record-video").click()
+    expect(page.locator("#panel-status")).to_contain_text("Recording iteration 0")
+    assert recorded_requests == [{"device": "cuda:0", "checkpoint_iteration": 0}]
+
+    page.locator("#show-latest-video").click()
+    expect(page.locator("#video-state")).to_have_text("Latest Video")
+    expect(page.locator("#result-video")).not_to_have_attribute("src", re.compile("checkpoint_iteration"))
+    expect(page.locator("#record-video")).to_have_text("Record Latest")
+
+
+def test_history_drive_export_explains_missing_training_pc_setup(panel, page):
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "google_drive_export": {
+                        "available": False,
+                        "configured": False,
+                        "remote": "redrhex-drive:",
+                        "folder": "RedRHex Videos",
+                        "remediation": "Install rclone and create the redrhex-drive remote.",
+                    }
+                }
+            ),
+        ),
+    )
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+
+    expect(page.locator("#export-video-drive")).to_be_visible()
+    expect(page.locator("#export-video-drive")).to_be_disabled()
+    expect(page.locator("#drive-export-hint")).to_contain_text("Install rclone")
+
+
+def test_history_drive_export_tracks_checkpoint_background_success_and_retry(panel, page):
+    requests = []
+
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "google_drive_export": {
+                        "available": True,
+                        "configured": True,
+                        "remote": "redrhex-drive:",
+                        "folder": "RedRHex Videos",
+                        "remediation": "",
+                    }
+                }
+            ),
+        ),
+    )
+
+    def export_video(route, request):
+        payload = json.loads(request.post_data or "{}")
+        requests.append(payload)
+        route.fulfill(
+            status=202,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "run_id": "panel_run_beta",
+                    "checkpoint_iteration": payload.get("checkpoint_iteration"),
+                    "started": True,
+                    "deduplicated": False,
+                    "export": {
+                        "status": "uploading",
+                        "remote_path": "redrhex-drive:RedRHex Videos/panel_run_beta/video.mp4",
+                    },
+                }
+            ),
+        )
+
+    page.route("**/api/runs/panel_run_beta/export-video-to-drive", export_video)
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    page.locator("#checkpoint-evolution summary").click()
+    page.locator('[data-checkpoint-iteration="0"]').click()
+
+    expect(page.locator("#export-video-drive")).to_be_enabled()
+    page.locator("#export-video-drive").click()
+    expect(page.locator("#export-video-drive")).to_have_text("Exporting…")
+    expect(page.locator("#export-video-drive")).to_be_disabled()
+    expect(page.locator("#drive-export-hint")).to_contain_text("Uploading in the background")
+    assert requests == [{"checkpoint_iteration": 0}]
+
+    page.evaluate(
+        """() => {
+          const run = state.selectedRun;
+          const key = displayedVideoRelativePath(run);
+          run.google_drive_video_exports[key] = {
+            status: 'completed',
+            web_view_url: 'https://drive.google.com/file/d/private-file-id/view',
+          };
+          renderVideoPanel(run);
+        }"""
+    )
+    expect(page.locator("#export-video-drive")).to_have_text("Export to Drive")
+    expect(page.locator("#export-video-drive")).to_be_enabled()
+    expect(page.locator("#open-video-drive")).to_be_visible()
+    expect(page.locator("#open-video-drive")).to_have_attribute(
+        "href", "https://drive.google.com/file/d/private-file-id/view"
+    )
+    expect(page.locator("#open-video-drive")).to_have_attribute("rel", "noopener noreferrer")
+
+    page.locator("#show-latest-video").click()
+    page.locator("#export-video-drive").click()
+    assert requests == [{"checkpoint_iteration": 0}, {}]
+    expect(page.locator("#export-video-drive")).to_have_text("Exporting…")
+    page.evaluate(
+        """() => {
+          const run = state.selectedRun;
+          const key = displayedVideoRelativePath(run);
+          run.google_drive_video_exports[key] = { status: 'failed', error: 'Drive quota exceeded.' };
+          renderVideoPanel(run);
+        }"""
+    )
+    expect(page.locator("#export-video-drive")).to_have_text("Retry Drive Export")
+    expect(page.locator("#export-video-drive")).to_be_enabled()
+    expect(page.locator("#drive-export-hint")).to_contain_text("Drive quota exceeded")
+
+
+def test_history_shows_evolution_entry_for_a_single_checkpoint(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="run_alpha").click()
+
+    expect(page.locator("#video-panel")).to_be_visible()
+    expect(page.locator("#video-panel h3")).to_have_text("Recorded Video & Evolution")
+    expect(page.locator("#checkpoint-evolution")).to_be_visible()
+    expect(page.locator("#checkpoint-evolution-count")).to_have_text("1 save point")
+    expect(page.locator("#checkpoint-evolution-help")).to_contain_text("One checkpoint is saved")
+
+
+def test_history_evolution_explains_gpu_lock_and_keeps_long_list_position(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    page.locator("#checkpoint-evolution summary").click()
+
+    scroll = page.evaluate(
+        """
+        () => {
+        const run = state.selectedRun;
+        run.checkpoint_history = Array.from({ length: 51 }, (_, index) => ({
+          iteration: index * 50,
+          created_at: '2026-05-20T10:00:00',
+          is_latest: index === 50,
+          video: null,
+        }));
+        renderVideoPanel(run);
+        const timeline = document.querySelector('#checkpoint-timeline');
+        const target = timeline.querySelector('[data-checkpoint-iteration="2000"]');
+        timeline.scrollTop = target.offsetTop - timeline.offsetTop - 40;
+        const before = timeline.scrollTop;
+        selectCheckpointForVideo(2000);
+        return {
+          before,
+          after: timeline.scrollTop,
+          overflowY: getComputedStyle(timeline).overflowY,
+        };
+        }
+        """
+    )
+    assert scroll["before"] > 0
+    assert abs(scroll["after"] - scroll["before"]) <= 1
+    assert scroll["overflowY"] == "auto"
+    expect(page.locator('[data-checkpoint-iteration="2000"]')).to_have_class(re.compile("active"))
+
+    page.evaluate(
+        """
+        state.activeProcesses = [{ kind: 'training', run_id: 'active_training' }];
+        renderVideoPanel(state.selectedRun);
+        """
+    )
+    expect(page.locator("#record-video")).to_be_disabled()
+    expect(page.locator("#record-video-hint")).to_be_visible()
+    expect(page.locator("#record-video-hint")).to_contain_text("GPU busy with training")
+    assert page.locator("#record-video").get_attribute("data-tooltip") is None
+
+
+def test_physics_preset_is_searchable_sparse_and_persistent(panel, page):
+    open_physics(page, panel["url"])
+    expect(page.locator("#physics-status")).to_contain_text("113 validated")
+    expect(page.locator('[data-physics-key="simulation_physics.mass.scale"]')).to_be_disabled()
+
+    page.once("dialog", lambda dialog: dialog.accept("Measured Lab Robot"))
+    page.locator("#physics-preset-duplicate-btn").click()
+    expect(page.locator("#physics-profile-name")).to_have_value("Measured Lab Robot")
+
+    page.fill("#physics-search", "mass scale")
+    mass_scale = page.locator('[data-physics-key="simulation_physics.mass.scale"]')
+    expect(mass_scale).to_be_visible()
+    mass_scale.fill("1.05")
+    expect(page.locator("#physics-change-summary")).to_have_text("1 override")
+    page.locator("#physics-preset-save-btn").click()
+    expect(page.locator("#physics-status")).to_have_text("Physics preset saved and selected for the next training run.")
+
+    preset_file = panel["root"] / "logs" / "training_panel" / "physics_presets.json"
+    payload = json.loads(preset_file.read_text(encoding="utf-8"))
+    saved = next(item for item in payload["presets"] if item["name"] == "Measured Lab Robot")
+    assert saved["values"] == {"simulation_physics.mass.scale": 1.05}
+
+    page.locator('.nav-button[data-view="train"]').click()
+    expect(page.locator("#train-active-physics-preset-name")).to_have_text("Measured Lab Robot")
+
+
+def test_physics_mobile_layout_has_no_horizontal_overflow(panel, page):
+    page.set_viewport_size({"width": 390, "height": 900})
+    open_physics(page, panel["url"])
+    expect(page.locator("#physics-categories")).to_contain_text("Mass scale")
+    overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
+    offenders = page.evaluate(
+        """[...document.querySelectorAll('*')]
+          .filter((element) => element.getBoundingClientRect().right > window.innerWidth + 1)
+          .map((element) => ({tag: element.tagName, id: element.id, cls: element.className,
+            right: Math.round(element.getBoundingClientRect().right), width: element.scrollWidth}))
+          .slice(0, 12)"""
+    )
+    assert overflow <= 1, offenders
 
 
 def test_single_delete_requires_exact_run_id(panel, page):
@@ -316,12 +657,14 @@ def test_history_mobile_layout_has_no_horizontal_overflow(panel, page):
 
     expect(page.locator("#folder-sidebar")).to_be_visible()
     expect(page.locator("#runs")).to_contain_text("Beta Foldered")
+    page.locator(".run-card", has_text="Beta Foldered").click()
     expect(page.locator("#details-title")).to_be_visible()
+    expect(page.locator("#export-video-drive")).to_be_visible()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 1
 
 
-def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
+def test_native_spring_backend_is_safe_default_submitted_restored_and_displayed(panel, page):
     submitted_payloads = []
 
     def capture_training_start(route):
@@ -338,12 +681,16 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
     backend = page.locator('select[name="spring_backend"]')
     assert backend.locator('option[value="explicit"]').count() == 1
     assert backend.locator('option[value="native"]').count() == 1
-    expect(backend).to_have_value("explicit")
-    backend.select_option("native")
+    expect(backend).to_have_value("native")
+    expect(backend.locator('option[value="explicit"]')).to_have_attribute("disabled", "")
+    expect(backend.locator("xpath=following-sibling::small")).to_contain_text(
+        "numerically unstable"
+    )
     page.locator("#train-form button[type=submit]").click()
     expect(page.locator("#train-status")).to_contain_text("Queued native_submit")
     assert submitted_payloads == [{
-        "task": "Template-Redrhex-Direct-v0",
+        "training_route": "standard",
+        "task": "Template-Redrhex-ForwardFast-Direct-v0",
         "display_name": "",
         "num_envs": 4,
         "max_iterations": 1,
@@ -353,10 +700,21 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
         "checkpoint": "",
         "headless": True,
         "resume": False,
-        "reward_preset_id": "baseline",
-        "reward_overrides": {},
+        "reward_preset_id": "speed-focus",
+        "reward_overrides": {
+            "v2_reward_scales.forward_progress": 3,
+            "v2_reward_scales.velocity_tracking": 6,
+            "v2_reward_scales.axis_suppression": 2,
+            "v2_reward_scales.height_maintain": 1,
+            "v2_reward_scales.height_low_penalty": 1.5,
+            "v2_reward_scales.leg_moving": 0.25,
+            "v2_reward_scales.stall_penalty": -3,
+            "v2_reward_scales.energy_per_distance": 0.0005,
+        },
         "terrain_preset_id": "baseline",
         "terrain_overrides": {},
+        "physics_preset_id": "baseline",
+        "physics_overrides": {},
     }]
 
     open_history(page, panel["url"])
@@ -376,6 +734,9 @@ def test_native_spring_backend_is_submitted_restored_and_displayed(panel, page):
     page.locator('.nav-button[data-view="history"]').click()
     page.locator(".run-card", has_text="run_alpha").click()
     expect(page.locator("#details-title")).to_have_text("run_alpha")
+    expect(page.locator("#runs")).to_contain_text("spring backend: explicit")
+    expect(page.locator("#resume-run")).to_be_disabled()
+    expect(page.locator("#resume-run")).to_have_attribute("title", re.compile("Explicit.*cannot be resumed"))
     beta_card = page.locator(".run-card", has_text="Beta Foldered")
     beta_card.locator(".run-menu-trigger").click()
     beta_card.locator('button[data-action="compare"]').click()
@@ -397,11 +758,51 @@ def test_deploy_tab_renders_report_and_controls(panel, page):
     expect(page.locator("#deploy-console-live")).to_contain_text("Idle")
 
 
+def test_deploy_stage_counts_and_report_collapse(panel, page):
+    open_deploy(page, panel["url"])
+
+    # Stage outcome counts belong beside the heading, not buried under the list.
+    expect(page.locator("#deploy-stage-summary")).to_contain_text("1 pass")
+    expect(page.locator("#deploy-stage-summary")).to_contain_text("1 warn")
+
+    # The raw JSON is available but no longer occupies the panel by default.
+    expect(page.locator("#deploy-report-json")).to_be_hidden()
+    page.locator("#deploy-report-details > summary").click()
+    expect(page.locator("#deploy-report-json")).to_be_visible()
+
+    # Runtime knobs stay collapsed until an operator asks for them.
+    expect(page.locator("#deploy-use-tensorrt")).to_be_hidden()
+    page.locator("#deploy-advanced > summary").click()
+    expect(page.locator("#deploy-use-tensorrt")).to_be_visible()
+
+
+def test_deploy_next_step_names_the_next_action(panel, page):
+    open_deploy(page, panel["url"])
+
+    # A run with an ONNX and a warning report should be told to read the stages.
+    expect(page.locator("#deploy-next-step")).to_contain_text("warnings")
+    expect(page.locator("#deploy-next-step")).to_have_class(re.compile("deploy-next-warn"))
+    expect(page.locator("#deploy-artifact-status .status-completed")).to_have_count(2)
+
+    # A run with a checkpoint but no export must be pointed at the export path,
+    # and the action it cannot take has to say why it is disabled.
+    page.select_option("#deploy-run-select", "run_alpha")
+    expect(page.locator("#deploy-next-step")).to_contain_text("Export ONNX + Validate")
+    expect(page.locator("#deploy-validate-existing")).to_be_disabled()
+    expect(page.locator("#deploy-validate-existing")).to_have_attribute(
+        "data-tooltip", re.compile("no exported ONNX")
+    )
+    expect(page.locator("#deploy-export-validate")).to_be_enabled()
+
+
 def test_deploy_mobile_layout_has_no_horizontal_overflow(panel, page):
     page.set_viewport_size({"width": 390, "height": 900})
     open_deploy(page, panel["url"])
 
     expect(page.locator("#deploy-stage-list")).to_contain_text("Export Integrity")
+    page.locator("#deploy-advanced > summary").click()
+    page.locator("#deploy-report-details > summary").click()
+    page.locator("#deploy-console-details > summary").click()
     expect(page.locator("#deploy-report-json")).to_be_visible()
     overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
     assert overflow <= 1
@@ -603,6 +1004,54 @@ def test_malformed_hash_degrades_quietly(panel, page):
     expect(page.locator("#panel-status .toast")).to_have_count(0)
 
 
+def test_convergence_shows_effective_settings_and_unsaved_state(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.click('.nav-button[data-view="convergence"]')
+    page.wait_for_selector("#convergence-presets")
+
+    # Cooldown and the scalar tag are named in Definitions, so the page has to
+    # show what mother is actually using for them.
+    info = page.locator("#convergence-info-grid")
+    expect(info).to_contain_text("200 iterations")
+    expect(info).to_contain_text("60 minutes")
+    expect(info).to_contain_text("Train/mean_reward")
+
+    # A form that matches the saved config offers nothing to save.
+    expect(page.locator("#convergence-dirty-hint")).to_be_hidden()
+    expect(page.locator("#convergence-save")).to_be_disabled()
+
+    page.locator('#convergence-presets [data-preset="strict"]').click()
+    expect(page.locator("#convergence-dirty-hint")).to_be_visible()
+    expect(page.locator("#convergence-save")).to_be_enabled()
+
+    page.locator("#convergence-save").click()
+    expect(page.locator("#convergence-info-grid")).to_contain_text("400 iterations")
+    expect(page.locator("#convergence-dirty-hint")).to_be_hidden()
+
+
+def test_convergence_dependent_controls_follow_their_master_switch(panel, page):
+    page.goto(panel["url"])
+    page.wait_for_selector("#train-form")
+    page.click('.nav-button[data-view="convergence"]')
+    page.wait_for_selector("#convergence-presets")
+
+    expect(page.locator("#divergence-patience")).to_be_enabled()
+    expect(page.locator("#divergence-action-hint")).to_contain_text("reported only")
+
+    page.locator("#divergence-auto-stop").check()
+    expect(page.locator("#divergence-action-hint")).to_contain_text("stopped automatically")
+
+    page.locator("#divergence-enabled").uncheck()
+    expect(page.locator("#divergence-patience")).to_be_disabled()
+    expect(page.locator("#divergence-auto-stop")).to_be_disabled()
+    expect(page.locator("#divergence-action-hint")).to_contain_text("keeps training")
+
+    page.locator("#convergence-enabled").uncheck()
+    expect(page.locator('#convergence-presets [data-preset="strict"]')).to_be_disabled()
+    expect(page.locator("#convergence-auto-record")).to_be_disabled()
+
+
 def test_tooltip_is_reachable_by_keyboard(panel, page):
     page.goto(panel["url"])
     page.wait_for_selector("#train-form")
@@ -648,6 +1097,12 @@ def test_tooltip_is_reachable_by_keyboard(panel, page):
         "document.activeElement === document.querySelector('#convergence-presets [data-preset=\"strict\"]')"
     )
     assert is_focused, "mouse click did not focus the sibling element"
+    # The click leaves the pointer resting on the button, so :hover is still
+    # driving the 160ms fade. Move the pointer away and let the transition
+    # settle, otherwise this reads a mid-fade value rather than the
+    # focus-visible state under test.
+    page.mouse.move(0, 0)
+    page.wait_for_timeout(250)
     click_opacity = strict_button.evaluate("(el) => getComputedStyle(el, '::after').opacity")
     assert float(click_opacity) == 0, (
         f"tooltip should not appear on mouse click focus (opacity={click_opacity})"
@@ -800,3 +1255,274 @@ def test_freshness_reports_failed_when_the_backend_stops(panel, page):
         "document.querySelector('#freshness')?.dataset.state === 'failed'",
         timeout=45000,
     )
+
+
+def test_closing_a_comparison_leaves_the_details_panel_usable(panel, page):
+    # Comparison used to overwrite .details-panel's innerHTML, which destroyed the
+    # element ids renderRunDetails() writes to. Closing the comparison then threw
+    # on every later render, including the one inside the runs poll, so History
+    # stopped refreshing with no visible error.
+    page_errors: list[str] = []
+    page.on("pageerror", lambda exc: page_errors.append(str(exc)))
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#details-title")).to_have_text("Beta Foldered")
+
+    alpha_card = page.locator(".run-card", has_text="run_alpha")
+    alpha_card.locator(".run-menu-trigger").click()
+    alpha_card.locator("[data-action='compare']").click()
+    expect(page.locator("#comparison-panel")).to_be_visible()
+    expect(page.locator("#comparison-grid")).to_contain_text("run_alpha")
+
+    page.locator("#exit-comparison-btn").click()
+    expect(page.locator("#comparison-panel")).to_be_hidden()
+    expect(page.locator("#details-title")).to_have_text("Beta Foldered")
+    expect(page.locator("#notes-editor")).to_be_visible()
+
+    # The details pane must still respond to a fresh selection.
+    page.locator(".run-card", has_text="run_alpha").click()
+    expect(page.locator("#details-title")).to_have_text("run_alpha")
+
+    # The runs poll keeps calling renderRunDetails(); it must not be throwing.
+    page.wait_for_timeout(1200)
+    assert page_errors == []
+
+
+def test_escape_closes_a_comparison(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    alpha_card = page.locator(".run-card", has_text="run_alpha")
+    alpha_card.locator(".run-menu-trigger").click()
+    alpha_card.locator("[data-action='compare']").click()
+    expect(page.locator("#comparison-panel")).to_be_visible()
+
+    page.keyboard.press("Escape")
+    expect(page.locator("#comparison-panel")).to_be_hidden()
+
+
+def test_running_run_card_renders_a_single_progress_bar(panel, page):
+    open_history(page, panel["url"])
+    page.evaluate(
+        """
+        const run = state.runs.find((item) => item.id === 'panel_run_beta');
+        run.status = 'running';
+        run.progress = {
+          iteration: 5,
+          total_iterations: 10,
+          percent: 50,
+          updated_at: new Date().toISOString(),
+        };
+        renderRuns();
+        """
+    )
+    beta_card = page.locator(".run-card", has_text="Beta Foldered")
+    expect(beta_card.locator(".run-progress")).to_have_count(1)
+
+
+def test_status_sort_ranks_by_urgency_not_alphabet(panel, page):
+    # Alphabetically "completed" sorts above "failed", which buried the runs an
+    # operator actually needs to look at. The order is now operational.
+    open_history(page, panel["url"])
+    page.select_option("#sort-runs", "status")
+    expect(page.locator(".run-card").first.locator(".status-pill")).to_have_text("failed")
+    expect(page.locator(".run-card").last.locator(".status-pill")).to_have_text("completed")
+
+
+def test_history_filters_survive_a_reload(panel, page):
+    open_history(page, panel["url"])
+    page.fill("#run-search", "beta")
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+    expect(page.locator("#run-count-badge")).to_contain_text("of")
+
+    page.reload()
+    page.wait_for_selector(".run-card")
+    expect(page.locator("#run-search")).to_have_value("beta")
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+
+    page.locator("#clear-run-filters").click()
+    expect(page.locator("#runs")).to_contain_text("run_alpha")
+    expect(page.locator("#run-search")).to_have_value("")
+
+
+def test_search_matches_folder_and_notes(panel, page):
+    open_history(page, panel["url"])
+    page.fill("#run-search", "Good Runs")
+    expect(page.locator("#runs")).to_contain_text("Beta Foldered")
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+
+
+def test_unsaved_notes_survive_switching_runs(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#notes-editor")).to_be_enabled()
+    page.fill("#notes-editor", "half-written observation")
+
+    page.locator(".run-card", has_text="run_alpha").click()
+    expect(page.locator("#details-title")).to_have_text("run_alpha")
+
+    page.locator(".run-card", has_text="Beta Foldered").click()
+    expect(page.locator("#notes-editor")).to_have_value("half-written observation")
+    expect(page.locator("#notes-dirty-flag")).to_be_visible()
+
+
+def test_slash_focuses_search_and_j_k_move_the_selection(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card").first.click()
+    first_title = page.locator("#details-title").inner_text()
+
+    page.keyboard.press("j")
+    expect(page.locator("#details-title")).not_to_have_text(first_title)
+    page.keyboard.press("k")
+    expect(page.locator("#details-title")).to_have_text(first_title)
+
+    page.keyboard.press("/")
+    assert page.evaluate("document.activeElement.id") == "run-search"
+
+
+def test_bulk_toolbar_keeps_a_stable_height_across_selection(panel, page):
+    # Mounting the bulk controls only once a run is ticked reflowed the run list
+    # under the pointer, so they stay mounted and merely disable.
+    open_history(page, panel["url"])
+    toolbar = page.locator(".bulk-toolbar")
+    expect(page.locator("#delete-selected-runs")).to_be_visible()
+    expect(page.locator("#delete-selected-runs")).to_be_disabled()
+    before = toolbar.bounding_box()["height"]
+
+    page.locator(".run-card", has_text="Beta Foldered").locator(".run-select-checkbox").check()
+    expect(page.locator("#bulk-selected-count")).to_have_text("1 selected")
+    expect(page.locator("#delete-selected-runs")).to_be_enabled()
+    assert toolbar.bounding_box()["height"] == before
+
+
+def test_dragging_a_run_onto_a_folder_moves_it(panel, page):
+    open_history(page, panel["url"])
+    page.locator('.folder-select[data-folder="Good Runs"]').click()
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+
+    page.locator('.folder-select[data-folder="__all__"]').click()
+    page.locator(".run-card", has_text="run_alpha").drag_to(
+        page.locator('.folder-item[data-drop-folder="Good Runs"]')
+    )
+    expect(page.locator("#panel-status")).to_contain_text("Moved 1 run to Good Runs")
+
+    page.locator('.folder-select[data-folder="Good Runs"]').click()
+    expect(page.locator("#runs")).to_contain_text("run_alpha")
+
+
+def test_all_runs_is_not_a_drop_target(panel, page):
+    open_history(page, panel["url"])
+    assert page.locator('.folder-item[data-drop-folder="__all__"]').count() == 0
+    assert page.locator('.folder-item[data-drop-folder="__uncategorized__"]').count() == 1
+
+
+def test_bulk_delete_requires_a_typed_acknowledgement(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").locator(".run-select-checkbox").check()
+    page.locator("#delete-selected-runs").click()
+
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    expect(page.locator("#confirm-dialog-input-wrap")).to_be_visible()
+    expect(page.locator("#confirm-dialog-confirm")).to_be_disabled()
+    # Nothing is marked as deleting while the operator is still deciding.
+    expect(page.locator(".run-card.deleting")).to_have_count(0)
+
+    page.fill("#confirm-dialog-input", "DELETE")
+    expect(page.locator("#confirm-dialog-confirm")).to_be_enabled()
+    page.locator("#confirm-dialog-cancel").click()
+    expect(page.locator("#runs")).to_contain_text("Beta Foldered")
+
+
+def test_folder_creation_uses_the_in_app_dialog(panel, page):
+    open_history(page, panel["url"])
+    page.locator("#create-folder-btn").click()
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    expect(page.locator("#confirm-dialog-title")).to_have_text("New Folder")
+
+    page.fill("#confirm-dialog-input", "Sweep A")
+    page.locator("#confirm-dialog-confirm").click()
+    expect(page.locator("#folder-sidebar")).to_contain_text("Sweep A")
+    assert page.locator('.folder-select[data-folder="Sweep A"]').count() == 1
+
+
+def test_run_list_popups_stay_inside_the_scrolling_list(panel, page):
+    # The run list is its own scroll container, so a popup drawn past a card's
+    # edge is clipped at the container boundary rather than overlaying the page.
+    open_history(page, panel["url"])
+    list_box = page.locator("#runs").bounding_box()
+
+    checkbox = page.locator(".run-card").first.locator(".run-select-checkbox")
+    checkbox.hover()
+    tip_top = page.evaluate(
+        """() => {
+          const box = document.querySelector('.run-card .run-select-checkbox');
+          const style = getComputedStyle(box, '::after');
+          return box.getBoundingClientRect().bottom + parseFloat(style.marginTop || 0);
+        }"""
+    )
+    assert tip_top >= list_box["y"]
+
+    page.locator(".run-card").first.locator(".run-menu-trigger").click()
+    menu = page.locator(".run-menu[data-open='true']").bounding_box()
+    assert menu["y"] >= list_box["y"]
+    assert menu["y"] + menu["height"] <= list_box["y"] + list_box["height"] + 1
+
+
+def drag_run_over_folder(page, run_text: str, folder_selector: str):
+    """Dispatch real HTML5 drag events; synthetic mouse moves do not emit them."""
+    transfer = page.evaluate_handle("() => new DataTransfer()")
+    page.locator(".run-card", has_text=run_text).dispatch_event(
+        "dragstart", {"dataTransfer": transfer}
+    )
+    page.locator(folder_selector).dispatch_event("dragover", {"dataTransfer": transfer})
+    return transfer
+
+
+def test_drag_marks_valid_targets_and_states_the_outcome(panel, page):
+    open_history(page, panel["url"])
+    alpha = page.locator(".run-card", has_text="run_alpha")
+    good_runs = page.locator('.folder-item[data-drop-folder="Good Runs"]')
+    uncategorized = page.locator('.folder-item[data-drop-folder="__uncategorized__"]')
+
+    transfer = drag_run_over_folder(page, "run_alpha", '.folder-item[data-drop-folder="Good Runs"]')
+
+    expect(page.locator("body")).to_have_class(re.compile("dragging-runs"))
+    expect(alpha).to_have_class(re.compile("dragging"))
+    expect(good_runs).to_have_attribute("data-drop-label", "Move 1 run here")
+    expect(good_runs).to_have_class(re.compile("drop-target"))
+    # The outcome line is drawn from the attribute the row carries.
+    label = page.evaluate(
+        """() => getComputedStyle(
+             document.querySelector('.folder-item.drop-target'), '::after'
+           ).content"""
+    )
+    assert "Move 1 run here" in label
+    # run_alpha is already uncategorized, so that row cannot receive it.
+    expect(uncategorized).to_have_class(re.compile("drop-unavailable"))
+
+    good_runs.dispatch_event("drop", {"dataTransfer": transfer})
+    expect(page.locator("#panel-status")).to_contain_text("Moved 1 run to Good Runs")
+    expect(page.locator("body")).not_to_have_class(re.compile("dragging-runs"))
+
+
+def test_a_selection_drag_reports_its_whole_count(panel, page):
+    open_history(page, panel["url"])
+    page.locator("#select-visible-runs").click()
+    expect(page.locator("#bulk-selected-count")).to_have_text("3 selected")
+
+    drag_run_over_folder(page, "run_alpha", '.folder-item[data-drop-folder="Good Runs"]')
+    expect(page.locator('.folder-item[data-drop-folder="Good Runs"]')).to_have_attribute(
+        "data-drop-label", "Move 3 runs here"
+    )
+
+
+def test_drag_state_is_cleared_when_a_drag_is_abandoned(panel, page):
+    open_history(page, panel["url"])
+    alpha = page.locator(".run-card", has_text="run_alpha")
+    transfer = page.evaluate_handle("() => new DataTransfer()")
+    alpha.dispatch_event("dragstart", {"dataTransfer": transfer})
+    expect(page.locator("body")).to_have_class(re.compile("dragging-runs"))
+
+    alpha.dispatch_event("dragend", {"dataTransfer": transfer})
+    expect(page.locator("body")).not_to_have_class(re.compile("dragging-runs"))
+    expect(page.locator(".run-card.dragging")).to_have_count(0)
+    assert page.locator("[data-drop-folder][data-drop-label]").count() == 0
