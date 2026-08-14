@@ -1799,7 +1799,11 @@ function relatedJobsSection(run) {
   return `
     <section id="related-jobs-panel" class="subpanel">
       <h3>Related Jobs</h3>
-      ${relatedJobs.length ? `<div class="mini-list">${relatedJobs.map((job) => `
+      ${relatedJobs.length ? `<div class="mini-list">${relatedJobs.map((job) => {
+        const canCancel = compatibility().compatible
+          && String(job.status || "").toLowerCase() === "queued"
+          && (role() === "admin" || String(job.actor_id || "") === String(state.user?.id || ""));
+        return `
         <div class="related-job-row">
           <span class="related-job-main">
             <strong>${escapeHtml(job.type)}</strong>
@@ -1808,8 +1812,9 @@ function relatedJobsSection(run) {
           <small>${escapeHtml(jobQueueLabel(job, state.snapshot.targetMachine || state.snapshot.machine))}</small>
           ${jobExtraLine(job)}
           <small>${escapeHtml(formatRelativeTime(job.created_at))}</small>
-        </div>
-      `).join("")}</div>` : empty("No remote jobs linked to this run yet.")}
+          ${canCancel ? `<button data-action="cancel-job" data-job-id="${escapeHtml(job.id)}">Cancel queued job</button>` : ""}
+        </div>`;
+      }).join("")}</div>` : empty("No remote jobs linked to this run yet.")}
     </section>
   `;
 }
@@ -3197,6 +3202,13 @@ async function queueRunAction(type, message, payload = {}, runOverride = null) {
   setMessage(message);
 }
 
+async function cancelQueuedJob(jobId) {
+  assertMutationAllowed();
+  await rpc("cancel_queued_job", { p_job_id: jobId });
+  await refresh({ silent: true });
+  setMessage("Queued job cancelled.");
+}
+
 async function checkOrCreateVideo(runOverride = null) {
   const run = runOverride || selectedRun();
   if (!run) return;
@@ -3629,6 +3641,7 @@ document.addEventListener("click", async (event) => {
     if (action === "open-run-deploy") return openSelectedRunDeploy();
     if (action === "job-compact-run") return await compactSelectedRun();
     if (action === "delete-run") return await deleteSelectedRun();
+    if (action === "cancel-job") return await cancelQueuedJob(target.dataset.jobId);
     if (action === "deploy-validate") return await queueDeployAction("validate_deploy");
     if (action === "deploy-export-validate") return await queueDeployAction("export_validate_deploy");
     if (action === "deploy-mujoco-smoke") return await queueDeployAction("mujoco_smoke");

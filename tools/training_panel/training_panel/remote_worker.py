@@ -211,7 +211,10 @@ def _safe_deploy_projection(run: dict) -> dict:
         "completed_at": run.get("deploy_completed_at"),
         "error": run.get("deploy_error"),
     }
-    latest = latest_deploy_report(run)
+    try:
+        latest = latest_deploy_report(run)
+    except Exception:
+        latest = None
     report = latest.get("report") if isinstance(latest, dict) else None
     if isinstance(report, dict):
         stages = []
@@ -1591,8 +1594,8 @@ class RemoteWorker:
             record["bytes"] = Path(local_path).stat().st_size
         if artifact.get("public_url"):
             record["public_url"] = str(artifact["public_url"])
-        if kind == "video":
-            storage_path = self._ensure_video_storage_path(run_id, local_path)
+        if kind in {"video", "mujoco_video"}:
+            storage_path = self._ensure_video_storage_path(run_id, local_path, kind=kind)
             if storage_path:
                 record["storage_path"] = storage_path
         elif kind == "tensorboard_summary":
@@ -1606,15 +1609,16 @@ class RemoteWorker:
                 )
         return record
 
-    def _ensure_video_storage_path(self, run_id: str, local_path: str) -> str | None:
+    def _ensure_video_storage_path(self, run_id: str, local_path: str, *, kind: str = "video") -> str | None:
         path = Path(local_path)
         if not path.is_file():
             return None
-        existing = self._existing_artifact(run_id, "video", local_path)
+        existing = self._existing_artifact(run_id, kind, local_path)
         if existing and existing.get("storage_path"):
             self._sync_storage_reused = getattr(self, "_sync_storage_reused", 0) + 1
             return str(existing["storage_path"])
-        storage_path = f"runs/{_storage_safe(run_id)}/videos/{_storage_safe(path.name)}"
+        folder = "mujoco" if kind == "mujoco_video" else "videos"
+        storage_path = f"runs/{_storage_safe(run_id)}/{folder}/{_storage_safe(path.name)}"
         self.client.upload_storage_object(VIDEO_BUCKET, storage_path, path, content_type="video/mp4")
         self._sync_videos_uploaded = getattr(self, "_sync_videos_uploaded", 0) + 1
         return storage_path
@@ -1714,6 +1718,7 @@ class RemoteWorker:
                 "process_id": result.get("process_id") or result_payload.get("id") or "",
                 "reward_preset_id": payload.get("reward_preset_id") or "",
                 "terrain_preset_id": payload.get("terrain_preset_id") or "",
+                "physics_preset_id": payload.get("physics_preset_id") or "",
                 "error": error,
             }
             record = {
@@ -1728,6 +1733,8 @@ class RemoteWorker:
                 "job_id": _uuid_or_none(str(job.get("id") or "")),
                 "points": score_activity_event(job_type, outcome=normalized_outcome, category=category, job_type=job_type),
                 "metadata": metadata,
+                "source_type": "worker_job",
+                "source_id": f"{job.get('id') or 'unknown'}:{normalized_outcome}",
                 "created_at": _now_iso(),
             }
             self.client.insert("team_activity_events", record, prefer="return=minimal")

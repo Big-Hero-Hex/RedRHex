@@ -27,9 +27,11 @@ from tools.training_panel.training_panel.remote_manager import (
     parse_env_file,
 )
 from tools.training_panel.training_panel.remote_worker import (
+    GPU_JOB_TYPES,
     RemoteJobExecutor,
     RemoteJobResult,
     RemoteWorker,
+    remote_capabilities,
     run_artifacts,
 )
 
@@ -193,6 +195,7 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(payload["machine_id"], "lab-pc")
             self.assertTrue(payload["gpu_locked"])
             self.assertEqual(payload["queue_depth"], 2)
+            self.assertEqual(payload["remote_protocol_version"], REMOTE_PROTOCOL_VERSION)
 
     def test_remote_roles(self):
         self.assertFalse(role_allows("viewer", "start_training"))
@@ -202,6 +205,22 @@ class RemoteTests(unittest.TestCase):
         self.assertTrue(role_allows("operator", "send_missed_notifications"))
         self.assertFalse(role_allows("operator", "delete_run"))
         self.assertTrue(role_allows("admin", "delete_run"))
+        for job_type in ("export_video_drive", "validate_deploy", "export_validate_deploy", "mujoco_smoke", "record_mujoco_video"):
+            self.assertTrue(role_allows("operator", job_type))
+        self.assertIn("export_validate_deploy", GPU_JOB_TYPES)
+        self.assertNotIn("validate_deploy", GPU_JOB_TYPES)
+        self.assertNotIn("mujoco_smoke", GPU_JOB_TYPES)
+
+    def test_remote_capabilities_are_versioned_and_omit_host_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = remote_capabilities(self.make_paths(Path(tmp)), drive_status={"configured": True})
+            self.assertEqual(payload["protocol_version"], REMOTE_PROTOCOL_VERSION)
+            self.assertIn("sensor_v2_full", payload["training_routes"])
+            self.assertGreater(payload["physics"]["field_count"], 100)
+            text = str(payload)
+            self.assertNotIn("mujoco_model_path", text)
+            self.assertNotIn("deploy_runtime_python", text)
+            self.assertFalse(payload["integration_readiness"]["terminal"])
 
     def test_worker_refuses_jobs_when_remote_acceptance_is_disabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -540,6 +559,78 @@ class RemoteTests(unittest.TestCase):
             executor.processes.start_video_recording.assert_called_once()
             self.assertEqual(executor.processes.start_video_recording.call_args.kwargs["checkpoint"], str(checkpoint_5))
             self.assertEqual(result.payload["checkpoint_iteration"], 5)
+
+    def test_executor_resolves_checkpoint_reference_and_rejects_host_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executor = self._make_executor(root)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "run_x"
+            log_dir.mkdir(parents=True)
+            checkpoint = log_dir / "model_7.pt"
+            checkpoint.write_text("checkpoint", encoding="utf-8")
+            executor.history.add_run({"id": "run_x", "latest_checkpoint": str(checkpoint), "log_dir": str(log_dir)})
+            executor.processes.start_onnx_export = MagicMock(return_value={"id": "onnx_1"})
+
+            executor.execute({
+                "type": "export_onnx",
+                "actor_role": "operator",
+                "payload": {
+                    "run_id": "run_x",
+                    "checkpoint_ref": {"run_id": "run_x", "checkpoint_iteration": 7},
+                },
+            })
+            self.assertEqual(executor.processes.start_onnx_export.call_args.kwargs["checkpoint"], str(checkpoint))
+            with self.assertRaisesRegex(ValueError, "not a host checkpoint path"):
+                executor.execute({
+                    "type": "export_onnx",
+                    "actor_role": "operator",
+                    "payload": {"run_id": "run_x", "checkpoint": str(checkpoint)},
+                })
+
+    def test_executor_remote_deploy_uses_fixed_repository_owned_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = self._make_executor(Path(tmp))
+            executor.history.add_run({"id": "run_x", "onnx_path": "policy.onnx"})
+            executor.processes.start_deploy_validation = MagicMock(return_value={"id": "deploy_1"})
+            result = executor.execute({
+                "type": "mujoco_smoke",
+                "actor_role": "operator",
+                "payload": {"run_id": "run_x", "mujoco_model_path": "/tmp/evil", "shell": "echo no"},
+            })
+            kwargs = executor.processes.start_deploy_validation.call_args.kwargs
+            self.assertTrue(kwargs["mujoco_only"])
+            self.assertNotIn("mujoco_model_path", kwargs)
+            self.assertEqual(result.process_id, "deploy_1")
+
+    def test_executor_mujoco_recording_rejects_unlisted_scenario(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = self._make_executor(Path(tmp))
+            executor.history.add_run({"id": "run_x"})
+            with self.assertRaisesRegex(ValueError, "scenario must be one of"):
+                executor.execute({
+                    "type": "record_mujoco_video",
+                    "actor_role": "operator",
+                    "payload": {"run_id": "run_x", "scenario": "../../shell"},
+                })
+
+    def test_worker_uses_authoritative_profile_role_not_spoofed_job_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = self.make_paths(Path(tmp))
+            job = {
+                "id": "job_one",
+                "type": "delete_run",
+                "actor_id": TEST_ACTOR_ID,
+                "actor_role": "admin",
+                "payload": {"run_id": "run_x", "confirmation": "run_x"},
+            }
+            client = FakeClient(job=job)
+            client.select_by_table["profiles"] = [{"id": TEST_ACTOR_ID, "role": "viewer"}]
+            executor = FakeExecutor()
+            worker = RemoteWorker(RemoteConfig(machine_id="lab-pc", accept_jobs=True), paths, client, executor=executor)
+            result = worker.poll_once()
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("viewer", result["error"])
+            self.assertEqual(client.completed, [])
 
     def test_executor_delete_run(self):
         with tempfile.TemporaryDirectory() as tmp:
