@@ -634,6 +634,24 @@ class ProcessRegistryTests(unittest.TestCase):
                     proc.wait(timeout=8)
                 time.sleep(0.1)
 
+    def test_checkpoint_zero_video_is_tagged_for_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            video = root / "rl-video-step-0.mp4"
+            video.write_bytes(b"video")
+
+            tagged = registry._tag_video_with_checkpoint(
+                video,
+                "video_fixture",
+                {"video_checkpoint_iteration": 0},
+            )
+
+            self.assertEqual(Path(tagged).name, "model_0_video_fixture.mp4")
+            self.assertTrue(Path(tagged).is_file())
+            self.assertFalse(video.exists())
+
     def test_manual_forward_fast_video_recording_starts_forward(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -22,6 +22,7 @@ last_reviewed: 2026-08-14
 
 - [架構與 contract](architecture.zh-TW.md)
 - [移植與擴充指南](porting.zh-TW.md)
+- [3.6.2 版本紀錄](releases/v3-6-2.zh-TW.md)
 - [3.6.1 版本紀錄](releases/v3-6-1.zh-TW.md)
 - [3.6.0 版本紀錄](releases/v3-6-0.zh-TW.md)
 - [3.5.0 版本紀錄](releases/v3-5-0.zh-TW.md)

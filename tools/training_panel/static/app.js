@@ -12,6 +12,7 @@ const state = {
   applyingRoute: false,
   currentView: "train",
   selectedRun: null,
+  selectedCheckpointIteration: null,
   runs: [],
   activeProcessMap: {},
   activeProcesses: [],
@@ -614,18 +615,31 @@ function updateTrainingPresetIndicators() {
 
 function formData(form) {
   const data = Object.fromEntries(new FormData(form).entries());
+  const route = data.training_route || "standard";
+  const isSensor = route.startsWith("sensor_v2");
   data.display_name = String(data.display_name || "").trim();
   data.headless = IS_REMOTE_DESKTOP || form.elements.headless.checked;
   data.resume = Boolean(data.checkpoint);
   data.num_envs = Number(data.num_envs);
-  data.max_iterations = Number(data.max_iterations);
-  data.teacher_iterations = Number(data.teacher_iterations || 1500);
-  data.distillation_iterations = Number(data.distillation_iterations || 800);
-  data.ppo_iterations = Number(data.ppo_iterations || 1500);
-  data.reward_preset_id = rewardPresetIdForTraining();
-  data.reward_overrides = rewardOverridesForTraining();
-  data.terrain_preset_id = terrainPresetIdForTraining();
-  data.terrain_overrides = terrainOverridesForTraining();
+  if (route === "sensor_v2_full") {
+    delete data.max_iterations;
+    data.teacher_iterations = Number(data.teacher_iterations);
+    data.distillation_iterations = Number(data.distillation_iterations);
+    data.ppo_iterations = Number(data.ppo_iterations);
+  } else {
+    data.max_iterations = Number(data.max_iterations);
+    delete data.teacher_iterations;
+    delete data.distillation_iterations;
+    delete data.ppo_iterations;
+  }
+  if (isSensor) {
+    delete data.task;
+  } else {
+    data.reward_preset_id = rewardPresetIdForTraining();
+    data.reward_overrides = rewardOverridesForTraining();
+    data.terrain_preset_id = terrainPresetIdForTraining();
+    data.terrain_overrides = terrainOverridesForTraining();
+  }
   data.physics_preset_id = physicsPresetIdForTraining();
   data.physics_overrides = physicsOverridesForTraining();
   if (state.rewardDraftPreset?.source_run_id && data.reward_preset_id === state.rewardDraftPreset.id) {
@@ -1513,8 +1527,22 @@ function renderRuns() {
   syncRunMenuState();
 }
 
-function videoUrl(run) {
-  return `/api/runs/${encodeURIComponent(run.id)}/video?v=${encodeURIComponent(run.latest_video || run.updated_at || "")}`;
+function selectedCheckpoint(run) {
+  if (!run || state.selectedCheckpointIteration === null) return null;
+  return (run.checkpoint_history || []).find(
+    (checkpoint) => checkpoint.iteration === state.selectedCheckpointIteration
+  ) || null;
+}
+
+function displayedVideoPath(run) {
+  const checkpoint = selectedCheckpoint(run);
+  return checkpoint ? checkpoint.video || "" : run?.latest_video || "";
+}
+
+function videoUrl(run, checkpoint = null) {
+  const params = new URLSearchParams({ v: checkpoint?.video || run.latest_video || run.updated_at || "" });
+  if (checkpoint) params.set("checkpoint_iteration", String(checkpoint.iteration));
+  return `/api/runs/${encodeURIComponent(run.id)}/video?${params.toString()}`;
 }
 
 function clearVideoPlayer() {
@@ -1524,7 +1552,8 @@ function clearVideoPlayer() {
 }
 
 function videoFolder(run) {
-  return run && run.latest_video ? String(run.latest_video).replace(/\/[^/]+$/, "") : "";
+  const video = displayedVideoPath(run);
+  return video ? String(video).replace(/\/[^/]+$/, "") : "";
 }
 
 function onnxFolder(run) {
@@ -1550,51 +1579,125 @@ function videoPresetLabel(preset) {
   return `${name} · ${preset.width}x${preset.height} · ${preset.length} steps`;
 }
 
+function renderCheckpointEvolution(run) {
+  const details = $("#checkpoint-evolution");
+  const count = $("#checkpoint-evolution-count");
+  const help = $("#checkpoint-evolution-help");
+  const timeline = $("#checkpoint-timeline");
+  const latestButton = $("#show-latest-video");
+  const checkpoints = run?.checkpoint_history || [];
+  if (!details || !count || !help || !timeline || !latestButton) return;
+  if (!checkpoints.length) {
+    details.hidden = true;
+    timeline.innerHTML = "";
+    return;
+  }
+  details.hidden = false;
+  count.textContent = `${checkpoints.length} save point${checkpoints.length === 1 ? "" : "s"}`;
+  help.textContent = checkpoints.length === 1
+    ? "One checkpoint is saved. Open it to record or review this point."
+    : "Open only when you want to compare an older save point.";
+  latestButton.classList.toggle("active", state.selectedCheckpointIteration === null);
+  latestButton.setAttribute("aria-pressed", String(state.selectedCheckpointIteration === null));
+  timeline.innerHTML = [...checkpoints]
+    .reverse()
+    .map((checkpoint) => {
+      const selected = checkpoint.iteration === state.selectedCheckpointIteration;
+      const saved = checkpoint.created_at ? `Saved ${formatRelativeTime(checkpoint.created_at)}` : "Saved checkpoint";
+      const videoState = checkpoint.video ? "Video ready" : "No video yet";
+      return `
+        <button type="button" class="checkpoint-point ${selected ? "active" : ""}"
+          data-checkpoint-iteration="${escapeHtml(String(checkpoint.iteration))}"
+          aria-pressed="${selected}">
+          <span class="checkpoint-marker" aria-hidden="true"></span>
+          <span class="checkpoint-point-copy">
+            <span class="checkpoint-point-title">
+              <strong>Iteration ${escapeHtml(String(checkpoint.iteration))}</strong>
+              ${checkpoint.is_latest ? '<span class="status-badge muted-pill">Latest checkpoint</span>' : ""}
+              ${checkpoint.video ? '<span class="status-badge status-completed">Video</span>' : ""}
+            </span>
+            <small>${escapeHtml(saved)} · ${escapeHtml(videoState)}</small>
+          </span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function selectCheckpointForVideo(iteration) {
+  state.selectedCheckpointIteration = iteration;
+  renderVideoPanel(state.selectedRun);
+}
+
 function renderVideoPanel(run) {
   const panel = $("#video-panel");
   const stateBadge = $("#video-state");
   const video = $("#result-video");
   const message = $("#video-message");
+  const recordButton = $("#record-video");
   const hasCheckpoint = Boolean(run && run.latest_checkpoint);
   if (!run || (!run.latest_video && !run.video_status && !hasCheckpoint)) {
     panel.hidden = true;
+    renderCheckpointEvolution(null);
     clearVideoPlayer();
     message.textContent = "";
     return;
   }
   panel.hidden = false;
+  renderCheckpointEvolution(run);
   const gpuProcess = activeGpuProcess();
   const videoProcessId = activeVideoProcessId(run);
-  $("#record-video").disabled = !hasCheckpoint || Boolean(gpuProcess);
+  const checkpoint = selectedCheckpoint(run);
+  const videoPath = displayedVideoPath(run);
+  recordButton.disabled = !hasCheckpoint || Boolean(gpuProcess);
+  recordButton.textContent = checkpoint ? `Record Iter ${checkpoint.iteration}` : "Record Latest";
+  recordButton.dataset.tooltip = checkpoint
+    ? `Record a high-quality video from checkpoint iteration ${checkpoint.iteration}`
+    : "Record a high-quality video from the latest checkpoint";
   $("#stop-recording").hidden = !videoProcessId;
-  $("#open-video-folder").hidden = !run.latest_video;
+  $("#open-video-folder").hidden = !videoPath;
   setLocalOnlyButtonState(
     $("#open-video-folder"),
-    !run.latest_video,
+    !videoPath,
     "Open the folder containing recorded videos (local only)"
   );
-  $("#copy-video-path").hidden = !run.latest_video;
+  $("#copy-video-path").hidden = !videoPath;
   if (videoProcessId || run.video_status === "recording") {
-    if (run.latest_video) {
-      const src = videoUrl(run);
+    if (videoPath) {
+      const src = videoUrl(run, checkpoint);
       if (video.getAttribute("src") !== src) video.setAttribute("src", src);
     } else {
       clearVideoPlayer();
     }
-    stateBadge.textContent = "Recording";
+    const recordingIteration = run.video_checkpoint_iteration;
+    stateBadge.textContent = recordingIteration === undefined || recordingIteration === null
+      ? "Recording"
+      : `Recording Iter ${recordingIteration}`;
     stateBadge.className = "status-badge status-running";
-    message.textContent = "A headless playback is recording now. The video will appear here when it finishes.";
+    message.textContent = "A headless playback is recording now. This save point will update when it finishes.";
     return;
   }
-  if (run.latest_video) {
-    const src = videoUrl(run);
-    stateBadge.textContent = "Video Ready";
+  if (videoPath) {
+    const src = videoUrl(run, checkpoint);
+    stateBadge.textContent = checkpoint ? `Iter ${checkpoint.iteration} Video` : "Latest Video";
     stateBadge.className = "status-badge status-completed";
     if (video.getAttribute("src") !== src) video.setAttribute("src", src);
-    message.textContent = `Saved from the latest checkpoint. ${run.video_params ? videoPresetLabel(run.video_params) : ""}`;
+    if (checkpoint) {
+      message.textContent = `Showing checkpoint iteration ${checkpoint.iteration}. Choose another save point to compare its progress.`;
+    } else {
+      const source = (run.checkpoint_history || []).find((item) => item.video === run.latest_video);
+      const iteration = source ? ` from iteration ${source.iteration}` : "";
+      message.textContent = `Latest recording${iteration}. ${run.video_params ? videoPresetLabel(run.video_params) : ""}`;
+    }
     return;
   }
   clearVideoPlayer();
+  if (checkpoint) {
+    stateBadge.textContent = "Not Recorded";
+    stateBadge.className = "status-badge muted-pill";
+    message.textContent = `Checkpoint iteration ${checkpoint.iteration} is ready. Record it to add this point to the evolution.`;
+    return;
+  }
   if (run.video_status === "missing_checkpoint") {
     stateBadge.textContent = "Waiting";
     stateBadge.className = "status-badge status-interrupted";
@@ -2333,6 +2436,14 @@ async function loadRuns() {
       const selected = findRun(selectedId);
       if (selected) {
         state.selectedRun = selected;
+        if (
+          state.selectedCheckpointIteration !== null &&
+          !(selected.checkpoint_history || []).some(
+            (item) => item.iteration === state.selectedCheckpointIteration
+          )
+        ) {
+          state.selectedCheckpointIteration = null;
+        }
       } else {
         clearRunDetailState({ render: false });
       }
@@ -2367,6 +2478,9 @@ async function selectRun(runId) {
   if (!state.selectedRun || state.selectedRun.id !== runId) {
     state.renameDirty = false;
     state.renameDraftRunId = null;
+    state.selectedCheckpointIteration = null;
+    const checkpointEvolution = $("#checkpoint-evolution");
+    if (checkpointEvolution) checkpointEvolution.open = false;
   }
   state.selectedRun = run;
   writeHashRoute();
@@ -2491,12 +2605,13 @@ async function openProcessLogFolder() {
 }
 
 async function copyVideoPath() {
-  if (!state.selectedRun || !state.selectedRun.latest_video) {
+  const video = displayedVideoPath(state.selectedRun);
+  if (!video) {
     setStatus("No video path is available yet.");
     return;
   }
-  await copyText(state.selectedRun.latest_video);
-  setStatus(`Video path copied: ${state.selectedRun.latest_video}`);
+  await copyText(video);
+  setStatus(`Video path copied: ${video}`);
 }
 
 async function openOnnxFolder() {
@@ -2651,6 +2766,7 @@ function hideRunConfigPanels() {
 
 function clearRunDetailState({ render = true } = {}) {
   state.selectedRun = null;
+  state.selectedCheckpointIteration = null;
   state.comparisonRun = null;
   state.comparisonMode = false;
   state.debugTarget = null;
@@ -2842,14 +2958,19 @@ async function recordVideo() {
   }
   const data = await api(`/api/runs/${encodeURIComponent(state.selectedRun.id)}/record-video`, {
     method: "POST",
-    body: JSON.stringify({ device: "cuda:0" }),
+    body: JSON.stringify({
+      device: "cuda:0",
+      ...(state.selectedCheckpointIteration === null
+        ? {}
+        : { checkpoint_iteration: state.selectedCheckpointIteration }),
+    }),
   });
   const target = { type: "process", id: data.id };
   setDebugTarget(target);
   setStatus(
     data.attach_command
-      ? `Recording high quality video. Attach with: ${data.attach_command}`
-      : "Recording high quality video."
+      ? `Recording iteration ${data.checkpoint_iteration} in high quality. Attach with: ${data.attach_command}`
+      : `Recording iteration ${data.checkpoint_iteration} in high quality.`
   );
   await loadRuns();
 }
@@ -3199,12 +3320,18 @@ async function cancelQueuedRun(runId) {
 
 function applyPreset(kind) {
   const form = $("#train-form");
+  const iterations = kind === "smoke" ? 1 : 100;
   if (kind === "smoke") {
     form.elements.num_envs.value = 4;
-    form.elements.max_iterations.value = 1;
   } else {
     form.elements.num_envs.value = 64;
-    form.elements.max_iterations.value = 100;
+  }
+  if (form.elements.training_route.value === "sensor_v2_full") {
+    form.elements.teacher_iterations.value = iterations;
+    form.elements.distillation_iterations.value = iterations;
+    form.elements.ppo_iterations.value = iterations;
+  } else {
+    form.elements.max_iterations.value = iterations;
   }
   form.elements.headless.checked = true;
   form.elements.device.value = "cuda:0";
@@ -3239,32 +3366,87 @@ function updateTrainingRouteForm() {
   const route = form.elements.training_route.value || "standard";
   const isSensor = route.startsWith("sensor_v2");
   const isPipeline = route === "sensor_v2_full";
+  const requiresCheckpoint = route === "sensor_v2_distillation" || route === "sensor_v2_ppo";
+  const routeUi = {
+    standard: {
+      title: "Standard PPO",
+      help: "Trains one policy directly. No teacher/student distillation stages.",
+      iterations: "Iterations",
+      iterationsHelp: "Number of PPO training updates.",
+      checkpoint: "Resume Checkpoint (Optional)",
+      checkpointHelp: "Leave empty for a new run, or select Resume on a compatible History run.",
+      checkpointPlaceholder: "Select Resume on a history run",
+    },
+    sensor_v2_full: {
+      title: "Full Sensor V2 Pipeline",
+      help: "Runs F1 Teacher, F2 Distillation, and F3 Student PPO in sequence. Set only the three stage iteration counts below.",
+    },
+    sensor_v2_teacher: {
+      title: "F1 Teacher Only",
+      help: "Advanced single-stage run that produces a teacher_v2 checkpoint.",
+      iterations: "F1 Teacher Iterations",
+      iterationsHelp: "Number of Teacher PPO updates.",
+      checkpoint: "Resume Teacher Checkpoint (Optional)",
+      checkpointHelp: "Leave empty for a new Teacher, or resume a compatible F1 Teacher checkpoint from History.",
+      checkpointPlaceholder: "Optional: resume an F1 Teacher run from History",
+    },
+    sensor_v2_distillation: {
+      title: "F2 Distillation Only",
+      help: "Advanced single-stage run. Select a completed F1 Teacher checkpoint from History before starting.",
+      iterations: "F2 Distillation Iterations",
+      iterationsHelp: "Number of teacher-to-student distillation updates.",
+      checkpoint: "Teacher Checkpoint",
+      checkpointHelp: "Required: select Resume on a compatible F1 Teacher run in History.",
+      checkpointPlaceholder: "Required: select an F1 Teacher run from History",
+    },
+    sensor_v2_ppo: {
+      title: "F3 Student PPO Only",
+      help: "Advanced single-stage run. Select a completed F2 distilled-student checkpoint from History before starting.",
+      iterations: "F3 Student PPO Iterations",
+      iterationsHelp: "Number of Student PPO refinement updates.",
+      checkpoint: "Distilled Student Checkpoint",
+      checkpointHelp: "Required: select Resume on a compatible F2 Distillation run in History.",
+      checkpointPlaceholder: "Required: select an F2 Distillation run from History",
+    },
+  }[route];
   if (isSensor) {
     form.elements.task.value = "Template-Redrhex-ForwardSensorV2-Direct-v0";
   } else if (form.elements.task.value === "Template-Redrhex-ForwardSensorV2-Direct-v0") {
     form.elements.task.value = "Template-Redrhex-ForwardFast-Direct-v0";
   }
+  const taskField = $("#training-task-field");
+  if (taskField) taskField.hidden = isSensor;
   if (isPipeline) form.elements.checkpoint.value = "";
   document.querySelectorAll(".sensor-v2-pipeline-field").forEach((element) => {
     element.hidden = !isPipeline;
+    const input = element.querySelector("input");
+    if (input) input.disabled = !isPipeline;
   });
   const singleIterations = $("#single-stage-iterations-field");
   if (singleIterations) singleIterations.hidden = isPipeline;
+  form.elements.max_iterations.disabled = isPipeline;
   const checkpointField = $("#training-checkpoint-field");
   if (checkpointField) checkpointField.hidden = isPipeline;
+  form.elements.checkpoint.disabled = isPipeline;
+  form.elements.checkpoint.required = requiresCheckpoint;
   document.querySelectorAll("#train-form .preset-indicator").forEach((element) => {
     element.hidden = isSensor && !element.querySelector("#train-active-physics-preset-name");
   });
+  const clearResumeButton = $("#clear-resume");
+  if (clearResumeButton) clearResumeButton.hidden = isPipeline;
+  const title = $("#training-route-summary-title");
   const help = $("#training-route-help");
-  if (!help) return;
-  const messages = {
-    standard: "Uses the selected reward and terrain presets.",
-    sensor_v2_full: "Runs F1 Teacher, F2 sensor distillation, then F3 student PPO in sequence. V2 uses its fixed forward reward contract; Panel reward overrides are not applied.",
-    sensor_v2_teacher: "Trains a strict teacher_v2 checkpoint. A selected checkpoint resumes the same Teacher stage.",
-    sensor_v2_distillation: "Requires a teacher_v2 source checkpoint selected from History.",
-    sensor_v2_ppo: "Requires a student_distilled_v2 source checkpoint selected from History.",
-  };
-  help.textContent = messages[route] || "";
+  if (title) title.textContent = routeUi?.title || "Training Mode";
+  if (help) help.textContent = routeUi?.help || "";
+  const iterationsLabel = $("#single-stage-iterations-label");
+  const iterationsHelp = $("#single-stage-iterations-help");
+  if (iterationsLabel) iterationsLabel.textContent = routeUi?.iterations || "Iterations";
+  if (iterationsHelp) iterationsHelp.textContent = routeUi?.iterationsHelp || "";
+  const checkpointLabel = $("#training-checkpoint-label");
+  const checkpointHelp = $("#training-checkpoint-help");
+  if (checkpointLabel) checkpointLabel.textContent = routeUi?.checkpoint || "";
+  if (checkpointHelp) checkpointHelp.textContent = routeUi?.checkpointHelp || "";
+  form.elements.checkpoint.placeholder = routeUi?.checkpointPlaceholder || "";
 }
 
 async function applyTweakPayload(payload) {
@@ -5294,6 +5476,12 @@ $("#record-video").addEventListener("click", () => recordVideo().catch(handleAct
 $("#stop-recording").addEventListener("click", () => stopVideoRecording().catch(handleActionError));
 $("#open-video-folder").addEventListener("click", () => openVideoFolder().catch(handleActionError));
 $("#copy-video-path").addEventListener("click", () => copyVideoPath().catch(handleActionError));
+$("#show-latest-video").addEventListener("click", () => selectCheckpointForVideo(null));
+$("#checkpoint-timeline").addEventListener("click", (event) => {
+  const point = event.target.closest("[data-checkpoint-iteration]");
+  if (!point) return;
+  selectCheckpointForVideo(Number(point.dataset.checkpointIteration));
+});
 $("#debug-refresh").addEventListener("click", refreshDebug);
 $("#copy-debug").addEventListener("click", () => copyDebugOutput().catch(handleActionError));
 $("#copy-command").addEventListener("click", () => copyLaunchCommand().catch(handleActionError));

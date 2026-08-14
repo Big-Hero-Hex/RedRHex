@@ -69,7 +69,12 @@ def make_fixture_root(root: Path) -> dict:
     (beta / "params" / "env.yaml").write_text("env: test\n", encoding="utf-8")
     (beta / "params" / "torsion_spring.yaml").write_text("spring_backend: native\n", encoding="utf-8")
     (beta / "videos" / "play").mkdir(parents=True)
-    (beta / "videos" / "play" / "rl-video-step-0.mp4").write_text("video", encoding="utf-8")
+    old_video = beta / "videos" / "play" / "model_0_video_fixture.mp4"
+    latest_video = beta / "videos" / "play" / "rl-video-step-0.mp4"
+    old_video.write_text("old video", encoding="utf-8")
+    latest_video.write_text("latest video", encoding="utf-8")
+    os.utime(old_video, (100, 100))
+    os.utime(latest_video, (200, 200))
     (beta / "exported").mkdir()
     (beta / "exported" / "policy.onnx").write_text("onnx", encoding="utf-8")
     (beta / "deploy").mkdir()
@@ -217,6 +222,76 @@ def open_physics(page, url: str) -> None:
     page.wait_for_selector('[data-physics-key="simulation_physics.mass.scale"]')
 
 
+def test_training_route_only_shows_relevant_controls(panel, page):
+    page.goto(panel["url"])
+
+    route = page.locator("#training-route")
+    single_iterations = page.locator("#single-stage-iterations-field")
+    pipeline_iterations = page.locator(".sensor-v2-pipeline-field")
+    checkpoint = page.locator("#training-checkpoint-field")
+    task = page.locator("#training-task-field")
+    reward_preset = page.locator("#train-reward-preset")
+    terrain_preset = page.locator("#train-terrain-preset")
+    physics_preset = page.locator("#train-physics-preset")
+
+    expect(route).to_have_value("standard")
+    expect(page.locator("#training-route-summary-title")).to_have_text("Standard PPO")
+    expect(task).to_be_visible()
+    expect(single_iterations).to_be_visible()
+    expect(single_iterations).to_contain_text("Iterations")
+    for field in pipeline_iterations.all():
+        expect(field).to_be_hidden()
+    expect(checkpoint).to_be_visible()
+    expect(reward_preset).to_be_visible()
+    expect(terrain_preset).to_be_visible()
+    expect(physics_preset).to_be_visible()
+
+    route.select_option("sensor_v2_full")
+    expect(page.locator("#training-route-summary-title")).to_have_text("Full Sensor V2 Pipeline")
+    expect(task).to_be_hidden()
+    expect(single_iterations).to_be_hidden()
+    for field in pipeline_iterations.all():
+        expect(field).to_be_visible()
+    expect(checkpoint).to_be_hidden()
+    expect(reward_preset).to_be_hidden()
+    expect(terrain_preset).to_be_hidden()
+    expect(physics_preset).to_be_visible()
+    page.locator("#smoke-button").click()
+    expect(page.locator('input[name="teacher_iterations"]')).to_have_value("1")
+    expect(page.locator('input[name="distillation_iterations"]')).to_have_value("1")
+    expect(page.locator('input[name="ppo_iterations"]')).to_have_value("1")
+    full_payload = page.evaluate("formData(document.querySelector('#train-form'))")
+    assert "max_iterations" not in full_payload
+    assert full_payload["teacher_iterations"] == 1
+    assert full_payload["distillation_iterations"] == 1
+    assert full_payload["ppo_iterations"] == 1
+    assert "task" not in full_payload
+    assert "reward_preset_id" not in full_payload
+    assert "reward_overrides" not in full_payload
+    assert "terrain_preset_id" not in full_payload
+    assert "terrain_overrides" not in full_payload
+
+    route.select_option("sensor_v2_teacher")
+    expect(single_iterations).to_be_visible()
+    expect(page.locator("#single-stage-iterations-label")).to_have_text("F1 Teacher Iterations")
+    expect(checkpoint).to_be_visible()
+    expect(page.locator('input[name="checkpoint"]')).not_to_have_attribute("required", "")
+
+    route.select_option("sensor_v2_distillation")
+    expect(page.locator("#single-stage-iterations-label")).to_have_text("F2 Distillation Iterations")
+    expect(page.locator("#training-checkpoint-label")).to_have_text("Teacher Checkpoint")
+    expect(page.locator('input[name="checkpoint"]')).to_have_attribute("required", "")
+    stage_payload = page.evaluate("formData(document.querySelector('#train-form'))")
+    assert "teacher_iterations" not in stage_payload
+    assert "distillation_iterations" not in stage_payload
+    assert "ppo_iterations" not in stage_payload
+
+    route.select_option("sensor_v2_ppo")
+    expect(page.locator("#single-stage-iterations-label")).to_have_text("F3 Student PPO Iterations")
+    expect(page.locator("#training-checkpoint-label")).to_have_text("Distilled Student Checkpoint")
+    expect(page.locator('input[name="checkpoint"]')).to_have_attribute("required", "")
+
+
 def test_history_defaults_to_all_runs_and_filters(panel, page):
     open_history(page, panel["url"])
 
@@ -242,6 +317,59 @@ def test_history_defaults_to_all_runs_and_filters(panel, page):
 
     page.locator('.folder-item[data-folder="__all__"]').click()
     expect(page.locator("#runs")).to_contain_text("run_alpha")
+
+
+def test_history_checkpoint_evolution_is_manual_and_records_selected_save_point(panel, page):
+    recorded_requests = []
+
+    def record_selected(route, request):
+        recorded_requests.append(json.loads(request.post_data or "{}"))
+        route.fulfill(
+            status=201,
+            content_type="application/json",
+            body=json.dumps({"id": "video_fixture", "checkpoint_iteration": 0}),
+        )
+
+    page.route("**/api/runs/panel_run_beta/record-video", record_selected)
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="Beta Foldered").click()
+
+    evolution = page.locator("#checkpoint-evolution")
+    expect(evolution).to_be_visible()
+    expect(evolution).not_to_have_attribute("open", "")
+    expect(page.locator("#checkpoint-timeline")).not_to_be_visible()
+    expect(page.locator("#video-state")).to_have_text("Latest Video")
+    expect(page.locator("#result-video")).not_to_have_attribute("src", re.compile("checkpoint_iteration"))
+    expect(page.locator("#record-video")).to_have_text("Record Latest")
+
+    evolution.locator("summary").click()
+    expect(page.locator("#checkpoint-timeline")).to_be_visible()
+    expect(page.locator("#checkpoint-timeline")).to_contain_text("Iteration 10")
+    expect(page.locator("#checkpoint-timeline")).to_contain_text("Iteration 0")
+    page.locator('[data-checkpoint-iteration="0"]').click()
+
+    expect(page.locator("#video-state")).to_have_text("Iter 0 Video")
+    expect(page.locator("#result-video")).to_have_attribute("src", re.compile("checkpoint_iteration=0"))
+    expect(page.locator("#record-video")).to_have_text("Record Iter 0")
+    page.locator("#record-video").click()
+    expect(page.locator("#panel-status")).to_contain_text("Recording iteration 0")
+    assert recorded_requests == [{"device": "cuda:0", "checkpoint_iteration": 0}]
+
+    page.locator("#show-latest-video").click()
+    expect(page.locator("#video-state")).to_have_text("Latest Video")
+    expect(page.locator("#result-video")).not_to_have_attribute("src", re.compile("checkpoint_iteration"))
+    expect(page.locator("#record-video")).to_have_text("Record Latest")
+
+
+def test_history_shows_evolution_entry_for_a_single_checkpoint(panel, page):
+    open_history(page, panel["url"])
+    page.locator(".run-card", has_text="run_alpha").click()
+
+    expect(page.locator("#video-panel")).to_be_visible()
+    expect(page.locator("#video-panel h3")).to_have_text("Recorded Video & Evolution")
+    expect(page.locator("#checkpoint-evolution")).to_be_visible()
+    expect(page.locator("#checkpoint-evolution-count")).to_have_text("1 save point")
+    expect(page.locator("#checkpoint-evolution-help")).to_contain_text("One checkpoint is saved")
 
 
 def test_physics_preset_is_searchable_sparse_and_persistent(panel, page):
@@ -398,9 +526,6 @@ def test_native_spring_backend_is_safe_default_submitted_restored_and_displayed(
         "display_name": "",
         "num_envs": 4,
         "max_iterations": 1,
-        "teacher_iterations": 1500,
-        "distillation_iterations": 800,
-        "ppo_iterations": 1500,
         "device": "cuda:0",
         "spring_backend": "native",
         "seed": "",

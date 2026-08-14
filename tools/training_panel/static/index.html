@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>RedRHex Training Panel</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.6.1-spring-safety" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.6.2-route-clarity-evolution" />
   </head>
   <body>
     <aside class="sidebar">
@@ -27,7 +27,7 @@
         <button class="nav-button" data-view="access">Control Center</button>
       </nav>
       <div class="sidebar-release">
-        <span class="release-version">Version 3.6.1 Spring Safety</span>
+        <span class="release-version">Version 3.6.2 Route Clarity</span>
         <span>Published by BioRoLa ABAD RHex Team</span>
         <span>Credits: Jason Liao and Jacob Yang</span>
       </div>
@@ -40,7 +40,7 @@
           <p id="view-subtitle">Start a controlled RSL-RL run with the repo defaults.</p>
         </div>
         <div class="topbar-actions">
-          <span class="release-chip">Training Panel V3.6.1 Spring Safety</span>
+          <span class="release-chip">Training Panel V3.6.2 Route Clarity</span>
           <span id="freshness" class="freshness" data-state="stale"
             data-tooltip="How recently the panel last heard from the training PC">
             <span class="freshness-dot" aria-hidden="true"></span>
@@ -54,16 +54,25 @@
       <section id="train" class="view active">
         <form id="train-form" class="panel-grid">
           <label>
-            Training Route
+            Training Mode
             <select name="training_route" id="training-route">
-              <option value="standard">Forward PPO (standard)</option>
-              <option value="sensor_v2_full">Sensor V2 — Full Teacher → Student</option>
-              <option value="sensor_v2_teacher">Sensor V2 — F1 Teacher only</option>
-              <option value="sensor_v2_distillation">Sensor V2 — F2 Distillation only</option>
-              <option value="sensor_v2_ppo">Sensor V2 — F3 Student PPO only</option>
+              <optgroup label="Common">
+                <option value="standard">Standard PPO — No Distillation</option>
+                <option value="sensor_v2_full">Sensor V2 — Full F1 → F2 → F3 Pipeline</option>
+              </optgroup>
+              <optgroup label="Advanced — Single Sensor V2 Stage">
+                <option value="sensor_v2_teacher">F1 — Teacher only</option>
+                <option value="sensor_v2_distillation">F2 — Distillation only</option>
+                <option value="sensor_v2_ppo">F3 — Student PPO only</option>
+              </optgroup>
             </select>
+            <small>Choose a common end-to-end mode; use a single stage only for recovery or advanced workflows.</small>
           </label>
-          <label>
+          <div id="training-route-summary" class="training-route-summary" role="status" aria-live="polite">
+            <strong id="training-route-summary-title">Standard PPO</strong>
+            <span id="training-route-help">Trains one policy directly. No teacher/student distillation stages.</span>
+          </div>
+          <label id="training-task-field">
             Task
             <input name="task" value="Template-Redrhex-ForwardFast-Direct-v0" />
           </label>
@@ -76,20 +85,21 @@
             <input name="num_envs" type="number" min="1" max="8192" value="4" />
           </label>
           <label id="single-stage-iterations-field">
-            Iterations
-            <input name="max_iterations" type="number" min="1" value="1" />
+            <span id="single-stage-iterations-label">Iterations</span>
+            <input name="max_iterations" type="number" min="1" value="1" required />
+            <small id="single-stage-iterations-help">Number of PPO training updates.</small>
           </label>
           <label class="sensor-v2-pipeline-field" hidden>
             F1 Teacher Iterations
-            <input name="teacher_iterations" type="number" min="1" value="1500" />
+            <input name="teacher_iterations" type="number" min="1" value="1500" required />
           </label>
           <label class="sensor-v2-pipeline-field" hidden>
             F2 Distillation Iterations
-            <input name="distillation_iterations" type="number" min="1" value="800" />
+            <input name="distillation_iterations" type="number" min="1" value="800" required />
           </label>
           <label class="sensor-v2-pipeline-field" hidden>
             F3 Student PPO Iterations
-            <input name="ppo_iterations" type="number" min="1" value="1500" />
+            <input name="ppo_iterations" type="number" min="1" value="1500" required />
           </label>
           <label>
             Device
@@ -108,8 +118,9 @@
             <input name="seed" type="number" placeholder="optional" />
           </label>
           <label id="training-checkpoint-field">
-            Source / Resume Checkpoint
+            <span id="training-checkpoint-label">Resume Checkpoint (Optional)</span>
             <input name="checkpoint" readonly placeholder="Select Resume on a history run" />
+            <small id="training-checkpoint-help">Leave empty for a new run, or select Resume on a compatible History run.</small>
           </label>
           <label class="check-row">
             <input name="headless" type="checkbox" checked />
@@ -122,22 +133,21 @@
             <button type="button" id="debug-button" class="ghost-button">Use Debug Defaults</button>
             <button type="button" id="clear-resume" class="ghost-button">Clear Resume</button>
           </div>
-          <div class="preset-indicator">
+          <div id="train-reward-preset" class="preset-indicator">
             <span>Reward Preset:</span>
             <strong id="train-active-preset-name">baseline</strong>
             <button type="button" id="train-change-preset" class="ghost-button small-button">Change</button>
           </div>
-          <div class="preset-indicator">
+          <div id="train-terrain-preset" class="preset-indicator">
             <span>Terrain Preset:</span>
             <strong id="train-active-terrain-preset-name">baseline</strong>
             <button type="button" id="train-change-terrain-preset" class="ghost-button small-button">Change</button>
           </div>
-          <div class="preset-indicator">
+          <div id="train-physics-preset" class="preset-indicator">
             <span>Physics Preset:</span>
             <strong id="train-active-physics-preset-name">baseline</strong>
             <button type="button" id="train-change-physics-preset" class="ghost-button small-button">Change</button>
           </div>
-          <p id="training-route-help" class="muted-copy"></p>
         </form>
         <div id="gpu-lock-status" class="status-line gpu-lock-status" hidden></div>
         <div id="train-status" class="status-line"></div>
@@ -448,7 +458,7 @@
             <!-- ── Video ── -->
             <section id="video-panel" class="video-panel" hidden>
               <div class="section-header">
-                <h3>Recorded Video</h3>
+                <h3>Recorded Video &amp; Evolution</h3>
                 <span id="video-state" class="status-badge muted-pill">No Video</span>
               </div>
               <div class="form-actions compact-actions" style="margin-bottom:10px">
@@ -457,6 +467,25 @@
                 <button type="button" id="open-video-folder" class="ghost-button small-button" hidden data-tooltip="Open the folder containing recorded videos (local only)">Open Folder</button>
                 <button type="button" id="copy-video-path" class="ghost-button small-button" hidden data-tooltip="Copy the video file path to clipboard">Copy Path</button>
               </div>
+              <details id="checkpoint-evolution" class="checkpoint-evolution" hidden>
+                <summary>
+                  <span>
+                    <strong>Checkpoint evolution</strong>
+                    <small id="checkpoint-evolution-help">Open only when you want to compare an older save point.</small>
+                  </span>
+                  <span id="checkpoint-evolution-count" class="status-badge muted-pill"></span>
+                </summary>
+                <div class="checkpoint-evolution-body">
+                  <button type="button" id="show-latest-video" class="checkpoint-latest-button" aria-pressed="true">
+                    <span class="checkpoint-marker" aria-hidden="true"></span>
+                    <span class="checkpoint-point-copy">
+                      <span class="checkpoint-point-title"><strong>Latest recording</strong></span>
+                      <small>Return to the default result video.</small>
+                    </span>
+                  </button>
+                  <div id="checkpoint-timeline" class="checkpoint-timeline" aria-label="Checkpoint save points"></div>
+                </div>
+              </details>
               <video id="result-video" controls preload="metadata"></video>
               <p id="video-message" class="muted-copy"></p>
             </section>
@@ -845,8 +874,8 @@
 
     <div id="panel-status" class="panel-status" role="status" aria-live="polite" aria-atomic="false"></div>
 
-    <script src="/static/status_catalog.js?v=3.6.1-spring-safety"></script>
-    <script src="/static/api_adapters.js?v=3.6.1-spring-safety"></script>
-    <script src="/static/app.js?v=3.6.1-spring-safety"></script>
+    <script src="/static/status_catalog.js?v=3.6.2-route-clarity"></script>
+    <script src="/static/api_adapters.js?v=3.6.2-route-clarity"></script>
+    <script src="/static/app.js?v=3.6.2-route-clarity-evolution"></script>
   </body>
 </html>

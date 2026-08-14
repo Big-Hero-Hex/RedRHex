@@ -1,6 +1,6 @@
 ---
 id: training-panel-operator-guide
-title: Training Panel 3.6.1 Operator Guide
+title: Training Panel 3.6.2 Operator Guide
 lang: en
 audience: operator
 type: how-to
@@ -23,22 +23,22 @@ With VS Code Remote SSH, start the panel in the remote terminal, then forward re
 <a id="train"></a>
 ## Train and queue
 
-In Train, choose task, environments, iterations, device, reward preset, terrain preset, spring backend, and resume mode. Native is the provisional default for new policy runs. Explicit is visible but disabled for policy training because its current uncalibrated `200 N*m/rad` model is numerically unstable at 120 Hz; investigate it with the [torsion-spring calibration and characterization workflow](../../../docs/operators/calibration/torsion-spring-calibration.en.md#backend). This quarantine is not production selection of Native.
+In Train, first choose **Training Mode**. The form shows only controls used by that mode: **Standard PPO — No Distillation** shows one Iterations field and no F1/F2/F3 settings; the full Sensor V2 pipeline shows the three stage iteration fields; an advanced single-stage route relabels the one Iterations field for that stage. Native is the provisional default for new policy runs. Explicit is visible but disabled for policy training because its current uncalibrated `200 N*m/rad` model is numerically unstable at 120 Hz; investigate it with the [torsion-spring calibration and characterization workflow](../../../docs/operators/calibration/torsion-spring-calibration.en.md#backend). This quarantine is not production selection of Native.
 
 Isaac/GPU actions—training, playback, video, and ONNX export—are serialized. A training request becomes queued while another GPU action is active; History can cancel it. A settle window separates completed Isaac jobs.
 
-Standard Panel-launched training uses run-scoped override snapshots and passes `--panel_overrides` plus an optional `--physics-profile`. Built-in reward, terrain, and physics presets are read-only; duplicate before editing. Sensor V2 routes use their fixed versioned reward/terrain contract described below, but may use the selected physics profile.
+Standard Panel-launched training uses run-scoped override snapshots and passes `--panel_overrides` plus an optional `--physics-profile`. Built-in reward, terrain, and physics presets are read-only; duplicate before editing. Sensor V2 routes hide the unused task, reward, and terrain controls because they use the fixed versioned contract described below; the selected physics profile remains available. Both **Use Smoke Defaults** and **Use Debug Defaults** update the active iteration controls: one field for standard or single-stage training, and all three fields for the full pipeline.
 
 For straight-gait-only work, the panel now defaults to `Template-Redrhex-ForwardFast-Direct-v0`, and `Straight Forward Focus` is active by default. Confirm both before launch. First use 4 environments and 1 iteration as a stack smoke test; after it passes, use the intended environment count and up to 1,500 iterations for the bounded ForwardFast profile.
 
 <a id="sensor-v2-distillation"></a>
 ### Train the Sensor V2 teacher and student
 
-In **Training Route**, select **Sensor V2 — Full Teacher → Student**. The production defaults are 64 environments, 1,500 F1 Teacher updates, 800 F2 distillation updates, and 1,500 F3 student PPO updates. Give the run a name, keep Headless enabled on a remote machine, and click **Start Training** once.
+In **Training Mode**, select **Sensor V2 — Full F1 → F2 → F3 Pipeline**. The production defaults are 64 environments, 1,500 F1 Teacher updates, 800 F2 distillation updates, and 1,500 F3 student PPO updates. Give the run a name, keep Headless enabled on a remote machine, and click **Start Training** once. Task, single-stage Iterations, checkpoint, reward, and terrain controls are hidden because the full pipeline does not use them.
 
 The pipeline runs F1, F2, and F3 sequentially. It passes the completed `teacher_v2` checkpoint to F2 with `--teacher_checkpoint`, then passes the completed `student_distilled_v2` checkpoint to F3 with `--student_checkpoint`. A failed stage stops the pipeline. Sensor V2 uses its fixed forward reward contract and does not apply the Panel reward or terrain override files. The same spring backend and, if selected, the same run-scoped physics profile are forwarded to all three stages.
 
-Use **Sensor V2 — F1 Teacher only**, **F2 Distillation only**, or **F3 Student PPO only** for a single stage. F2 requires a Teacher checkpoint and F3 requires a distilled checkpoint: select the source run in History, click **Resume to Train** to populate the checkpoint field, then choose the intended route. The strict loader rejects an incorrect checkpoint kind.
+Use the advanced **F1 — Teacher only**, **F2 — Distillation only**, or **F3 — Student PPO only** options for a single stage. The form labels the one Iterations field for the selected stage. F2 requires a Teacher checkpoint and F3 requires a distilled checkpoint: select the source run in History, click **Resume to Train** to populate the required checkpoint field, then choose the intended mode. F1 may start fresh or resume a compatible Teacher checkpoint. The strict loader rejects an incorrect checkpoint kind.
 
 History attaches the completed full pipeline to its final F3 PPO directory. Open **Process Console** to see the active stage and exact checkpoint handoff; open **TensorBoard** to inspect the final F3 metrics. The F1 and F2 stage directories remain under `logs/rsl_rl/redrhex_forward_v2_teacher` and `logs/rsl_rl/redrhex_forward_v2_distillation`. A completed run is one seed of training, not the three-seed, recorded-sensor, or hardware promotion evidence.
 

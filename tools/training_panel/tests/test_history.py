@@ -10,6 +10,7 @@ from tools.training_panel.training_panel import history as history_module
 from tools.training_panel.training_panel.history import (
     HistoryCorruptError,
     HistoryStore,
+    checkpoint_history,
     latest_checkpoint,
     latest_onnx,
     latest_video,
@@ -53,6 +54,45 @@ class HistoryTests(unittest.TestCase):
             os.utime(old, (100, 100))
             os.utime(new, (200, 200))
             self.assertTrue(latest_video(run).endswith("rl-video-step-600.mp4"))
+
+    def test_checkpoint_history_maps_each_save_point_to_its_newest_video(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "model_0.pt").write_text("zero", encoding="utf-8")
+            (run / "model_10.pt").write_text("ten", encoding="utf-8")
+            video_dir = run / "videos" / "play"
+            video_dir.mkdir(parents=True)
+            iter_zero = video_dir / "model_0_video_old.mp4"
+            iter_ten_old = video_dir / "model_10_video_old.mp4"
+            iter_ten_new = video_dir / "model_10_video_new.mp4"
+            for path in (iter_zero, iter_ten_old, iter_ten_new):
+                path.write_text("video", encoding="utf-8")
+            os.utime(iter_zero, (100, 100))
+            os.utime(iter_ten_old, (200, 200))
+            os.utime(iter_ten_new, (300, 300))
+
+            history = checkpoint_history(run)
+
+            self.assertEqual([item["iteration"] for item in history], [0, 10])
+            self.assertTrue(history[0]["video"].endswith("model_0_video_old.mp4"))
+            self.assertTrue(history[1]["video"].endswith("model_10_video_new.mp4"))
+            self.assertFalse(history[0]["is_latest"])
+            self.assertTrue(history[1]["is_latest"])
+
+    def test_checkpoint_history_keeps_legacy_video_on_latest_save_point(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "model_0.pt").write_text("zero", encoding="utf-8")
+            (run / "model_10.pt").write_text("ten", encoding="utf-8")
+            video_dir = run / "videos" / "play"
+            video_dir.mkdir(parents=True)
+            legacy = video_dir / "rl-video-step-0.mp4"
+            legacy.write_text("video", encoding="utf-8")
+
+            history = checkpoint_history(run)
+
+            self.assertIsNone(history[0]["video"])
+            self.assertEqual(history[1]["video"], str(legacy))
 
     def test_latest_onnx_discovers_exported_policy(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,6 +501,32 @@ class HistoryTests(unittest.TestCase):
             self.assertIn("Good Runs", payload["folders"])
             self.assertEqual(payload["runs"][0]["folder"], "Good Runs")
 
+    def test_runs_payload_includes_checkpoint_evolution(self):
+        class FakeProcesses:
+            def reconcile_stale_history(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run = root / "logs" / "rsl_rl" / "redrhex_wheg" / "evolving_run"
+            video_dir = run / "videos" / "play"
+            video_dir.mkdir(parents=True)
+            (run / "model_0.pt").write_text("zero", encoding="utf-8")
+            (run / "model_20.pt").write_text("twenty", encoding="utf-8")
+            (video_dir / "model_0_video_fixture.mp4").write_bytes(b"video")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState", (), {"history": HistoryStore(self.make_paths(root)), "processes": FakeProcesses()}
+            )()
+
+            payload = handler._runs_payload()
+            selected = payload["runs"][0]
+
+            self.assertEqual(selected["checkpoint_count"], 2)
+            self.assertEqual([item["iteration"] for item in selected["checkpoint_history"]], [0, 20])
+            self.assertTrue(selected["checkpoint_history"][0]["video"].endswith("model_0_video_fixture.mp4"))
+            self.assertIsNone(selected["checkpoint_history"][1]["video"])
+
     def test_runs_payload_exposes_backend_discovered_from_torsion_yaml(self):
         class FakeProcesses:
             def reconcile_stale_history(self):
@@ -540,6 +606,73 @@ class HistoryTests(unittest.TestCase):
 
             self.assertEqual(served, [(video.resolve(), "video/mp4")])
             self.assertEqual(errors, [])
+
+    def test_send_run_video_can_select_a_past_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "evolving_run"
+            video_dir = log_dir / "videos" / "play"
+            video_dir.mkdir(parents=True)
+            (log_dir / "model_0.pt").write_text("zero", encoding="utf-8")
+            (log_dir / "model_10.pt").write_text("ten", encoding="utf-8")
+            old_video = video_dir / "model_0_video_old.mp4"
+            latest_video_path = video_dir / "model_10_video_latest.mp4"
+            old_video.write_bytes(b"old")
+            latest_video_path.write_bytes(b"latest")
+            handler = object.__new__(PanelHandler)
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": HistoryStore(self.make_paths(root)), "paths": self.make_paths(root)},
+            )()
+            served = []
+            errors = []
+            handler._send_file_response = lambda path, content_type: served.append((path, content_type))
+            handler._json = lambda payload, status=200: errors.append((payload, status))
+
+            handler._send_run_video("evolving_run", {"checkpoint_iteration": ["0"]})
+
+            self.assertEqual(served, [(old_video.resolve(), "video/mp4")])
+            self.assertEqual(errors, [])
+
+    def test_record_video_can_select_a_past_checkpoint_iteration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_dir = root / "logs" / "rsl_rl" / "redrhex_wheg" / "evolving_run"
+            log_dir.mkdir(parents=True)
+            old_checkpoint = log_dir / "model_0.pt"
+            latest_checkpoint_path = log_dir / "model_10.pt"
+            old_checkpoint.write_text("zero", encoding="utf-8")
+            latest_checkpoint_path.write_text("ten", encoding="utf-8")
+
+            class FakeProcesses:
+                def __init__(self):
+                    self.checkpoint = None
+
+                def running_isaac_processes(self):
+                    return []
+
+                def start_video_recording(self, **kwargs):
+                    self.checkpoint = kwargs["checkpoint"]
+                    return {"id": "video_fixture", "checkpoint_iteration": 0}
+
+            processes = FakeProcesses()
+            handler = object.__new__(PanelHandler)
+            handler.path = "/api/runs/evolving_run/record-video"
+            handler.state = type(
+                "FakeState",
+                (),
+                {"history": HistoryStore(self.make_paths(root)), "processes": processes},
+            )()
+            responses = []
+            handler._payload = lambda: {"device": "cuda:0", "checkpoint_iteration": 0}
+            handler._json = lambda payload, status=200: responses.append((payload, status))
+            handler._record_activity = lambda *args, **kwargs: None
+
+            handler._do_POST()
+
+            self.assertEqual(processes.checkpoint, str(old_checkpoint))
+            self.assertEqual(responses, [({"id": "video_fixture", "checkpoint_iteration": 0}, 201)])
 
     def test_send_run_video_rejects_video_outside_selected_run_log_dir(self):
         with tempfile.TemporaryDirectory() as tmp:

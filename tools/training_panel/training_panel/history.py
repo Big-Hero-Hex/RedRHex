@@ -15,6 +15,7 @@ from .rewards import read_reward_scales_from_yaml, reward_defaults, reward_diff
 from .terrain import read_terrain_values_from_yaml, terrain_defaults, terrain_diff
 
 MODEL_RE = re.compile(r"model_(\d+)\.pt$")
+CHECKPOINT_VIDEO_RE = re.compile(r"^model_(\d+)(?:_|\.mp4$)")
 DISCOVERED_RUN_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})")
 PANEL_RUN_TIME_RE = re.compile(r"^panel_(\d{8})_(\d{6})")
 ACTIVE_PANEL_LOG_CLAIM_GRACE_SECONDS = 5
@@ -169,6 +170,58 @@ def checkpoint_inventory(log_dir: Path) -> list[tuple[int, Path]]:
         if match and path.is_file():
             checkpoints.append((int(match.group(1)), path))
     return sorted(checkpoints, key=lambda item: item[0])
+
+
+def checkpoint_history(log_dir: Path, legacy_video_iteration: int | None = None) -> list[dict[str, Any]]:
+    """Return checkpoint save points with the newest recording for each one."""
+    checkpoints = checkpoint_inventory(log_dir)
+    if not checkpoints:
+        return []
+
+    checkpoint_iterations = {iteration for iteration, _ in checkpoints}
+    videos_by_iteration: dict[int, Path] = {}
+    video_dir = log_dir / "videos" / "play"
+    videos = [path for path in video_dir.glob("*.mp4") if path.is_file()] if video_dir.is_dir() else []
+    for video in videos:
+        match = CHECKPOINT_VIDEO_RE.match(video.name)
+        if not match:
+            continue
+        iteration = int(match.group(1))
+        if iteration not in checkpoint_iterations:
+            continue
+        current = videos_by_iteration.get(iteration)
+        if current is None or video.stat().st_mtime > current.stat().st_mtime:
+            videos_by_iteration[iteration] = video
+
+    # Recordings created before checkpoint-tagged filenames were introduced were
+    # always launched from the latest checkpoint. Preserve that useful history.
+    untagged = [video for video in videos if not CHECKPOINT_VIDEO_RE.match(video.name)]
+    if untagged:
+        newest_untagged = max(untagged, key=lambda path: path.stat().st_mtime)
+        inferred_iteration = legacy_video_iteration
+        if inferred_iteration not in checkpoint_iterations:
+            inferred_iteration = checkpoints[-1][0]
+        current = videos_by_iteration.get(inferred_iteration)
+        if current is None or newest_untagged.stat().st_mtime > current.stat().st_mtime:
+            videos_by_iteration[inferred_iteration] = newest_untagged
+
+    latest_iteration = checkpoints[-1][0]
+    history = []
+    for iteration, checkpoint in checkpoints:
+        video = videos_by_iteration.get(iteration)
+        history.append(
+            {
+                "iteration": iteration,
+                "checkpoint": str(checkpoint),
+                "created_at": datetime.fromtimestamp(checkpoint.stat().st_mtime).isoformat(timespec="seconds"),
+                "is_latest": iteration == latest_iteration,
+                "video": str(video) if video else None,
+                "video_recorded_at": (
+                    datetime.fromtimestamp(video.stat().st_mtime).isoformat(timespec="seconds") if video else None
+                ),
+            }
+        )
+    return history
 
 
 class HistoryStore:
@@ -864,6 +917,11 @@ class HistoryStore:
             if log_dir and log_dir.exists():
                 record["latest_checkpoint"] = latest_checkpoint(log_dir)
                 record["latest_video"] = latest_video(log_dir)
+                record["checkpoint_history"] = checkpoint_history(
+                    log_dir,
+                    legacy_video_iteration=record.get("video_checkpoint_iteration"),
+                )
+                record["checkpoint_count"] = len(record["checkpoint_history"])
                 record["onnx_path"] = latest_onnx(log_dir)
                 record["has_video"] = bool(record["latest_video"])
                 record["has_onnx"] = bool(record["onnx_path"])
@@ -882,6 +940,8 @@ class HistoryStore:
                 else:
                     record.setdefault("terrain_diff_count", 0)
             else:
+                record.setdefault("checkpoint_history", [])
+                record.setdefault("checkpoint_count", 0)
                 record.setdefault("reward_diff_count", 0)
                 record.setdefault("terrain_diff_count", 0)
         return sorted(merged, key=lambda item: item.get("created_at", ""), reverse=True)

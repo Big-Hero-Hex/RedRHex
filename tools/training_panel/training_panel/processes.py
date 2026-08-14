@@ -2375,8 +2375,10 @@ class ProcessRegistry:
         return int(match.group(1)) if match else None
 
     def _tag_video_with_checkpoint(self, video: Path, video_id: str, run: dict) -> str:
-        iteration = run.get("video_checkpoint_iteration") or self._checkpoint_iteration(str(run.get("video_checkpoint") or ""))
-        if not iteration or not video.is_file():
+        iteration = run.get("video_checkpoint_iteration")
+        if iteration is None:
+            iteration = self._checkpoint_iteration(str(run.get("video_checkpoint") or ""))
+        if iteration is None or not video.is_file():
             return str(video)
         if f"model_{iteration}" in video.name:
             return str(video)

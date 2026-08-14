@@ -25,7 +25,7 @@ from .commands import (
 )
 from .config import PanelPaths
 from .deploy import deploy_defaults, latest_deploy_report, list_deploy_reports
-from .history import HistoryStore
+from .history import HistoryStore, checkpoint_inventory
 from .physics import PhysicsPresetStore, physics_catalog
 from .presets import PresetStore
 from .processes import CudaPreflightError, ProcessRegistry, ProcessStartError
@@ -256,7 +256,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._json({"folders": self.state.history.get_folders()})
         if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/video"):
             run_id = route_id(parsed.path)
-            return self._send_run_video(run_id)
+            return self._send_run_video(run_id, parse_qs(parsed.query))
         if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/tensorboard-summary.png"):
             run_id = route_id(parsed.path)
             return self._send_run_tensorboard_summary(run_id)
@@ -646,6 +646,29 @@ class PanelHandler(BaseHTTPRequestHandler):
                 run = self.state.history.get_run(run_id)
                 if not run or not run.get("latest_checkpoint"):
                     return self._json({"error": "No checkpoint found for run"}, status=404)
+                checkpoint = str(run["latest_checkpoint"])
+                requested_iteration = payload.get("checkpoint_iteration")
+                if requested_iteration not in (None, ""):
+                    try:
+                        iteration = int(requested_iteration)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("checkpoint_iteration must be an integer") from exc
+                    if iteration < 0:
+                        raise ValueError("checkpoint_iteration must be zero or greater")
+                    log_dir = Path(str(run.get("log_dir") or ""))
+                    if not run.get("log_dir") or not log_dir.is_dir():
+                        return self._json({"error": "No log directory found for run"}, status=404)
+                    selected = next(
+                        (
+                            path
+                            for candidate_iteration, path in checkpoint_inventory(log_dir)
+                            if candidate_iteration == iteration
+                        ),
+                        None,
+                    )
+                    if selected is None:
+                        return self._json({"error": f"Checkpoint iteration {iteration} was not found for run"}, status=404)
+                    checkpoint = str(selected)
                 active_media = self.state.processes.running_isaac_processes()
                 if active_media:
                     return self._json(
@@ -654,11 +677,16 @@ class PanelHandler(BaseHTTPRequestHandler):
                     )
                 result = self.state.processes.start_video_recording(
                     run_id=run_id,
-                    checkpoint=str(run["latest_checkpoint"]),
+                    checkpoint=checkpoint,
                     device=str(payload.get("device") or "cuda:0"),
                     video_params=VideoParams.from_preset(DEFAULT_VIDEO_PRESET),
                 )
-                self._record_activity("video_record_start", summary=f"Started video recording for {run_id}", subject_id=run_id, payload=result)
+                self._record_activity(
+                    "video_record_start",
+                    summary=f"Started video recording for {run_id} at iteration {result.get('checkpoint_iteration')}",
+                    subject_id=run_id,
+                    payload=result,
+                )
                 return self._json(result, status=201)
             if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/export-onnx"):
                 run_id = route_id(parsed.path)
@@ -1039,9 +1067,25 @@ class PanelHandler(BaseHTTPRequestHandler):
                 series[tag] = [[step, value] for step, value in downsample(scalars, points_limit)]
         return self._json({"tags": series, "log_dir": str(log_dir)})
 
-    def _send_run_video(self, run_id: str) -> None:
+    def _send_run_video(self, run_id: str, query: dict | None = None) -> None:
         run = self.state.history.get_run(run_id)
-        video = Path(str(run.get("latest_video"))) if run and run.get("latest_video") else None
+        video_path = run.get("latest_video") if run else None
+        requested_iteration = (query or {}).get("checkpoint_iteration", [""])[0]
+        if requested_iteration not in (None, ""):
+            try:
+                iteration = int(requested_iteration)
+            except (TypeError, ValueError):
+                return self._json({"error": "checkpoint_iteration must be an integer"}, status=400)
+            checkpoint = next(
+                (item for item in (run.get("checkpoint_history") or []) if item.get("iteration") == iteration),
+                None,
+            ) if run else None
+            if checkpoint is None:
+                return self._json({"error": f"Checkpoint iteration {iteration} was not found for run"}, status=404)
+            video_path = checkpoint.get("video")
+            if not video_path:
+                return self._json({"error": f"No recorded video found for checkpoint iteration {iteration}"}, status=404)
+        video = Path(str(video_path)) if video_path else None
         if not video or not video.exists() or not video.is_file():
             return self._json({"error": "No recorded video found for run"}, status=404)
         log_dir = Path(str(run.get("log_dir"))) if run and run.get("log_dir") else None
