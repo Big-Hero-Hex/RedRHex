@@ -3026,6 +3026,9 @@ async function selectRun(runId) {
   writeHashRoute();
   markHistoryRead(runId);
   renderRunDetails();
+  const notesEditor = $("#notes-editor");
+  const initialNotesEditorValue = runId in state.notesDrafts ? state.notesDrafts[runId] : "";
+  if (notesEditor) notesEditor.value = initialNotesEditorValue;
   syncRunCurves();
   renderRuns();
   // Hide reward panel until loaded
@@ -3039,8 +3042,16 @@ async function selectRun(runId) {
     run.log_dir ? loadTerrainConfigForRun(runId) : Promise.resolve(),
   ]);
   if (!state.selectedRun || state.selectedRun.id !== runId) return;
-  // A draft the operator typed but never saved outranks the stored text.
-  $("#notes-editor").value = runId in state.notesDrafts ? state.notesDrafts[runId] : notesData.notes;
+  // A draft, including text entered while the notes request was in flight,
+  // outranks stored text and must survive run switches.
+  const loadedNotesEditor = $("#notes-editor");
+  if (runId in state.notesDrafts) {
+    loadedNotesEditor.value = state.notesDrafts[runId];
+  } else if (loadedNotesEditor.value === initialNotesEditorValue) {
+    loadedNotesEditor.value = notesData.notes;
+  } else {
+    state.notesDrafts[runId] = loadedNotesEditor.value;
+  }
   state.notesSavedText = notesData.notes;
   renderRunDetails();
   // No toast here: checkpoint state is metadata, not an event, and the details
