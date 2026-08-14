@@ -6,13 +6,14 @@ audience: developer
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-13
 ---
 
 <a id="accepted-decisions"></a>
 ## Accepted decisions
 
 - [ADR-0001: Five-stage training curriculum](adr-0001-five-stage-curriculum.en.md)
+- [ADR-0002: Single protected main branch](adr-0002-single-protected-main.en.md)
 
 <a id="decision-policy"></a>
 ## Decision policy
