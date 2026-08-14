@@ -12,7 +12,7 @@ remote-ref,refs/heads/feature/torsion-spring-v1,30ae902f67f67efba5d05aecd23bd832
 remote-ref,refs/heads/feature/training-panel-v3.6,e7b3f52d10fe43f49a4c51fd33b8f2f0282ca000,merged,refs/heads/main@39b983abfe70d1d0a82ff727407a3eeacc0b92ba,ancestor,remote-topic-deleted
 remote-ref,refs/heads/feature/macos-remote-launcher,4fc7295b2c02363bdc62c78ade865672b9acd849,merged,refs/heads/main@55e6611008e4ec7c0508cd4be1d1e639de42655b,ancestor,delete-after-protection
 remote-ref,refs/heads/feature/student-distillation-v2,b46e6ac60ee44e8456900751399834d6387909fd,merged,refs/heads/main@b66d3760ffeffd1c0f95c1b9bb018ec797bb0357,ancestor,delete-after-protection
-remote-ref,refs/heads/feature/panel-physics-calibration-wip,4df5cc5698be7605db0319c5157838d72c4e32cd,active-proposal,refs/heads/feature/panel-physics-calibration-wip,exact-sha-and-pr-12,retain-draft
+remote-ref,refs/heads/feature/panel-physics-calibration-wip,40b841b00f3749e36bc26de9207f42e3c5ca3d31,active-proposal,refs/heads/feature/panel-physics-calibration-wip,exact-sha-and-pr-12,retain-draft
 remote-ref,refs/heads/feature/training-panel-v3-notifications,83f4ec3ce46bc04abda66559bafa50cd58d47ab9,redundant,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/feature/training-panel,dad9852d32ee365d4c11c3155d6faca70b1a52da,redundant,refs/heads/main,ancestor,delete-after-protection
 remote-ref,refs/heads/feature/velocity-tracking-visualization,795e1ee339b95fadd750b27b5f39f82fbb868704,redundant,refs/heads/main,ancestor,delete-after-protection
@@ -40,7 +40,7 @@ local-ref,refs/heads/feature/training-panel-v3-notifications,83f4ec3ce46bc04abda
 local-ref,refs/heads/feature/training-panel,dad9852d32ee365d4c11c3155d6faca70b1a52da,redundant,refs/heads/main,ancestor,delete-after-contraction
 local-ref,refs/heads/feature/macos-remote-launcher,4fc7295b2c02363bdc62c78ade865672b9acd849,merged,refs/heads/main@55e6611008e4ec7c0508cd4be1d1e639de42655b,ancestor,delete-after-worktree-removal
 local-ref,refs/heads/feature/student-distillation-v2,b46e6ac60ee44e8456900751399834d6387909fd,merged,refs/heads/main@b66d3760ffeffd1c0f95c1b9bb018ec797bb0357,ancestor,delete-after-worktree-removal
-local-ref,refs/heads/feature/panel-physics-calibration-wip,4df5cc5698be7605db0319c5157838d72c4e32cd,active-proposal,refs/heads/feature/panel-physics-calibration-wip,exact-sha-and-pr-12,retain-worktree
+local-ref,refs/heads/feature/panel-physics-calibration-wip,40b841b00f3749e36bc26de9207f42e3c5ca3d31,active-proposal,refs/heads/feature/panel-physics-calibration-wip,exact-sha-and-pr-12,retain-root-worktree
 local-ref,refs/heads/feature/windows-remote-launcher,82d801f9ab91c1d6fdef52ede402847781ae959b,merged,refs/heads/main@8d17dbf7976a88d2978a0e9b41245d80bec40fd7,ancestor,delete-after-worktree-removal
 local-ref,refs/heads/fix/documentation-site-count,5ba5fd1008261a2d74aeab2fb833c30696ff6931,merged,refs/heads/main,ancestor,delete-after-worktree-removal
 local-ref,refs/heads/fix/review-2026-07,5de992d7afac77e566b6deebb99dc813eb87b612,redundant,refs/heads/main,ancestor,delete-after-contraction
@@ -58,6 +58,10 @@ local-ref,refs/heads/recovery/2026-08-14/root-post-snapshot-wip,13f0549ac3d3de23
 bundle,.worktrees/root-post-snapshot-wip-2026-08-14.bundle,606a778293e9eafa9a13c9ab2371651be6d9c9e994b0fca3203322651869b438,partial-student-f0-recovery-bundle,refs/heads/recovery/2026-08-14/root-post-snapshot-wip,git-bundle-verify,retain-local-do-not-publish
 local-ref,refs/heads/recovery/2026-08-14/root-f0-f1-wip,a95991621a55c62fb8b67660471285c2c3aebd75,student-f0-f1-wip-recovery,local-recovery-ref,exact-snapshot,retain-local-do-not-publish
 bundle,.worktrees/root-f0-f1-wip-2026-08-14.bundle,66b6c7579ae2e6277d3229a487c29479cfb254afdc31a01dacd6007453e6e61d,student-f0-f1-wip-recovery-bundle,refs/heads/recovery/2026-08-14/root-f0-f1-wip,git-bundle-verify-complete-history,retain-local-do-not-publish
+local-ref,refs/heads/recovery/2026-08-14/root-f0-f1-path-fix,1a436d26a167ce8431a916a4fef78534259bde11,student-f0-f1-path-fix-recovery,local-recovery-ref,exact-snapshot-and-focused-test,retain-local-do-not-publish
+bundle,.worktrees/root-f0-f1-path-fix-2026-08-14.bundle,6b8abcb8ed4d7e6d9c4d03c0559e50046e2cab9da969dccdd901e0415fd515b8,student-f0-f1-path-fix-recovery-bundle,refs/heads/recovery/2026-08-14/root-f0-f1-path-fix,git-bundle-verify-complete-history,retain-local-do-not-publish
+audit-event,remote-contraction-2026-08-14,5a6037b434ab6ba2ca54ba1474f5ff556a790115,completed,docs/research/2026-08-14-branch-reorganization-v1-audit.*,exact-tip-comparison-and-post-delete-ls-remote,24-source-refs-deleted-retained-refs-preserved
+audit-event,local-contraction-2026-08-14,40b841b00f3749e36bc26de9207f42e3c5ca3d31,completed,docs/research/2026-08-14-branch-reorganization-v1-audit.*,clean-status-and-git-merged-proof,13-worktrees-and-19-merged-branches-removed
 dirty-path,5b3b997:docs/superpowers/plans/2026-08-01-windows-remote-launcher.md,5b3b997084507564bd2e6db8430fe36899274e6a,temporary-plan,docs/designs/active-and-docs/plans/active,canonical-pair-validated,migrated
 dirty-path,5b3b997:tools/training_panel/reward_presets.json,5b3b997084507564bd2e6db8430fe36899274e6a,accidental-runtime-state,0426e860456d4a6ce00932df732b62a182d44434,hunk-audited,removed-on-panel-branch
 dirty-path,5b3b997:tools/training_panel/tests/test_deploy.py,5b3b997084507564bd2e6db8430fe36899274e6a,panel-fix,a855da00fa483a20cb0867f810b921d51ceb0f98,hunk-audited,applied

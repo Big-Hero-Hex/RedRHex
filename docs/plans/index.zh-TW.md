@@ -21,4 +21,4 @@ last_reviewed: 2026-08-14
 
 計畫是暫時的執行紀錄。計畫完成或取消時，將持久成果保存到維護中文件、決策、發行或路線圖，然後移除計畫。
 
-已完成的文件系統計畫由 [v1 release](../releases/2026-08-07-documentation-system-v1.zh-TW.md)與[最終稽核](../research/2026-08-07-documentation-system-audit.zh-TW.md)摘要。
+已完成的文件系統計畫由 [v1 release](../releases/2026-08-07-documentation-system-v1.zh-TW.md)與[最終稽核](../research/2026-08-07-documentation-system-audit.zh-TW.md)摘要。已完成的 branch-reorganization plan 則由其[完成稽核](../research/2026-08-14-branch-reorganization-v1-audit.zh-TW.md)摘要。
