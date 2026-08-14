@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import UUID
 
-from .activity import category_for_job_type, outcome_for_status, score_activity_event
+from .activity import ActivityStore, category_for_job_type, outcome_for_status, score_activity_event
 from .commands import DEFAULT_VIDEO_PRESET, TrainingParams, VideoParams
 from .config import PanelPaths
 from .convergence import ConvergenceChecker, DEFAULT_SCALAR_TAGS, downsample, load_convergence_config
@@ -670,6 +670,7 @@ class RemoteWorker:
         self.client = client
         self.executor = executor or RemoteJobExecutor(paths)
         self.history = getattr(self.executor, "history", HistoryStore(paths))
+        self.activity = ActivityStore(paths)
         self.state_store = state_store or RemoteStateStore(paths.remote_state_file)
         self.active_job_id: str | None = None
         self.last_sync_at = 0.0
@@ -713,6 +714,61 @@ class RemoteWorker:
         except Exception:
             # Additive rollout: an older schema must keep heartbeat and inspection alive.
             return False
+
+    def sync_local_activity(self) -> int:
+        records = []
+        known_run_ids = {str(run.get("id") or "") for run in self.history.list_runs()}
+        category_map = {
+            "artifact": "media",
+            "preset": "organization",
+            "metadata": "organization",
+            "admin": "organization",
+        }
+        safe_metadata_keys = {
+            "job_type", "type", "status", "run_id", "reward_preset_id",
+            "terrain_preset_id", "physics_preset_id", "folder", "source_run_id",
+        }
+        for event in self.activity.local_events(limit=250):
+            source_id = str(event.get("id") or "").strip()
+            event_type = re.sub(r"[^a-z0-9_.-]+", "_", str(event.get("event_type") or "activity").lower())[:120]
+            if not source_id or not event_type:
+                continue
+            raw_metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else event.get("payload")
+            raw_metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            metadata = {
+                key: raw_metadata[key]
+                for key in safe_metadata_keys
+                if key in raw_metadata and isinstance(raw_metadata[key], (str, int, float, bool, type(None)))
+            }
+            run_id = str(event.get("subject_id") or metadata.get("run_id") or "").strip()
+            category = category_map.get(str(event.get("category") or "system"), str(event.get("category") or "system"))
+            records.append({
+                "machine_id": self.config.machine_id,
+                "actor_id": None,
+                "actor_name": str(event.get("actor_name") or "Mother operator")[:160],
+                "actor_role": "admin",
+                "event_type": event_type,
+                "category": category[:80],
+                "outcome": outcome_for_status(str(event.get("outcome") or "info"))[:40],
+                "run_id": run_id if run_id in known_run_ids else None,
+                "job_id": None,
+                "points": int(event.get("points") or 0),
+                "metadata": metadata,
+                "source_type": "mother_activity",
+                "source_id": source_id[:200],
+                "created_at": event.get("created_at") or _now_iso(),
+            })
+        if not records:
+            return 0
+        try:
+            self.client.upsert(
+                "team_activity_events",
+                records,
+                query={"on_conflict": "machine_id,source_type,source_id"},
+            )
+        except Exception:
+            return 0
+        return len(records)
 
     def pull_remote_run_metadata(self) -> int:
         try:
@@ -879,6 +935,7 @@ class RemoteWorker:
     ) -> dict:
         started = time.time()
         capabilities_synced = self.sync_capabilities()
+        activity_synced = self.sync_local_activity()
         if pull_metadata:
             self.pull_remote_run_metadata()
             folder_summary = self.sync_folders(sync_deletions=sync_deletions)
@@ -1000,6 +1057,7 @@ class RemoteWorker:
             "storage_reused": int(getattr(self, "_sync_storage_reused", 0)),
             "schema": REMOTE_PROTOCOL_VERSION,
             "capabilities_synced": capabilities_synced,
+            "activity_synced": activity_synced,
             **deletion_summary,
             **alias_summary,
             **folder_summary,

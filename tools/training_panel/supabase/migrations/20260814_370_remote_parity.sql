@@ -29,12 +29,7 @@ create table if not exists public.physics_presets (
 
 insert into public.physics_presets (id, name, description, values, built_in)
 values ('baseline', 'Baseline', 'Repository defaults; sparse overrides are empty.', '{}'::jsonb, true)
-on conflict (id) do update
-set name = excluded.name,
-    description = excluded.description,
-    values = excluded.values,
-    built_in = true,
-    updated_at = now();
+on conflict (id) do nothing;
 
 alter table public.jobs add column if not exists client_request_id text;
 
