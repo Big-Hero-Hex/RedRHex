@@ -65,7 +65,7 @@ Windows 與 macOS launcher 會用明確的 desktop-remote marker 開啟 panel。
 
 Compaction 會保留最高編號的 top-level `model_*.pt`，並保留 event、parameter、video、export、note 與 deployment report。刪除需要輸入確切 run ID；相關 process 執行中時會拒絕。批次刪除需要輸入 `DELETE` 確認。只有在確認後，run 才會顯示為刪除中。
 
-Search、status、sort 與 folder 選擇會在重新載入後保留；當 filter 隱藏了 run 時，run 數量顯示為 `N of M`，並出現 **Clear filters**。Search 會比對 run 名稱、id、task、status、folder、note 內容與 preset id。依 status 排序時，running、stopping 與 queued 會排在已結束的 run 之前。按 `/` 聚焦 search，`j`/`k` 或方向鍵移動選擇，`Escape` 清除 search 或關閉 comparison。Shift-click checkbox 可選取範圍；選取 run 後才會出現 bulk move 與 delete。
+Search、status、sort 與 folder 選擇會在重新載入後保留；當 filter 隱藏了 run 時，run 數量顯示為 `N of M`，並出現 **Clear filters**。Search 會比對 run 名稱、id、task、status、folder、note 內容與 preset id。依 status 排序時，running、stopping 與 queued 會排在已結束的 run 之前。按 `/` 聚焦 search，`j`/`k` 或方向鍵移動選擇，`Escape` 清除 search 或關閉 comparison。Shift-click checkbox 可選取範圍。把 run card 拖曳到側邊欄的 folder 即可移動；若拖曳的 run 屬於目前的選取範圍，會移動整組選取。
 
 **Compare** 會在 run list 旁開啟獨立的 comparison panel，不影響 run details panel；對其他 run 按 **Compare** 可替換被比較的欄位。切換選擇時，未儲存的 notes 會依 run 保留並標示為未儲存草稿，離開頁面前也會提示。
 

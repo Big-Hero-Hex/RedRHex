@@ -33,6 +33,7 @@ const state = {
   notesDrafts: {},
   notesSavedText: "",
   lastSelectedRunId: null,   // anchor for shift-click range selection
+  draggingRunIds: [],        // runs currently being dragged onto a folder
   runStatuses: {},           // run id -> last seen status, for finish notices
   // Search / filter / sort (Module 5)
   searchQuery: "",
@@ -1597,8 +1598,8 @@ function renderRuns() {
       const canTweak = !["running", "stopping"].includes(String(run.status || "").toLowerCase());
       const unread = state.notifications.unreadRunIds.has(run.id);
       return `
-        <article class="run-card ${active} ${comparing ? "comparing" : ""} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? 'aria-busy="true"' : ""}>
-          <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${busy ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for folder move" data-tooltip="Select for folder move">
+        <article class="run-card ${active} ${comparing ? "comparing" : ""} ${unread ? "unread" : ""} ${deleting ? "deleting" : ""} ${busy ? "busy" : ""}" data-run-id="${escapeHtml(run.id)}" ${busy ? "" : 'draggable="true"'} ${busy ? 'aria-busy="true"' : ""}>
+          <input class="run-select-checkbox" type="checkbox" data-run-id="${escapeHtml(run.id)}" ${selected} ${busy ? "disabled" : ""} aria-label="Select ${escapeHtml(title)} for bulk actions" data-tooltip="Select for bulk move or delete. Shift-click selects a range.">
           <div class="run-top">
             <div class="run-title">
               ${unread ? `<span class="unread-dot" data-tooltip="Unread history update"></span>` : ""}
@@ -1661,6 +1662,27 @@ function renderRuns() {
     })
     .join("");
   document.querySelectorAll(".run-card").forEach((card) => {
+    card.addEventListener("dragstart", (event) => {
+      const runId = card.dataset.runId;
+      // Dragging a run that is part of the current selection moves the whole
+      // selection; dragging an unselected run moves only that run.
+      const ids = state.selectedRunIds.has(runId) ? [...state.selectedRunIds] : [runId];
+      state.draggingRunIds = ids;
+      card.classList.add("dragging");
+      document.body.classList.add("dragging-runs");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", ids.join(","));
+      }
+    });
+    card.addEventListener("dragend", () => {
+      state.draggingRunIds = [];
+      card.classList.remove("dragging");
+      document.body.classList.remove("dragging-runs");
+      document
+        .querySelectorAll(".folder-item.drop-target")
+        .forEach((item) => item.classList.remove("drop-target"));
+    });
     card.addEventListener("click", (event) => {
       const checkbox = event.target.closest(".run-select-checkbox");
       if (checkbox) {
@@ -4877,15 +4899,16 @@ function updateBulkToolbar() {
   const move = $("#move-selected-runs");
   const clear = $("#clear-selected-runs");
   const deleteButton = $("#delete-selected-runs");
-  const actions = $("#bulk-actions");
-  const hint = $("#bulk-hint");
   const selectVisible = $("#select-visible-runs");
+  const folderSelect = $("#bulk-folder-select");
   const selectedCount = state.selectedRunIds.size;
   const bulkBusy = state.isBulkDeleting || isPending("folder", "bulk");
-  if (count) count.textContent = `${selectedCount} selected`;
-  if (actions) actions.hidden = selectedCount === 0;
-  if (hint) hint.hidden = selectedCount > 0;
+  if (count) {
+    count.textContent = `${selectedCount} selected`;
+    count.classList.toggle("has-selection", selectedCount > 0);
+  }
   if (selectVisible) selectVisible.disabled = bulkBusy || !state.runs.length;
+  if (folderSelect) folderSelect.disabled = selectedCount === 0 || bulkBusy;
   if (move) {
     move.disabled = selectedCount === 0 || bulkBusy;
     move.textContent = isPending("folder", "bulk") ? "Moving..." : "Move selected";
@@ -4989,10 +5012,13 @@ function renderFolderSidebar() {
   for (const folder of state.folders) {
     folderCounts[folder] = state.runs.filter((r) => r.folder === folder).length;
   }
+  // "All Runs" is a view, not a destination, so it is the one row that does not
+  // accept a drop.
   const folderRow = (key, label, count, extras = "") => {
     const active = state.activeFolder === (key === "__all__" ? null : key === "__uncategorized__" ? "" : key);
-    return `<div class="folder-item ${active ? "active" : ""}">
-      <button type="button" class="folder-select" data-folder="${escapeHtml(key)}" aria-pressed="${active}">
+    const droppable = key !== "__all__";
+    return `<div class="folder-item ${active ? "active" : ""}" ${droppable ? `data-drop-folder="${escapeHtml(key)}"` : ""}>
+      <button type="button" class="folder-select" data-folder="${escapeHtml(key)}" aria-pressed="${active}" title="${escapeHtml(label)}">
         <span class="folder-name">${escapeHtml(label)}</span>
         <span class="folder-count">${escapeHtml(String(count))}</span>
       </button>
@@ -5036,6 +5062,36 @@ function renderFolderSidebar() {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       promptRenameFolder(button.dataset.folder).catch(handleActionError);
+    });
+  });
+  sidebar.querySelectorAll("[data-drop-folder]").forEach((target) => {
+    target.addEventListener("dragover", (event) => {
+      if (!state.draggingRunIds.length) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      target.classList.add("drop-target");
+    });
+    target.addEventListener("dragleave", (event) => {
+      // Moving across a child element fires dragleave on the row itself.
+      if (target.contains(event.relatedTarget)) return;
+      target.classList.remove("drop-target");
+    });
+    target.addEventListener("drop", (event) => {
+      event.preventDefault();
+      target.classList.remove("drop-target");
+      const runIds = state.draggingRunIds.length
+        ? [...state.draggingRunIds]
+        : String(event.dataTransfer?.getData("text/plain") || "").split(",").filter(Boolean);
+      state.draggingRunIds = [];
+      document.body.classList.remove("dragging-runs");
+      if (!runIds.length) return;
+      const raw = target.dataset.dropFolder;
+      const folder = raw === "__uncategorized__" ? "" : raw;
+      const unchanged = runIds.every((runId) => (findRun(runId)?.folder || "") === folder);
+      if (unchanged) return;
+      // Only a drag that carried the selection should consume it.
+      const clearSelection = runIds.length > 1 || state.selectedRunIds.has(runIds[0]);
+      assignRunsToFolder(runIds, folder, { clearSelection }).catch(handleActionError);
     });
   });
   sidebar.querySelectorAll(".folder-select").forEach((item) => {

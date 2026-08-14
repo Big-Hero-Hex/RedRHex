@@ -518,7 +518,7 @@ html[data-theme="dark"] .status-unknown {
 .history-layout {
   margin-top: 16px;
   display: grid;
-  grid-template-columns: 176px minmax(320px, 1fr) minmax(340px, 0.85fr);
+  grid-template-columns: 200px minmax(320px, 1fr) minmax(340px, 0.85fr);
   gap: 14px;
   align-items: start;
 }
@@ -576,7 +576,7 @@ html[data-theme="dark"] .status-unknown {
   display: flex;
   flex: 1;
   min-width: 0;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 6px;
   padding: 7px 4px 7px 10px;
@@ -616,9 +616,10 @@ html[data-theme="dark"] .status-unknown {
 .folder-name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* A truncated folder name is unusable as a label — wrap instead. */
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.3;
 }
 
 .folder-count {
@@ -629,6 +630,7 @@ html[data-theme="dark"] .status-unknown {
   padding: 1px 5px;
   border-radius: 9px;
   flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .folder-delete-button {
@@ -896,7 +898,9 @@ html[data-theme="dark"] .status-unknown {
 }
 
 .bulk-toolbar select {
-  min-width: 150px;
+  min-width: 0;
+  flex: 1 1 120px;
+  max-width: 190px;
   padding: 7px 10px;
   border-radius: 7px;
   border: 1px solid var(--line);
@@ -2251,16 +2255,31 @@ pre {
   border: 1px solid var(--line-strong);
 }
 
-.bulk-hint {
-  color: var(--muted);
-  font-size: 12px;
+.run-card.dragging {
+  opacity: 0.5;
 }
 
-.bulk-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
+/* While a drag is in flight, show every legal destination rather than only the
+   row under the pointer. */
+body.dragging-runs .folder-item[data-drop-folder] {
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+}
+
+.folder-item.drop-target {
+  background: var(--surface-hover);
+  outline: 2px solid var(--red);
+  outline-offset: -1px;
+}
+
+.folder-item.drop-target .folder-name {
+  font-weight: 800;
+}
+
+#bulk-selected-count.has-selection {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line-strong);
 }
 
 .draft-flag {

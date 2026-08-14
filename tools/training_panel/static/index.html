@@ -357,17 +357,14 @@
             <div class="bulk-toolbar">
               <span id="bulk-selected-count" class="status-badge muted-pill">0 selected</span>
               <button type="button" id="select-visible-runs" class="ghost-button small-button" data-tooltip="Select every run currently listed">Select visible</button>
-              <small id="bulk-hint" class="bulk-hint">Tick a run to move or delete in bulk. Shift-click selects a range.</small>
-              <div id="bulk-actions" class="bulk-actions" hidden>
-                <button type="button" id="clear-selected-runs" class="ghost-button small-button" data-tooltip="Clear selection">Clear</button>
-                <div class="bulk-move-group">
-                  <select id="bulk-folder-select" aria-label="Folder for selected runs">
-                    <option value="">— Uncategorized —</option>
-                  </select>
-                  <button type="button" id="move-selected-runs" class="primary-button small-button" data-tooltip="Move selected runs">Move selected</button>
-                </div>
-                <button type="button" id="delete-selected-runs" class="danger-button small-button" data-tooltip="Delete selected runs and repo-owned log files">Delete selected</button>
+              <button type="button" id="clear-selected-runs" class="ghost-button small-button" data-tooltip="Clear selection">Clear</button>
+              <div class="bulk-move-group">
+                <select id="bulk-folder-select" aria-label="Folder for selected runs">
+                  <option value="">— Uncategorized —</option>
+                </select>
+                <button type="button" id="move-selected-runs" class="primary-button small-button" data-tooltip="Move selected runs">Move</button>
               </div>
+              <button type="button" id="delete-selected-runs" class="danger-button small-button" data-tooltip="Delete selected runs and repo-owned log files">Delete</button>
             </div>
             <div id="runs" class="run-list"></div>
           </div><!-- /run-list-col -->

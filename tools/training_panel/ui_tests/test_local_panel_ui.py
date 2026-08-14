@@ -1105,11 +1105,13 @@ def test_running_run_card_renders_a_single_progress_bar(panel, page):
     expect(beta_card.locator(".run-progress")).to_have_count(1)
 
 
-def test_status_sort_puts_active_runs_first(panel, page):
+def test_status_sort_ranks_by_urgency_not_alphabet(panel, page):
+    # Alphabetically "completed" sorts above "failed", which buried the runs an
+    # operator actually needs to look at. The order is now operational.
     open_history(page, panel["url"])
     page.select_option("#sort-runs", "status")
-    first_status = page.locator(".run-card").first.locator(".status-pill")
-    expect(first_status).to_have_text("queued")
+    expect(page.locator(".run-card").first.locator(".status-pill")).to_have_text("failed")
+    expect(page.locator(".run-card").last.locator(".status-pill")).to_have_text("completed")
 
 
 def test_history_filters_survive_a_reload(panel, page):
@@ -1163,14 +1165,40 @@ def test_slash_focuses_search_and_j_k_move_the_selection(panel, page):
     assert page.evaluate("document.activeElement.id") == "run-search"
 
 
-def test_bulk_actions_appear_only_with_a_selection(panel, page):
+def test_bulk_toolbar_keeps_a_stable_height_across_selection(panel, page):
+    # Mounting the bulk controls only once a run is ticked reflowed the run list
+    # under the pointer, so they stay mounted and merely disable.
     open_history(page, panel["url"])
-    expect(page.locator("#bulk-actions")).to_be_hidden()
-    expect(page.locator("#bulk-hint")).to_be_visible()
+    toolbar = page.locator(".bulk-toolbar")
+    expect(page.locator("#delete-selected-runs")).to_be_visible()
+    expect(page.locator("#delete-selected-runs")).to_be_disabled()
+    before = toolbar.bounding_box()["height"]
 
     page.locator(".run-card", has_text="Beta Foldered").locator(".run-select-checkbox").check()
-    expect(page.locator("#bulk-actions")).to_be_visible()
     expect(page.locator("#bulk-selected-count")).to_have_text("1 selected")
+    expect(page.locator("#delete-selected-runs")).to_be_enabled()
+    assert toolbar.bounding_box()["height"] == before
+
+
+def test_dragging_a_run_onto_a_folder_moves_it(panel, page):
+    open_history(page, panel["url"])
+    page.locator('.folder-select[data-folder="Good Runs"]').click()
+    expect(page.locator("#runs")).not_to_contain_text("run_alpha")
+
+    page.locator('.folder-select[data-folder="__all__"]').click()
+    page.locator(".run-card", has_text="run_alpha").drag_to(
+        page.locator('.folder-item[data-drop-folder="Good Runs"]')
+    )
+    expect(page.locator("#panel-status")).to_contain_text("Moved 1 run to Good Runs")
+
+    page.locator('.folder-select[data-folder="Good Runs"]').click()
+    expect(page.locator("#runs")).to_contain_text("run_alpha")
+
+
+def test_all_runs_is_not_a_drop_target(panel, page):
+    open_history(page, panel["url"])
+    assert page.locator('.folder-item[data-drop-folder="__all__"]').count() == 0
+    assert page.locator('.folder-item[data-drop-folder="__uncategorized__"]').count() == 1
 
 
 def test_bulk_delete_requires_a_typed_acknowledgement(panel, page):
