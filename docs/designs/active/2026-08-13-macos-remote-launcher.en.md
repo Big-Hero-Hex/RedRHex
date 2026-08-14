@@ -17,13 +17,13 @@ The Windows-only launcher does not give macOS operators a Finder-launchable, vis
 <a id="goals-and-non-goals"></a>
 ## Goals and non-goals
 
-- Goal: provide one macOS `.command` launcher that installs on the current user's desktop, starts or reuses the workstation panel, opens responding services, and keeps the tunnel visible.
-- Non-goal: modify the existing Windows launcher, Tailscale, the SSH server, Training Panel internals, Isaac Lab, or training artifacts.
+- Goal: provide one macOS `.command` launcher that installs on the current user's desktop, starts or reuses the workstation panel, opens a remote-aware panel with on-demand TensorBoard, and keeps the tunnel visible.
+- Non-goal: modify the existing Windows launcher, Tailscale, the SSH server, Isaac Lab, or training artifacts. The shared Training Panel change is limited to marker-driven remote capability presentation.
 
 <a id="proposal-and-interfaces"></a>
 ## Proposal and interfaces
 
-Use a POSIX-shell script with the macOS-provided `ssh`, `curl`, `base64`, and `open` commands. Forward local `8080` and `6006` to workstation loopback through `lab_user1@100.90.246.97`. Keep SSH in the foreground for host-key and password prompts while a background monitor waits up to 45 seconds for the panel, then opens the responding browser pages. `--install` copies the executable launcher to `~/Desktop/RedRHex Remote.command` without administrator access.
+Use a POSIX-shell script with the macOS-provided `ssh`, `curl`, `base64`, and `open` commands. Forward local `8080` and `6006` to workstation loopback through `lab_user1@100.90.246.97`. Keep SSH in the foreground for host-key and password prompts while a background monitor waits up to 45 seconds, then opens `http://localhost:8080/?remote_client=macos`. The marker routes one all-runs TensorBoard through `6006`, forces headless training, and disables host-only file-manager and live-viewer controls. `--install` copies the executable launcher to `~/Desktop/RedRHex Remote.command` without administrator access.
 
 <a id="failure-modes"></a>
 ## Failure modes
@@ -34,8 +34,9 @@ Missing local commands fail before connection. Tailscale, authentication, host-k
 ## Acceptance
 
 - [x] Provide the launcher, dependency-free source tests, and paired operator and developer documentation.
+- [x] Provide browser regression proof for marker-driven capability state and fixed-forward TensorBoard.
 - [ ] Verify installation and first-launch behavior on a supported macOS host.
-- [ ] Verify interactive authentication, both forwards, browser launch, timeout behavior, tunnel shutdown, and existing-tunnel reuse against the workstation.
+- [ ] Verify interactive authentication, both forwards, browser launch, UI capability state, timeout behavior, tunnel shutdown, and existing-tunnel reuse against the workstation.
 
 <a id="resolution"></a>
 ## Resolution

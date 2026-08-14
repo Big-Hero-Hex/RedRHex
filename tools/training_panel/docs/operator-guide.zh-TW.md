@@ -32,6 +32,8 @@ History 結合 panel request 與探索到的 RSL-RL run。選擇 run 後可檢�
 
 執行中的 card 會顯示從 process log 解析的 iteration progress、throughput 與 ETA。Run detail 會從本機 TensorBoard scalar 繪製 mean reward 與 episode-length curve。Run record 也會保存啟動時使用的 Git commit、branch 與 dirty state。Seed 留白時，面板會自行選擇並記錄 seed，讓面板啟動的 run 可重現。
 
+Windows 與 macOS launcher 會用明確的 desktop-remote marker 開啟 panel。在此 mode，**TensorBoard** 會於轉送的 `6006` port 啟動或重用單一 all-runs server，並強制使用 headless training。**Play**、**Open MuJoCo Viewer** 與 host file-manager button 會停用，因為這些視窗只會開在 training PC，不會出現在遠端 browser。請改用錄製的 Isaac video、MuJoCo MP4、browser console output 與 copy-path control。
+
 Compaction 會保留最高編號的 top-level `model_*.pt`，並保留 event、parameter、video、export、note 與 deployment report。刪除需要輸入確切 run ID；相關 process 執行中時會拒絕。
 
 <a id="convergence"></a>

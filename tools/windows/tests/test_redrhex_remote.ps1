@@ -39,6 +39,8 @@ function Assert-True {
     Write-Host "PASS: $Name" -ForegroundColor Green
 }
 
+Assert-Equal $script:RedRHexConfig.PanelUrl "http://localhost:8080/?remote_client=windows" "remote-aware panel URL"
+
 $arguments = Get-RedRHexSshArguments
 $expectedPrefix = @(
     "-o", "ExitOnForwardFailure=yes",

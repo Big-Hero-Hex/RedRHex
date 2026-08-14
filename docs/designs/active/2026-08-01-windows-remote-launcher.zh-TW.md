@@ -6,18 +6,18 @@ audience: developer
 type: design
 status: approved
 owner: panel
-last_reviewed: 2026-08-13
+last_reviewed: 2026-08-14
 ---
 
 <a id="goal"></a>
 ## 目標
 
-提供 Windows 桌面捷徑，讓筆電透過 Tailscale 連到 RedRHex workstation，以 SSH 轉送本機 Training Panel 與 TensorBoard port，等待面板就緒，再用預設瀏覽器開啟兩項服務。
+提供 Windows 桌面捷徑，讓筆電透過 Tailscale 連到 RedRHex workstation，以 SSH 轉送本機 Training Panel 與 TensorBoard port，等待面板就緒，再用預設瀏覽器開啟可啟動 TensorBoard 的 remote-aware panel。
 
 <a id="scope"></a>
 ## 範圍
 
-由一個可自我安裝的 PowerShell 5.1+ script 負責設定、per-user 安裝、shortcut 建立、SSH command construction、readiness polling 與 browser launch。它不修改面板、Isaac Lab、Tailscale、SSH server 或訓練程式。Workstation 仍是執行主機與 artifact source。
+由一個可自我安裝的 PowerShell 5.1+ script 負責設定、per-user 安裝、shortcut 建立、SSH command construction、readiness polling 與 browser launch。Training Panel 的窄幅 UI contract 會辨識 launcher marker、透過固定 forward 路由 TensorBoard，並停用 host-only GUI action。Launcher 不修改 Isaac Lab、Tailscale、SSH server 或訓練程式。Workstation 仍是執行主機與 artifact source。
 
 <a id="connection"></a>
 ## 連線 contract
@@ -25,7 +25,7 @@ last_reviewed: 2026-08-13
 - SSH target：`lab_user1@100.90.246.97`
 - Panel：本機 `8080` 轉 workstation `127.0.0.1:8080`
 - TensorBoard：本機 `6006` 轉 workstation `127.0.0.1:6006`
-- URL：`http://localhost:8080` 與 `http://localhost:6006`
+- URL：`http://localhost:8080/?remote_client=windows` 與 `http://localhost:6006`
 - 安裝目錄：`%LOCALAPPDATA%\RedRHex Remote\`
 - Shortcut：目前使用者桌面的 `RedRHex Remote.lnk`
 
@@ -38,12 +38,13 @@ SSH terminal 保持可見，用於顯示 host-key、password、bind 與 connecti
 2. 若 panel tunnel 已可回應，直接重用，不啟動重複程序。
 3. 否則以兩個 forward、`ExitOnForwardFailure` 與 keepalive 啟動可見 SSH process。
 4. 最多等待 panel 45 秒。
-5. 成功後開啟兩個 URL；失敗時說明 Tailscale、authentication、SSH 與 port conflict 原因。
+5. 成功後開啟帶 marker 的 panel URL。History 的 **TensorBoard** action 會在 `6006` 啟動或重用單一 all-runs server；host-only file-manager 與 live-viewer control 維持停用。
+6. 失敗時說明 Tailscale、authentication、SSH 與 port conflict 原因。
 
 <a id="verification"></a>
 ## 驗證
 
-Dependency-free PowerShell test 涵蓋 deterministic argument、install path 與 tunnel command construction。Windows smoke verification 涵蓋 install/uninstall ownership、shortcut launch、authentication、兩個 forward、timeout、關閉 tunnel 與重用現有 tunnel。
+Dependency-free PowerShell test 涵蓋帶 marker 的 panel URL、deterministic argument、install path 與 tunnel command construction。Browser test 涵蓋 fixed-forward TensorBoard 與停用的 host-only control。Windows smoke verification 涵蓋 install/uninstall ownership、shortcut launch、authentication、兩個 forward、UI capability state、timeout、關閉 tunnel 與重用現有 tunnel。
 
 <a id="status"></a>
 ## 狀態邊界

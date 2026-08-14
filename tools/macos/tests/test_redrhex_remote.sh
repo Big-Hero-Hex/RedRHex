@@ -45,6 +45,7 @@ assert_contains() {
 }
 
 assert_equal "$(redrhex_install_path /Users/Test/Desktop)" "/Users/Test/Desktop/RedRHex Remote.command" "install path"
+assert_equal "$REDRHEX_PANEL_URL" "http://localhost:8080/?remote_client=macos" "remote-aware panel URL"
 
 redrhex_session_command=$(redrhex_remote_session_command)
 assert_contains "$redrhex_session_command" 'python -m tools.training_panel --host 127.0.0.1 --port 8080' "panel command"
