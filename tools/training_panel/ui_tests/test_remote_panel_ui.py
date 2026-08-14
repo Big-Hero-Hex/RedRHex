@@ -194,6 +194,37 @@ def test_child_deep_links_train_routes_more_views_and_themes(child_url):
         browser.close()
 
 
+def test_dark_theme_selected_cards_keep_dark_contrast_surface(child_url):
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(channel="chrome", headless=True, args=["--no-sandbox"])
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        open_child(page, child_url, path="?view=history&run=run-one")
+        page.evaluate("document.documentElement.dataset.theme = 'dark'")
+        expect(page.locator("html")).to_have_attribute("data-theme", "dark")
+        page.wait_for_timeout(200)
+
+        expect(page.locator(".run-card.active")).to_be_visible()
+        run_colors = page.locator(".run-card.active").evaluate(
+            """element => ({
+                theme: document.documentElement.dataset.theme,
+                token: getComputedStyle(document.documentElement).getPropertyValue('--accent-soft').trim(),
+                background: getComputedStyle(element).backgroundColor,
+            })"""
+        )
+        assert run_colors == {
+            "theme": "dark",
+            "token": "#122a2e",
+            "background": "rgb(18, 42, 46)",
+        }
+
+        page.locator('.sidebar-link[data-view="physics"]').click()
+        expect(page.locator(".preset-button.active")).to_be_visible()
+        assert page.locator(".preset-button.active").evaluate(
+            "element => getComputedStyle(element).backgroundColor"
+        ) == "rgb(18, 42, 46)"
+        browser.close()
+
+
 @pytest.mark.parametrize("role,queue_disabled,delete_disabled", [("viewer", True, True), ("operator", False, True), ("admin", False, False)])
 def test_child_role_gates_mutations(child_url, role, queue_disabled, delete_disabled):
     with sync_playwright() as playwright:

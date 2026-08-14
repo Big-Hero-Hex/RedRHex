@@ -1097,7 +1097,7 @@ a:focus-visible {
 .folder-card:hover,
 .preset-button.active {
   border-color: var(--accent);
-  background: #eef8f8;
+  background: var(--accent-soft);
 }
 
 .run-card.pending-confirmation {
