@@ -21,4 +21,4 @@ last_reviewed: 2026-08-14
 
 Plans are temporary execution records. When a plan completes or is cancelled, preserve its durable outcome in maintained documentation, a decision, release, or roadmap entry, then remove the plan.
 
-The completed documentation-system plan is summarized by the [v1 release](../releases/2026-08-07-documentation-system-v1.en.md) and [final audit](../research/2026-08-07-documentation-system-audit.en.md).
+The completed documentation-system plan is summarized by the [v1 release](../releases/2026-08-07-documentation-system-v1.en.md) and [final audit](../research/2026-08-07-documentation-system-audit.en.md). The completed branch-reorganization plan is summarized by its [completion audit](../research/2026-08-14-branch-reorganization-v1-audit.en.md).
