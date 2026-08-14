@@ -37,7 +37,7 @@ The reviewed integration tip is `fix/review-2026-07` after Documentation System 
 - [x] Rebuild the Windows launcher independently from main, including its PowerShell test and canonical bilingual operator/developer documentation.
 - [x] Rebuild and merge the macOS launcher as an implementation candidate with workstation smoke still pending.
 - [x] Reconstruct and merge the Student Distillation V2 core; isolate its co-developed Panel browser and physics/calibration work in a separate draft proposal.
-- [x] Preserve both root recovery generations and the generated research report in verified local-only commits and bundles.
+- [x] Preserve all three root recovery generations and the generated research report in verified local-only commits and bundles.
 - [x] Record every source commit, dirty path, stash hunk, duplicate, generated exception, and destination in the preservation manifest.
 
 <a id="cutover"></a>
@@ -45,7 +45,7 @@ The reviewed integration tip is `fix/review-2026-07` after Documentation System 
 
 - [x] Verify archive refs and reconstructed branches from a fresh clone or bundle restore.
 - [x] Force-update remote `main` from the reviewed integration SHA.
-- [ ] Enable and verify protected PR-only rules for `main`.
+- [x] Enable and verify protected PR-only rules for `main`.
 - [x] Publish, validate, and merge the torsion, Training Panel, Windows, macOS, and Student V2 PRs; retain Panel physics/calibration as draft PR #12.
 
 <a id="contract"></a>
@@ -63,11 +63,11 @@ Verification includes exact SHA/ref comparison, `git fsck`, bundle verification,
 <a id="open-gates"></a>
 ## Open gates
 
-- Remote `main` now points to the reviewed line, but repository-owner authentication is still required to enable and inspect branch protection; the combined cutover checkbox therefore remains open.
+- GitHub verified protected `main` with strict `validate`, required pull-request workflow, resolved conversations, administrator enforcement, and force-push/deletion disabled.
 - Torsion and Panel V3.6 are merged as status-honest implementation candidates; physical spring calibration and production retraining remain separate pending evidence.
 - Windows and macOS launchers are merged as implementation candidates; their named workstation smoke checklists remain pending.
 - Student V2 core is merged without production-length, multi-seed, recorded-sensor, or hardware claims. Panel physics/calibration remains draft PR #12.
-- Remote and local obsolete-ref contraction remains pending only until protection is enabled; all previously dirty root material now has an exact local recovery commit and verified bundle.
+- Remote and local obsolete-ref contraction remains pending until this governance pull request merges and the recorded tips pass an immediate pre-deletion comparison. All dirty root material, including the later F0/F1 revision, now has an exact local recovery commit and verified bundle.
 
 <a id="completion-summary"></a>
 ## Completion summary
