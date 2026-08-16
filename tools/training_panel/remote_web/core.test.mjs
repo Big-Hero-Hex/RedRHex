@@ -21,10 +21,22 @@ test("route-specific training payloads omit irrelevant and host-path fields", ()
     teacher_iterations: 20,
     distillation_iterations: 30,
     ppo_iterations: 40,
+    robust_iterations: 50,
+    seeds: "42, 43, 44",
+    f0_evidence: "/tmp/f0.json",
+    f0_evidence_sha256: "a".repeat(64),
+    f4_profile: "/tmp/f4.json",
+    f4_profile_sha256: "b".repeat(64),
+    f5_profile: "/tmp/f5.json",
+    f5_profile_sha256: "c".repeat(64),
   });
   assert.equal(full.training_route, "sensor_v2_full");
   assert.equal(full.spring_backend, "native");
   assert.equal(full.teacher_iterations, 20);
+  assert.equal(full.robust_iterations, 50);
+  assert.deepEqual(full.seeds, [42, 43, 44]);
+  assert.equal(full.f0_evidence, "/tmp/f0.json");
+  assert.equal(full.f5_profile_sha256, "c".repeat(64));
   assert.equal(full.checkpoint, undefined);
   assert.equal(full.checkpoint_ref, undefined);
   assert.equal(full.task, undefined);

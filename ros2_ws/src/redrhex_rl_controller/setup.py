@@ -14,7 +14,7 @@ setup(
         (f"share/{package_name}/launch", glob("launch/*.py")),
         (f"share/{package_name}/scripts", glob("scripts/*.py")),
     ],
-    install_requires=["setuptools"],
+    install_requires=["setuptools", "numpy>=1.23", "redrhex-policy-io==2.0.0"],
     zip_safe=True,
     maintainer="RedRhex Team",
     maintainer_email="redrhex@example.com",
@@ -23,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "rl_controller_node = redrhex_rl_controller.rl_controller_node:main",
+            "rl_controller_node_v2 = redrhex_rl_controller.rl_controller_node_v2:main",
             "fake_sensor_node = redrhex_rl_controller.fake_sensor_node:main",
             "motor_command_tool = redrhex_rl_controller.motor_command_tool:main",
             "estop_tool = redrhex_rl_controller.estop_tool:main",

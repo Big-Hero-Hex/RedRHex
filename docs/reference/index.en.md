@@ -6,7 +6,7 @@ audience: shared
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-15
 ---
 
 <a id="current-references"></a>
@@ -16,6 +16,7 @@ last_reviewed: 2026-08-07
 - [Runtime paths and artifacts](runtime-layout.en.md)
 - [Training and deployment policy contract](policy-contract.en.md)
 - [Version and compatibility matrix](compatibility.en.md)
+- [Project management synchronization](project-management-sync.en.md)
 
 <a id="component-references"></a>
 ## Component references

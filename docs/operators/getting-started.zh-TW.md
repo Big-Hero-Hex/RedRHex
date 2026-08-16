@@ -6,7 +6,7 @@ audience: operator
 type: tutorial
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-16
 ---
 
 <a id="prerequisites"></a>
@@ -28,10 +28,10 @@ export ISAACLAB_ROOT=/path/to/IsaacLab
 ```bash
 git lfs install
 git lfs pull
-"$ISAACLAB_ROOT/isaaclab.sh" -p -m pip install -e source/RedRhex
+"$ISAACLAB_ROOT/isaaclab.sh" -p scripts/install_redrhex.py
 ```
 
-USD 資產由 Git LFS 管理。若 `RedRhex.usd` 只是很小的指標檔，表示 `git lfs pull` 尚未完成。
+Installer 會使用目前的 Isaac Python，先安裝儲存庫內的 policy-I/O distribution，再安裝 RedRHex 擴充套件；`redrhex-policy-io` 不會從 package index 取得。可加上 `--dry-run` 檢查兩條依序執行的 pip 指令。USD 資產由 Git LFS 管理。若 `RedRhex.usd` 只是很小的指標檔，表示 `git lfs pull` 尚未完成。
 
 <a id="verify"></a>
 ## 驗證環境

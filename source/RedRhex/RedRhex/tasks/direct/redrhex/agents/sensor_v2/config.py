@@ -12,11 +12,13 @@ from isaaclab_rl.rsl_rl import (
     RslRlPpoAlgorithmCfg,
 )
 
+from .ppo import INITIAL_MAIN_ACTION_NOISE_STD_V2
+
 
 @configclass
 class SensorStudentPolicyCfgV2(RslRlPpoActorCriticCfg):
     class_name = "SensorActorCriticV2"
-    init_noise_std = 0.55
+    init_noise_std = INITIAL_MAIN_ACTION_NOISE_STD_V2
     actor_obs_normalization = False
     critic_obs_normalization = False
     actor_hidden_dims = [128, 128]
@@ -47,6 +49,8 @@ class SensorStudentTeacherCfgV2(RslRlDistillationStudentTeacherCfg):
 class SensorDistillationAlgorithmCfgV2(RslRlDistillationAlgorithmCfg):
     class_name = "SensorDistillationV2"
     num_learning_epochs = 2
+    num_mini_batches = 4
+    max_mini_batch_size = 2048
     learning_rate = 1.0e-3
     gradient_length = 1
     max_grad_norm = 1.0
@@ -65,6 +69,32 @@ class SensorDistillationAlgorithmCfgV2(RslRlDistillationAlgorithmCfg):
 
 
 @configclass
+class SensorDistillationNoAuxAlgorithmCfgV2(SensorDistillationAlgorithmCfgV2):
+    """Research ablation with every student auxiliary objective disabled."""
+
+    velocity_loss_weight = 0.0
+    dynamics_loss_weight = 0.0
+    latent_regularization_weight = 0.0
+    contact_loss_weight = 0.0
+
+
+@configclass
+class SensorDistillationVelocityAlgorithmCfgV2(SensorDistillationNoAuxAlgorithmCfgV2):
+    """Research ablation with only base-velocity supervision enabled."""
+
+    velocity_loss_weight = 0.5
+
+
+@configclass
+class SensorDistillationVelocityDynamicsAlgorithmCfgV2(
+    SensorDistillationVelocityAlgorithmCfgV2
+):
+    """Research ablation with velocity and next-frame dynamics supervision."""
+
+    dynamics_loss_weight = 0.1
+
+
+@configclass
 class SensorPpoAlgorithmCfgV2(RslRlPpoAlgorithmCfg):
     class_name = "SensorPPOV2"
     value_loss_coef = 1.0
@@ -74,10 +104,10 @@ class SensorPpoAlgorithmCfgV2(RslRlPpoAlgorithmCfg):
     num_learning_epochs = 6
     num_mini_batches = 4
     learning_rate = 3.0e-4
-    schedule = "adaptive"
+    schedule = "fixed"
     gamma = 0.99
     lam = 0.95
-    desired_kl = 0.01
+    desired_kl = 0.0
     max_grad_norm = 1.0
     teacher_bc_initial_weight = 0.2
     teacher_bc_anneal_fraction = 0.60
@@ -87,8 +117,18 @@ class SensorPpoAlgorithmCfgV2(RslRlPpoAlgorithmCfg):
     contact_loss_weight = 0.0
 
 
+@configclass
+class SensorRobustPpoAlgorithmCfgV2(SensorPpoAlgorithmCfgV2):
+    """F4 optimizer settings; the sensor/actuator ranges live in a bound profile."""
+
+    learning_rate = 1.0e-4
+    teacher_bc_initial_weight = 0.05
+    teacher_bc_anneal_fraction = 0.25
+
+
 def _teacher_policy() -> RslRlPpoActorCriticCfg:
     return RslRlPpoActorCriticCfg(
+        class_name="StrictForwardTeacherActorCriticV2",
         init_noise_std=0.55,
         actor_obs_normalization=True,
         critic_obs_normalization=True,
@@ -172,6 +212,41 @@ class ForwardSensorV2DistillationRunnerCfg(RslRlDistillationRunnerCfg):
 
 
 @configclass
+class ForwardSensorV2DistillationNoAuxRunnerCfg(ForwardSensorV2DistillationRunnerCfg):
+    """Executable ``v2_no_aux`` research lineage required by the F5 gap gate."""
+
+    experiment_name = "redrhex_forward_v2_ablation_no_aux"
+    run_name = "v2_no_aux"
+    algorithm = SensorDistillationNoAuxAlgorithmCfgV2()
+    ablation_id = "v2_no_aux"
+    production_lineage_allowed = False
+
+
+@configclass
+class ForwardSensorV2DistillationVelocityRunnerCfg(ForwardSensorV2DistillationRunnerCfg):
+    """Executable ``v2_velocity`` research lineage required by the F5 gap gate."""
+
+    experiment_name = "redrhex_forward_v2_ablation_velocity"
+    run_name = "v2_velocity"
+    algorithm = SensorDistillationVelocityAlgorithmCfgV2()
+    ablation_id = "v2_velocity"
+    production_lineage_allowed = False
+
+
+@configclass
+class ForwardSensorV2DistillationVelocityDynamicsRunnerCfg(
+    ForwardSensorV2DistillationRunnerCfg
+):
+    """Executable ``v2_velocity_dynamics`` research lineage for the F5 gap gate."""
+
+    experiment_name = "redrhex_forward_v2_ablation_velocity_dynamics"
+    run_name = "v2_velocity_dynamics"
+    algorithm = SensorDistillationVelocityDynamicsAlgorithmCfgV2()
+    ablation_id = "v2_velocity_dynamics"
+    production_lineage_allowed = False
+
+
+@configclass
 class ForwardSensorV2PpoRunnerCfg(RslRlOnPolicyRunnerCfg):
     """F3 asymmetric PPO configuration with sensor actor and privileged critic."""
 
@@ -190,3 +265,14 @@ class ForwardSensorV2PpoRunnerCfg(RslRlOnPolicyRunnerCfg):
     policy = SensorStudentPolicyCfgV2()
     algorithm = SensorPpoAlgorithmCfgV2()
     checkpoint_kind = "student_ppo_v2"
+
+
+@configclass
+class ForwardSensorV2RobustPpoRunnerCfg(ForwardSensorV2PpoRunnerCfg):
+    """F4 continuation from F3 under an evidence-bound DR curriculum profile."""
+
+    class_name = "SensorRobustnessRunnerV2"
+    max_iterations = 600
+    experiment_name = "redrhex_forward_v2_robust_ppo"
+    run_name = "forward_sensor_v2_robust_ppo"
+    algorithm = SensorRobustPpoAlgorithmCfgV2()

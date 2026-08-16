@@ -516,6 +516,7 @@ class ProcessRegistry:
         params.terrain_profile_sha256 = terrain_profile_sha256
         script_argv = training_argv(
             params,
+            isaaclab_launcher=str(self.paths.isaaclab_launcher),
             physics_profile_file=physics_profile_file,
             reward_profile_file=reward_profile_file,
             reward_profile_sha256=reward_profile_sha256,
@@ -587,6 +588,7 @@ class ProcessRegistry:
         params.terrain_profile_sha256 = terrain_profile_sha256
         script_argv = training_argv(
             params,
+            isaaclab_launcher=str(self.paths.isaaclab_launcher),
             physics_profile_file=physics_profile_file,
             reward_profile_file=reward_profile_file,
             reward_profile_sha256=reward_profile_sha256,
@@ -955,6 +957,11 @@ class ProcessRegistry:
             else "scripts/rsl_rl/train.py"
         )
         if params.get("training_route") == "sensor_v2_full":
+            entry_point = "scripts/rsl_rl/train_sensor_v2_full_pipeline.py"
+        elif params.get("training_route") in {
+            "sensor_v2_f1_f3",  # historical run recovery only
+            "sensor_v2_ungated_debug",
+        }:
             entry_point = "scripts/rsl_rl/train_sensor_v2_pipeline.py"
         if (
             not observed_command
@@ -1102,9 +1109,10 @@ class ProcessRegistry:
         self.paths.ensure_dirs()
         play_id = f"play_{timestamp_id()}"
         run = self.history.get_run(run_id)
+        run_params = ((run or {}).get("params") or {})
         spring_backend = resolve_spring_backend(run, checkpoint)
-        task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
-        agent = agent_for_training_route(((run or {}).get("params") or {}).get("training_route"))
+        task = str(run_params.get("task") or DEFAULT_TASK)
+        agent = agent_for_training_route(run_params.get("training_route"))
         terrain_override_file = self._write_process_terrain_override(play_id, run_id, checkpoint)
         physics_profile_file = self._write_process_physics_profile(play_id, run_id)
         argv = play_argv(
@@ -1119,6 +1127,7 @@ class ProcessRegistry:
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
             camera_lookat=DEFAULT_FOLLOW_CAMERA_LOOKAT,
             agent=agent,
+            seed=run_params.get("seed"),
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{play_id}.log"
@@ -1167,9 +1176,10 @@ class ProcessRegistry:
         params.validate()
         video_id = f"video_{timestamp_id()}"
         run = self.history.get_run(run_id)
+        run_params = ((run or {}).get("params") or {})
         spring_backend = resolve_spring_backend(run, checkpoint)
-        task = str(((run or {}).get("params") or {}).get("task") or DEFAULT_TASK)
-        agent = agent_for_training_route(((run or {}).get("params") or {}).get("training_route"))
+        task = str(run_params.get("task") or DEFAULT_TASK)
+        agent = agent_for_training_route(run_params.get("training_route"))
         terrain_override_file = self._write_process_terrain_override(video_id, run_id, checkpoint)
         physics_profile_file = self._write_process_physics_profile(video_id, run_id)
         argv = play_argv(
@@ -1192,6 +1202,7 @@ class ProcessRegistry:
             camera_eye=DEFAULT_FOLLOW_CAMERA_EYE,
             camera_lookat=DEFAULT_FOLLOW_CAMERA_LOOKAT,
             agent=agent,
+            seed=run_params.get("seed"),
         )
         shell = shell_for_isaaclab(self.paths, argv)
         log_file = self.paths.process_log_dir / f"{video_id}.log"
@@ -2530,19 +2541,115 @@ class ProcessRegistry:
     def _sensor_v2_pipeline_result(self, run_id: str) -> dict | None:
         run = self.history.get_run(run_id) or {}
         params = run.get("params") or {}
-        if params.get("training_route") != "sensor_v2_full":
+        route = params.get("training_route")
+        if route not in {
+            "sensor_v2_full",
+            "sensor_v2_f1_f3",  # historical result recovery only
+            "sensor_v2_ungated_debug",
+        }:
             return None
         process_log = Path(str(run.get("process_log") or ""))
         text = tail_file(process_log, max_chars=500000)
-        matches = re.findall(r"^SENSOR_V2_PIPELINE_RESULT:\s*(\{.*\})\s*$", text, re.MULTILINE)
+        marker = (
+            "SENSOR_V2_FULL_PIPELINE_RESULT"
+            if route == "sensor_v2_full"
+            else "SENSOR_V2_PIPELINE_RESULT"
+        )
+        matches = re.findall(rf"^{marker}:\s*(\{{.*\}})\s*$", text, re.MULTILINE)
         if not matches:
             return None
         try:
             result = json.loads(matches[-1])
         except json.JSONDecodeError:
             return None
+        if route == "sensor_v2_full":
+            if (
+                result.get("schema") != "redrhex.sensor-v2-full-pipeline.v2"
+                or result.get("status") != "passed"
+                or not isinstance(result.get("seeds"), list)
+                or not isinstance(result.get("runs"), list)
+            ):
+                return None
+            seeds = result["seeds"]
+            if (
+                not seeds
+                or any(type(seed) is not int for seed in seeds)
+                or len(set(seeds)) != len(seeds)
+                or seeds != params.get("seeds")
+            ):
+                return None
+            artifact_bindings = (
+                ("f0_evidence", "f0_evidence", "f0_evidence_sha256"),
+                ("f4_profile", "f4_profile", "f4_profile_sha256"),
+                ("f5_profile", "f5_profile", "f5_profile_sha256"),
+            )
+            for result_key, path_key, digest_key in artifact_bindings:
+                record = result.get(result_key)
+                expected_path = params.get(path_key)
+                expected_digest = params.get(digest_key)
+                if (
+                    not isinstance(record, dict)
+                    or not expected_path
+                    or not record.get("path")
+                    or record.get("sha256") != expected_digest
+                    or Path(str(record.get("path") or "")).resolve()
+                    != Path(str(expected_path)).resolve()
+                ):
+                    return None
+            robust_rows = [
+                item
+                for item in result["runs"]
+                if isinstance(item, dict) and item.get("stage") == "f4_robust_ppo"
+            ]
+            if len(robust_rows) != len(seeds):
+                return None
+            robust_runs = {item.get("seed"): item for item in robust_rows}
+            if len(robust_runs) != len(robust_rows) or set(robust_runs) != set(seeds):
+                return None
+            rsl_root = (self.paths.repo_root / "logs" / "rsl_rl").resolve()
+            resolved_dirs: dict[int, str] = {}
+            for seed in seeds:
+                item = robust_runs[seed]
+                run_dir = Path(str(item.get("run_dir") or "")).resolve()
+                checkpoint = Path(str(item.get("checkpoint") or "")).resolve()
+                digest = str(item.get("checkpoint_sha256") or "")
+                if (
+                    not run_dir.is_dir()
+                    or not run_dir.is_relative_to(rsl_root)
+                    or not checkpoint.is_file()
+                    or checkpoint.parent != run_dir
+                    or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                    or hashlib.sha256(checkpoint.read_bytes()).hexdigest() != digest
+                ):
+                    return None
+                resolved_dirs[int(seed)] = str(run_dir)
+            primary_seed = int(seeds[0])
+            result["primary_seed"] = primary_seed
+            result["robust_log_dirs"] = resolved_dirs
+            # The monitor's existing completion/video seam consumes this key;
+            # it now points to the first declared F4 seed, not an F3 checkpoint.
+            result["ppo_log_dir"] = resolved_dirs[primary_seed]
+            return result
+
+        if route == "sensor_v2_f1_f3":
+            # Historical runs predate the explicit marker schema.  Preserve
+            # read-only recovery while deriving the only safe eligibility
+            # interpretation; never expose them as promotion/deployment proof.
+            result.update(
+                debug_only=True,
+                deployment_eligible=False,
+                promotion_eligible=False,
+                acceptance_screening="not_run_legacy_debug_only",
+            )
+        if route == "sensor_v2_ungated_debug" and (
+            result.get("debug_only") is not True
+            or result.get("deployment_eligible") is not False
+            or result.get("promotion_eligible") is not False
+            or result.get("acceptance_screening") != "not_run_debug_only"
+        ):
+            return None
         final_dir = Path(str(result.get("ppo_log_dir") or "")).resolve()
-        rsl_root = self.paths.rsl_rl_log_root.resolve()
+        rsl_root = (self.paths.repo_root / "logs" / "rsl_rl").resolve()
         if not final_dir.is_dir() or not final_dir.is_relative_to(rsl_root):
             return None
         result["ppo_log_dir"] = str(final_dir)
@@ -2632,6 +2739,7 @@ class ProcessRegistry:
             for entry_point in (
                 "scripts/rsl_rl/train.py",
                 "scripts/rsl_rl/train_sensor_v2_pipeline.py",
+                "scripts/rsl_rl/train_sensor_v2_full_pipeline.py",
             )
         ):
             return False
@@ -2731,13 +2839,52 @@ class ProcessRegistry:
     def _training_commands_match(recorded_command: str, process_command: str) -> bool:
         if not recorded_command:
             return False
-        pipeline_entry_point = "scripts/rsl_rl/train_sensor_v2_pipeline.py"
+        full_pipeline_entry_point = "scripts/rsl_rl/train_sensor_v2_full_pipeline.py"
+        legacy_pipeline_entry_point = "scripts/rsl_rl/train_sensor_v2_pipeline.py"
         standard_entry_point = "scripts/rsl_rl/train.py"
-        recorded_is_pipeline = pipeline_entry_point in recorded_command
-        observed_is_pipeline = pipeline_entry_point in process_command
-        if recorded_is_pipeline != observed_is_pipeline:
+        recorded_entry_point = next(
+            (
+                entry_point
+                for entry_point in (
+                    full_pipeline_entry_point,
+                    legacy_pipeline_entry_point,
+                    standard_entry_point,
+                )
+                if entry_point in recorded_command
+            ),
+            None,
+        )
+        observed_entry_point = next(
+            (
+                entry_point
+                for entry_point in (
+                    full_pipeline_entry_point,
+                    legacy_pipeline_entry_point,
+                    standard_entry_point,
+                )
+                if entry_point in process_command
+            ),
+            None,
+        )
+        if recorded_entry_point is None or recorded_entry_point != observed_entry_point:
             return False
-        if recorded_is_pipeline:
+        if recorded_entry_point == full_pipeline_entry_point:
+            keys = (
+                "--isaaclab-launcher",
+                "--f0-evidence",
+                "--f0-evidence-sha256",
+                "--f4-profile",
+                "--f4-profile-sha256",
+                "--f5-profile",
+                "--f5-profile-sha256",
+                "--num_envs",
+                "--teacher_iterations",
+                "--distillation_iterations",
+                "--ppo_iterations",
+                "--robust_iterations",
+                "--device",
+            )
+        elif recorded_entry_point == legacy_pipeline_entry_point:
             keys = (
                 "--num_envs",
                 "--teacher_iterations",
@@ -2747,8 +2894,6 @@ class ProcessRegistry:
                 "--seed",
             )
         else:
-            if standard_entry_point not in recorded_command or standard_entry_point not in process_command:
-                return False
             keys = (
                 "--task",
                 "--num_envs",
@@ -2768,12 +2913,39 @@ class ProcessRegistry:
                 return False
             if recorded == observed:
                 matched += 1
+        if recorded_entry_point == full_pipeline_entry_point:
+            recorded_seeds = ProcessRegistry._arg_values(recorded_command, "--seeds")
+            observed_seeds = ProcessRegistry._arg_values(process_command, "--seeds")
+            if not recorded_seeds or recorded_seeds != observed_seeds:
+                return False
+            matched += 1
         return matched >= 3
 
     @staticmethod
     def _arg_value(command: str, key: str) -> str | None:
         match = re.search(rf"{re.escape(key)}(?:=|\s+)([^\s]+)", command)
         return match.group(1) if match else None
+
+    @staticmethod
+    def _arg_values(command: str, key: str) -> tuple[str, ...]:
+        """Return all consecutive values for a repeatable/multi-value option."""
+
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return ()
+        for index, token in enumerate(tokens):
+            if token.startswith(f"{key}="):
+                return (token.split("=", 1)[1],)
+            if token != key:
+                continue
+            values: list[str] = []
+            for value in tokens[index + 1 :]:
+                if value.startswith("--"):
+                    break
+                values.append(value)
+            return tuple(values)
+        return ()
 
     @staticmethod
     def _process_group_for_pid(pid: int) -> int | None:
@@ -3222,26 +3394,42 @@ class ProcessRegistry:
         returncode = proc.wait()
         self._release_gpu_lease(run_id)
         self._mark_isaac_process_finished()
-        status = "completed" if returncode == 0 else "failed"
-        pipeline_result = self._sensor_v2_pipeline_result(run_id)
-        if pipeline_result is not None:
-            log_dir = pipeline_result["ppo_log_dir"]
         run_before_completion = self.history.get_run(run_id) or {}
         run_params = (
             run_before_completion.get("params")
             if isinstance(run_before_completion.get("params"), dict)
             else {}
         )
+        pipeline_result = self._sensor_v2_pipeline_result(run_id)
+        pipeline_result_required = run_params.get("training_route") == "sensor_v2_full"
+        invalid_pipeline_result = bool(
+            returncode == 0 and pipeline_result_required and pipeline_result is None
+        )
+        if pipeline_result is not None:
+            log_dir = pipeline_result["ppo_log_dir"]
+        elif invalid_pipeline_result:
+            # A successful shell exit is insufficient for the evidence-gated
+            # route: the hash-bound F0/F4/F5 result is its completion contract.
+            log_dir = None
         campaign_owned_before_completion = bool(
             run_params.get("campaign_id") or run_before_completion.get("campaign_id")
         )
-        if not log_dir:
+        if not log_dir and not invalid_pipeline_result:
             log_dir = self._log_dir_from_process_log(run_id)
             if not log_dir and returncode == 0 and not campaign_owned_before_completion:
                 log_dir = self.history.find_latest_log_after(started_at_epoch)
         completion_artifact = self._campaign_training_completion_fields(
             run_before_completion, log_dir, returncode
         )
+        if invalid_pipeline_result:
+            completion_artifact.update(
+                status="failed",
+                failure_class="evidence",
+                failure_reason=(
+                    "Sensor V2 full pipeline exited without a valid hash-bound "
+                    "F0/F4/F5 result"
+                ),
+            )
         status = str(completion_artifact.pop("status"))
         completed_at = datetime.now().isoformat(timespec="seconds")
         self.history.update_run(

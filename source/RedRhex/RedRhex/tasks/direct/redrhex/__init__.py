@@ -62,8 +62,20 @@ gym.register(
         "rsl_rl_distillation_v2_cfg_entry_point": (
             f"{agents.__name__}.sensor_v2.config:ForwardSensorV2DistillationRunnerCfg"
         ),
+        "rsl_rl_distillation_v2_no_aux_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2DistillationNoAuxRunnerCfg"
+        ),
+        "rsl_rl_distillation_v2_velocity_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2DistillationVelocityRunnerCfg"
+        ),
+        "rsl_rl_distillation_v2_velocity_dynamics_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2DistillationVelocityDynamicsRunnerCfg"
+        ),
         "rsl_rl_ppo_v2_cfg_entry_point": (
             f"{agents.__name__}.sensor_v2.config:ForwardSensorV2PpoRunnerCfg"
+        ),
+        "rsl_rl_robust_ppo_v2_cfg_entry_point": (
+            f"{agents.__name__}.sensor_v2.config:ForwardSensorV2RobustPpoRunnerCfg"
         ),
     },
 )

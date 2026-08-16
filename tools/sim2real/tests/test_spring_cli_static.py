@@ -43,7 +43,9 @@ def _spring_backend_argument(relative: str) -> ast.Call:
     (
         ("scripts/rsl_rl/train.py", "native"),
         ("scripts/rsl_rl/play.py", "explicit"),
-        ("scripts/rsl_rl/eval_command_sweep.py", "explicit"),
+        # Evaluation must use the same default dynamics backend as training.
+        # Legacy playback retains its explicit default for checkpoint replay.
+        ("scripts/rsl_rl/eval_command_sweep.py", "native"),
     ),
 )
 def test_rsl_entrypoints_expose_provenance_aware_spring_backend_defaults(

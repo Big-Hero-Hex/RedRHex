@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run the approved Sensor V2 F1 -> F2 -> F3 training lineage sequentially."""
+"""Run the non-promotable Sensor V2 F0 -> F3 debugging lineage.
+
+The evidence-gated training route is ``train_sensor_v2_full_pipeline.py``.
+This shorter compatibility route intentionally does not perform the F1/F2
+command-sweep promotion screens and therefore can never produce deployment or
+promotion evidence.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +15,6 @@ import os
 import re
 import signal
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +31,7 @@ AGENTS = {
     "distillation": "rsl_rl_distillation_v2_cfg_entry_point",
     "ppo": "rsl_rl_ppo_v2_cfg_entry_point",
 }
+F0_SCRIPT = REPO_ROOT / "scripts" / "rsl_rl" / "validate_forward_gait_baseline.py"
 
 
 def _arguments() -> argparse.Namespace:
@@ -45,13 +51,41 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--pipeline_id", default="")
     parser.add_argument("--physics-profile", default=None)
+    parser.add_argument(
+        "--acknowledge-ungated-debug",
+        action="store_true",
+        help=(
+            "Explicitly acknowledge that this compatibility route skips F1/F2 "
+            "acceptance screens and is not promotion eligible."
+        ),
+    )
+    parser.add_argument(
+        "--isaaclab-launcher",
+        type=Path,
+        default=None,
+        help="Path to isaaclab.sh (or set ISAACLAB_ROOT).",
+    )
     args = parser.parse_args()
+    if not args.acknowledge_ungated_debug:
+        parser.error(
+            "this F0->F3 compatibility route is debug-only and ungated; use "
+            "train_sensor_v2_full_pipeline.py for evidence, or pass "
+            "--acknowledge-ungated-debug explicitly"
+        )
     if args.spring_backend == "explicit":
         parser.error(
             "Explicit torsion-spring policy training is quarantined at the current "
             "120 Hz physics step; use Native for provisional training and the "
             "sim2real spring-release workflow for Explicit characterization."
         )
+    if args.isaaclab_launcher is None:
+        isaaclab_root = os.environ.get("ISAACLAB_ROOT", "").strip()
+        if not isaaclab_root:
+            parser.error("--isaaclab-launcher or ISAACLAB_ROOT is required")
+        args.isaaclab_launcher = Path(isaaclab_root) / "isaaclab.sh"
+    args.isaaclab_launcher = args.isaaclab_launcher.expanduser().resolve()
+    if not args.isaaclab_launcher.is_file():
+        parser.error(f"Isaac Lab launcher does not exist: {args.isaaclab_launcher}")
     return args
 
 
@@ -82,6 +116,55 @@ def _find_run_dir(experiment: str, run_name: str) -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime).resolve()
 
 
+def _run_f0(args: argparse.Namespace, pipeline_id: str) -> Path:
+    report_path = REPO_ROOT / "logs" / "rsl_rl" / "pipeline" / pipeline_id / "f0_forward_gait.json"
+    command = [
+        str(args.isaaclab_launcher),
+        "-p",
+        str(F0_SCRIPT),
+        "--json",
+        str(report_path),
+        "--isaac",
+        "--num-envs",
+        str(args.num_envs),
+        "--seed",
+        str(args.seed),
+        "--spring-backend",
+        args.spring_backend,
+    ]
+    if args.headless:
+        command.append("--headless")
+    print(f"[SENSOR_V2_PIPELINE] Starting f0: {' '.join(command)}", flush=True)
+    completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "Sensor V2 F0 structural/simulator gate failed; inspect "
+            f"{report_path}; F1 training was not started"
+        )
+    if not report_path.is_file():
+        raise RuntimeError(f"Sensor V2 f0 completed without its JSON report: {report_path}")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Sensor V2 f0 produced an unreadable JSON report: {report_path}") from exc
+    simulator = report.get("simulator_rollout")
+    per_command = simulator.get("commands") if isinstance(simulator, dict) else None
+    simulator_passed = (
+        isinstance(simulator, dict)
+        and simulator.get("status") == "PASS"
+        and isinstance(per_command, list)
+        and bool(per_command)
+        and all(isinstance(row, dict) and row.get("status") == "PASS" for row in per_command)
+    )
+    if report.get("overall_status") != "PASS" or not simulator_passed:
+        raise RuntimeError(
+            "Sensor V2 F0 report must attest structural, simulator, and per-command PASS: "
+            f"{report_path}"
+        )
+    print(f"[SENSOR_V2_PIPELINE] Completed f0: {report_path}", flush=True)
+    return report_path
+
+
 def _run_stage(
     args: argparse.Namespace,
     *,
@@ -91,9 +174,8 @@ def _run_stage(
     bootstrap_flag: str | None = None,
     bootstrap_checkpoint: Path | None = None,
 ) -> tuple[Path, Path]:
-    launcher = Path(os.environ.get("ISAACLAB_ROOT", "/home/lab_user1/isaac_lab_ws/IsaacLab")) / "isaaclab.sh"
     command = [
-        str(launcher),
+        str(args.isaaclab_launcher),
         "-p",
         "scripts/rsl_rl/train.py",
         "--task",
@@ -148,12 +230,20 @@ def _run_stage(
 
 def main() -> int:
     args = _arguments()
+    print(
+        "[SENSOR_V2_PIPELINE] DEBUG ONLY: F1/F2 acceptance screens are not run; "
+        "all outputs are non-promotable.",
+        flush=True,
+    )
     if args.num_envs < 1:
         raise ValueError("num_envs must be positive")
     for name in ("teacher_iterations", "distillation_iterations", "ppo_iterations"):
         if getattr(args, name) < 1:
             raise ValueError(f"{name} must be positive")
     pipeline_id = _safe_pipeline_id(args.pipeline_id)
+
+    f0_status = "passed"
+    f0_report = _run_f0(args, pipeline_id)
 
     teacher_dir, teacher_checkpoint = _run_stage(
         args,
@@ -180,6 +270,12 @@ def main() -> int:
     result = {
         "pipeline_id": pipeline_id,
         "status": "completed",
+        "debug_only": True,
+        "deployment_eligible": False,
+        "promotion_eligible": False,
+        "acceptance_screening": "not_run_debug_only",
+        "f0_status": f0_status,
+        "f0_report": str(f0_report) if f0_report is not None else None,
         "teacher_log_dir": str(teacher_dir),
         "teacher_checkpoint": str(teacher_checkpoint),
         "distillation_log_dir": str(distillation_dir),

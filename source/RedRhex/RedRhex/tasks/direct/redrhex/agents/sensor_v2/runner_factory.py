@@ -9,7 +9,12 @@ from typing import Any
 
 from packaging.version import Version
 
-from .runners import SensorDistillationRunnerV2, SensorOnPolicyRunnerV2, VersionedTeacherRunnerV2
+from .runners import (
+    SensorDistillationRunnerV2,
+    SensorOnPolicyRunnerV2,
+    SensorRobustnessRunnerV2,
+    VersionedTeacherRunnerV2,
+)
 
 
 RSL_RL_V2_MINIMUM = Version("3.1.2")
@@ -31,11 +36,13 @@ _CAPABILITIES = {
     "VersionedTeacherRunnerV2": RunnerCapabilitiesV2(True, True, False, True, False),
     "SensorDistillationRunnerV2": RunnerCapabilitiesV2(True, True, True, False, True),
     "SensorOnPolicyRunnerV2": RunnerCapabilitiesV2(True, True, True, True, False),
+    "SensorRobustnessRunnerV2": RunnerCapabilitiesV2(True, True, True, True, False),
 }
 _V2_CLASSES = {
     "VersionedTeacherRunnerV2": VersionedTeacherRunnerV2,
     "SensorDistillationRunnerV2": SensorDistillationRunnerV2,
     "SensorOnPolicyRunnerV2": SensorOnPolicyRunnerV2,
+    "SensorRobustnessRunnerV2": SensorRobustnessRunnerV2,
 }
 
 

@@ -6,7 +6,7 @@ audience: shared
 type: reference
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-16
 ---
 
 <a id="environment"></a>
@@ -16,7 +16,7 @@ last_reviewed: 2026-08-07
 export ISAACLAB_ROOT=/path/to/IsaacLab
 git lfs install
 git lfs pull
-"$ISAACLAB_ROOT/isaaclab.sh" -p -m pip install -e source/RedRhex
+"$ISAACLAB_ROOT/isaaclab.sh" -p scripts/install_redrhex.py
 "$ISAACLAB_ROOT/isaaclab.sh" -p scripts/list_envs.py
 ```
 

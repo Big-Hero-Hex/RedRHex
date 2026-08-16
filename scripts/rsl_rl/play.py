@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -36,6 +37,31 @@ parser.add_argument("--video_width", type=int, default=None, help="Width of reco
 parser.add_argument("--video_height", type=int, default=None, help="Height of recorded video frames.")
 parser.add_argument("--video_fps", type=int, default=None, help="FPS metadata for recorded videos.")
 parser.add_argument("--export_policy_only", action="store_true", default=False, help="Export policy files and exit.")
+parser.add_argument(
+    "--sensor-v2-parity-npz",
+    type=Path,
+    default=None,
+    help="Replay output NPZ containing recorded sensor_histories and command arrays.",
+)
+parser.add_argument(
+    "--sensor-v2-parity-npz-sha256",
+    default=None,
+    help="Required SHA-256 of --sensor-v2-parity-npz for Sensor V2 export.",
+)
+parser.add_argument(
+    "--sensor-v2-runtime-calibration",
+    type=Path,
+    default=None,
+    help=(
+        "Optional hardware-ready SensorCalibrationProfileV2 JSON used to "
+        "finalize a deployment bundle without rewriting the training checkpoint."
+    ),
+)
+parser.add_argument(
+    "--sensor-v2-runtime-calibration-sha256",
+    default=None,
+    help="Required exact SHA-256 of --sensor-v2-runtime-calibration.",
+)
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -122,6 +148,12 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if bool(args_cli.sensor_v2_runtime_calibration) != bool(
+    args_cli.sensor_v2_runtime_calibration_sha256
+):
+    parser.error(
+        "--sensor-v2-runtime-calibration and its SHA-256 must be supplied together"
+    )
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -217,6 +249,69 @@ def _load_runner_checkpoint_with_policy_fallback(runner, resume_path: str, devic
     )
 
 
+def _load_recorded_v2_parity_inputs(
+    path: Path | None, expected_sha256: str | None
+) -> tuple[object, object, str]:
+    """Load a bounded, hash-bound replay sample for the deployment export gate."""
+
+    if path is None or expected_sha256 is None:
+        raise ValueError(
+            "Sensor V2 export requires --sensor-v2-parity-npz and "
+            "--sensor-v2-parity-npz-sha256 from the replay gate"
+        )
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if digest != expected_sha256:
+        raise ValueError(
+            f"Sensor V2 parity NPZ SHA-256 mismatch: expected {expected_sha256}, got {digest}"
+        )
+    import numpy as np
+
+    with np.load(resolved, allow_pickle=False) as payload:
+        if "sensor_histories" not in payload.files or "command" not in payload.files:
+            raise ValueError(
+                "Sensor V2 parity NPZ requires sensor_histories and command arrays"
+            )
+        histories = np.asarray(payload["sensor_histories"], dtype=np.float32)
+        commands = np.asarray(payload["command"], dtype=np.float32)
+    if histories.ndim != 3 or histories.shape[1:] != (60, 36):
+        raise ValueError("recorded sensor_histories must have shape [N,60,36]")
+    if commands.shape != (histories.shape[0], 3) or histories.shape[0] == 0:
+        raise ValueError("recorded command must have matching non-empty shape [N,3]")
+    if not np.isfinite(histories).all() or not np.isfinite(commands).all():
+        raise ValueError("recorded Sensor V2 parity inputs contain NaN or Inf")
+    # Bound export latency without choosing only the beginning of a trace.
+    if histories.shape[0] > 64:
+        indices = np.linspace(0, histories.shape[0] - 1, 64, dtype=np.int64)
+        histories = histories[indices]
+        commands = commands[indices]
+    return histories, commands, digest
+
+
+def _load_runtime_calibration_v2(path: Path | None, expected_sha256: str | None):
+    """Load an optional measured calibration for post-training bundle finalization."""
+
+    if path is None and expected_sha256 is None:
+        return None
+    if path is None or expected_sha256 is None:
+        raise ValueError("runtime calibration path and SHA-256 must be supplied together")
+    resolved = path.expanduser().resolve()
+    digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if digest != expected_sha256.lower():
+        raise ValueError(
+            "Sensor V2 runtime calibration SHA-256 mismatch: "
+            f"expected {expected_sha256.lower()}, got {digest}"
+        )
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Sensor V2 runtime calibration JSON must be an object")
+    from redrhex_policy_io import SensorCalibrationProfileV2
+
+    calibration = SensorCalibrationProfileV2.from_dict(payload)
+    calibration.validate(require_hardware_ready=True)
+    return calibration
+
+
 def _apply_panel_terrain_override(env_cfg, override_file: str | None) -> None:
     if not override_file:
         return
@@ -255,6 +350,22 @@ def _configure_follow_camera(env_cfg) -> None:
         "[INFO] Robot-follow camera enabled: "
         f"asset=robot eye={viewer.eye} lookat={viewer.lookat}"
     )
+
+
+def _configure_video_resolution(env_cfg) -> None:
+    """Apply the requested capture size to Isaac Lab's RGB render product."""
+    if not args_cli.video:
+        return
+    viewer = getattr(env_cfg, "viewer", None)
+    if viewer is None:
+        raise ValueError("--video requires env_cfg.viewer to configure capture resolution")
+    current_width, current_height = viewer.resolution
+    width = args_cli.video_width if args_cli.video_width is not None else current_width
+    height = args_cli.video_height if args_cli.video_height is not None else current_height
+    if width <= 0 or height <= 0:
+        raise ValueError("video width and height must be positive")
+    viewer.resolution = (int(width), int(height))
+    print(f"[INFO] Video capture resolution: {viewer.resolution[0]}x{viewer.resolution[1]}")
 
 
 def _robot_root_position(env) -> torch.Tensor | None:
@@ -668,6 +779,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     _apply_panel_terrain_override(env_cfg, args_cli.terrain_override_file)
     _configure_follow_camera(env_cfg)
+    _configure_video_resolution(env_cfg)
 
     env_cfg.spring_backend = args_cli.spring_backend
     physics_profile = None
@@ -748,7 +860,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir=None,
         device=agent_cfg.device,
     )
-    if protocol.strict_checkpoint:
+    if protocol.v2:
+        runner.load_inference_v2(resume_path)
+    elif protocol.strict_checkpoint:
         runner.load(resume_path, load_optimizer=False)
     else:
         _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
@@ -777,11 +891,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 export_runner_policy_bundle_v2,
             )
 
+            parity_histories, parity_commands, parity_digest = (
+                _load_recorded_v2_parity_inputs(
+                    args_cli.sensor_v2_parity_npz,
+                    args_cli.sensor_v2_parity_npz_sha256,
+                )
+            )
             exported = export_runner_policy_bundle_v2(
                 runner,
                 policy_nn,
                 resume_path,
                 export_model_dir,
+                parity_sensor_histories=parity_histories,
+                parity_commands=parity_commands,
+                parity_input_sha256=parity_digest,
+                runtime_calibration=_load_runtime_calibration_v2(
+                    args_cli.sensor_v2_runtime_calibration,
+                    args_cli.sensor_v2_runtime_calibration_sha256,
+                ),
             )
             print(f"[INFO] Exported Sensor V2 ONNX bundle to: {exported}")
     else:

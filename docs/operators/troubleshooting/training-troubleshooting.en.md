@@ -6,13 +6,13 @@ audience: operator
 type: troubleshooting
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-16
 ---
 
 <a id="imports"></a>
 ## Import or task errors
 
-If `isaaclab`, `pxr`, or the RedRHex task cannot be imported, run through `isaaclab.sh -p`, reinstall `source/RedRhex` in that environment, and verify with `scripts/list_envs.py`. Do not mix a normal shell Python with the Isaac Lab interpreter.
+If `isaaclab`, `pxr`, `redrhex_policy_io`, or the RedRHex task cannot be imported, run `isaaclab.sh -p scripts/install_redrhex.py` and then verify with `scripts/list_envs.py`. The installer uses that same interpreter and installs the repository-local shared distribution before the extension. Do not mix a normal shell Python with the Isaac Lab interpreter.
 
 <a id="assets"></a>
 ## Missing or tiny USD assets

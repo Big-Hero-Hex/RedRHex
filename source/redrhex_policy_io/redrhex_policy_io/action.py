@@ -8,8 +8,8 @@ from typing import Sequence
 
 import numpy as np
 
+from ._action_core import decode_forward_residual_arrays_v2
 from .contracts import ContractError, ForwardResidualActionContractV2
-from .preprocessing import wrap_angle
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ class DecodedForwardActionV2:
     residual_main_velocity_rad_s: tuple[float, ...]
     target_main_velocity_rad_s: tuple[float, ...]
     target_abad_position_rad: tuple[float, ...]
+    action_warmup_scale: float
 
 
 def _six(value: Sequence[float], name: str) -> np.ndarray:
@@ -28,11 +29,13 @@ def _six(value: Sequence[float], name: str) -> np.ndarray:
     return result
 
 
-def _in_stance(phase: np.ndarray, contract: ForwardResidualActionContractV2) -> np.ndarray:
-    start = contract.STANCE_PHASE_START_RAD
-    end = contract.STANCE_PHASE_END_RAD
-    wrapped_start = start + 2.0 * math.pi if start < 0.0 else start
-    return np.logical_or(phase >= wrapped_start, phase < end)
+def _warmup_scale(control_step: int | None, contract: ForwardResidualActionContractV2) -> float:
+    if control_step is None or contract.action_warmup_steps == 0:
+        return 1.0
+    step = float(control_step)
+    if not math.isfinite(step) or step < 0.0 or not step.is_integer():
+        raise ContractError("control_step must be a non-negative integer")
+    return float(np.clip((step + 1.0) / contract.action_warmup_steps, 0.0, 1.0))
 
 
 def decode_forward_residual_action_v2(
@@ -41,6 +44,7 @@ def decode_forward_residual_action_v2(
     gait_phase_rad: float,
     main_position_rad: Sequence[float],
     *,
+    control_step: int | None = None,
     contract: ForwardResidualActionContractV2 | None = None,
 ) -> DecodedForwardActionV2:
     """Decode one strict-forward action in canonical joint order.
@@ -57,52 +61,34 @@ def decode_forward_residual_action_v2(
         raise ContractError("action must be finite with shape (12,)")
     if command_array.shape != (3,) or not np.isfinite(command_array).all():
         raise ContractError("command must be finite with shape (3,)")
-    if abs(command_array[1]) > 0.08 or abs(command_array[2]) > 0.10:
+    if (
+        abs(command_array[1]) > contract.MAX_ABS_LATERAL_COMMAND_M_S
+        or abs(command_array[2]) > contract.MAX_ABS_YAW_COMMAND_RAD_S
+    ):
         raise ContractError("V2 forward decoder rejects lateral and yaw commands")
     phase = float(gait_phase_rad)
     if not math.isfinite(phase):
         raise ContractError("gait_phase_rad must be finite")
     position = _six(main_position_rad, "main_position_rad")
 
-    safe_action = np.clip(values, -contract.action_clip, contract.action_clip)
-    safe_action[6:] = 0.0
+    warmup_scale = _warmup_scale(control_step, contract)
+    action_mask = np.asarray((1.0,) * 6 + (0.0,) * 6, dtype=np.float64)
     phase_offsets = np.zeros(6, dtype=np.float64)
     phase_offsets[list(contract.TRIPOD_B)] = contract.TRIPOD_PHASE_OFFSET_RAD
-    desired_phase = np.mod(phase + phase_offsets, 2.0 * math.pi)
-    base_angular_velocity = 2.0 * math.pi * contract.NOMINAL_GAIT_FREQUENCY_HZ
-    nominal_profile = np.where(
-        _in_stance(desired_phase, contract),
-        base_angular_velocity * contract.STANCE_VELOCITY_RATIO,
-        base_angular_velocity * contract.SWING_VELOCITY_RATIO,
-    )
-    phase_error = np.asarray(wrap_angle(position - desired_phase), dtype=np.float64)
-    phase_correction = np.clip(
-        -contract.phase_lock_gain * phase_error,
-        -contract.phase_correction_limit_rad_s,
-        contract.phase_correction_limit_rad_s,
-    )
-    vx_scale = np.clip(
-        command_array[0] / contract.forward_command_reference_m_s, -1.0, 1.0
-    )
-    active = float(command_array[0] > 0.10)
-    nominal = (
-        (nominal_profile + phase_correction)
-        * np.asarray(contract.LEG_DIRECTION_MULTIPLIER)
-        * vx_scale
-        * contract.forward_bias_scale
-        * active
-    )
-    residual = safe_action[:6] * contract.main_residual_scale_rad_s * active
-    residual_cap = np.maximum(np.abs(nominal) * contract.residual_cap_ratio, 0.08)
-    residual = np.clip(residual, -residual_cap, residual_cap)
-    target = np.clip(
-        nominal + residual,
-        -contract.main_velocity_limit_rad_s,
-        contract.main_velocity_limit_rad_s,
-    )
-    target *= np.asarray(contract.main_output_sign)
-    abad = np.asarray(contract.abad_neutral_position_rad) * np.asarray(
-        contract.abad_output_sign
+    safe_action, nominal, residual, target, abad = decode_forward_residual_arrays_v2(
+        values,
+        command_array,
+        np.asarray(phase, dtype=np.float64),
+        position,
+        np.asarray(warmup_scale, dtype=np.float64),
+        contract=contract,
+        namespace=np,
+        action_mask=action_mask,
+        phase_offsets=phase_offsets,
+        direction=np.asarray(contract.LEG_DIRECTION_MULTIPLIER, dtype=np.float64),
+        main_output_sign=np.asarray(contract.main_output_sign, dtype=np.float64),
+        abad_neutral=np.asarray(contract.abad_neutral_position_rad, dtype=np.float64),
+        abad_output_sign=np.asarray(contract.abad_output_sign, dtype=np.float64),
     )
     return DecodedForwardActionV2(
         safe_action=tuple(float(item) for item in safe_action),
@@ -110,4 +96,5 @@ def decode_forward_residual_action_v2(
         residual_main_velocity_rad_s=tuple(float(item) for item in residual),
         target_main_velocity_rad_s=tuple(float(item) for item in target),
         target_abad_position_rad=tuple(float(item) for item in abad),
+        action_warmup_scale=warmup_scale,
     )

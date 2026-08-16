@@ -42,6 +42,14 @@ _PROTOCOLS = {
         "student_distilled_v2",
         "student_v2",
     ),
+    "SensorRobustnessRunnerV2": RunnerProtocol(
+        "SensorRobustnessRunnerV2",
+        True,
+        True,
+        "student_ppo_v2",
+        "student_ppo_v2",
+        "student_v2",
+    ),
 }
 
 

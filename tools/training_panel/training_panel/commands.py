@@ -140,6 +140,21 @@ def _normalize_override_value(value: object) -> object:
     return value
 
 
+def _normalize_pipeline_seeds(value: object) -> list[int]:
+    if value in (None, ""):
+        return [42, 43, 44]
+    if isinstance(value, str):
+        raw_values = [item for item in re.split(r"[\s,]+", value.strip()) if item]
+    elif isinstance(value, (list, tuple)):
+        raw_values = list(value)
+    else:
+        raise ValueError("seeds must be a list or comma-separated string")
+    try:
+        return [int(item) for item in raw_values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError("seeds must contain integers") from exc
+
+
 @dataclass
 class TrainingParams:
     training_route: str = "standard"
@@ -179,6 +194,14 @@ class TrainingParams:
     teacher_iterations: int = 1500
     distillation_iterations: int = 800
     ppo_iterations: int = 1500
+    robust_iterations: int = 600
+    seeds: list[int] = field(default_factory=lambda: [42, 43, 44])
+    f0_evidence: str | None = None
+    f0_evidence_sha256: str | None = None
+    f4_profile: str | None = None
+    f4_profile_sha256: str | None = None
+    f5_profile: str | None = None
+    f5_profile_sha256: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> "TrainingParams":
@@ -186,6 +209,7 @@ class TrainingParams:
         raw_terrain_overrides = data.get("terrain_overrides") or {}
         raw_physics_overrides = data.get("physics_overrides") or {}
         training_route = str(data.get("training_route") or "standard")
+        pipeline_seeds = _normalize_pipeline_seeds(data.get("seeds"))
         task = SENSOR_V2_TASK if training_route.startswith("sensor_v2") else str(data.get("task") or DEFAULT_TRAINING_TASK)
         resume = bool(data.get("resume", False))
         initialization_mode = str(
@@ -205,7 +229,13 @@ class TrainingParams:
             headless=bool(data.get("headless", True)),
             # A blank seed used to mean "env default", which made runs
             # unreproducible. The panel now picks one and records it.
-            seed=int(data["seed"]) if data.get("seed") not in (None, "") else random.randint(0, 2 ** 31 - 1),
+            seed=(
+                int(data["seed"])
+                if data.get("seed") not in (None, "")
+                else pipeline_seeds[0]
+                if training_route == "sensor_v2_full"
+                else random.randint(0, 2 ** 31 - 1)
+            ),
             resume=resume or initialization_mode in {"policy_only", "full_resume"},
             checkpoint=str(data["checkpoint"]) if data.get("checkpoint") else None,
             checkpoint_sha256=(
@@ -257,12 +287,45 @@ class TrainingParams:
             teacher_iterations=int(data.get("teacher_iterations") or 1500),
             distillation_iterations=int(data.get("distillation_iterations") or 800),
             ppo_iterations=int(data.get("ppo_iterations") or 1500),
+            robust_iterations=int(data.get("robust_iterations") or 600),
+            seeds=pipeline_seeds,
+            f0_evidence=str(data["f0_evidence"]) if data.get("f0_evidence") else None,
+            f0_evidence_sha256=(
+                str(data["f0_evidence_sha256"]).lower()
+                if data.get("f0_evidence_sha256")
+                else None
+            ),
+            f4_profile=str(data["f4_profile"]) if data.get("f4_profile") else None,
+            f4_profile_sha256=(
+                str(data["f4_profile_sha256"]).lower()
+                if data.get("f4_profile_sha256")
+                else None
+            ),
+            f5_profile=str(data["f5_profile"]) if data.get("f5_profile") else None,
+            f5_profile_sha256=(
+                str(data["f5_profile_sha256"]).lower()
+                if data.get("f5_profile_sha256")
+                else None
+            ),
         )
         params.validate()
         return params
 
     def validate(self) -> None:
-        routes = {"standard", "sensor_v2_full", "sensor_v2_teacher", "sensor_v2_distillation", "sensor_v2_ppo"}
+        if self.training_route == "sensor_v2_f1_f3":
+            raise ValueError(
+                "sensor_v2_f1_f3 is retired because it silently skipped F1/F2 "
+                "acceptance screens; use sensor_v2_full, or explicitly select "
+                "sensor_v2_ungated_debug for non-promotable debugging"
+            )
+        routes = {
+            "standard",
+            "sensor_v2_full",
+            "sensor_v2_ungated_debug",
+            "sensor_v2_teacher",
+            "sensor_v2_distillation",
+            "sensor_v2_ppo",
+        }
         if self.training_route not in routes:
             raise ValueError(f"training_route must be one of {sorted(routes)}")
         if not self.task:
@@ -271,7 +334,12 @@ class TrainingParams:
             raise ValueError("num_envs must be between 1 and 8192")
         if self.max_iterations < 1 or self.max_iterations > 100000:
             raise ValueError("max_iterations must be between 1 and 100000")
-        for name in ("teacher_iterations", "distillation_iterations", "ppo_iterations"):
+        for name in (
+            "teacher_iterations",
+            "distillation_iterations",
+            "ppo_iterations",
+            "robust_iterations",
+        ):
             value = getattr(self, name)
             if value < 1 or value > 100000:
                 raise ValueError(f"{name} must be between 1 and 100000")
@@ -288,7 +356,14 @@ class TrainingParams:
             "stage1", "stage2", "stage3", "stage4", "stage5", "full"
         }:
             raise ValueError("evaluation_profile must be stage1 through stage5, or full")
-        for name in ("checkpoint_sha256", "reward_profile_sha256", "terrain_profile_sha256"):
+        for name in (
+            "checkpoint_sha256",
+            "reward_profile_sha256",
+            "terrain_profile_sha256",
+            "f0_evidence_sha256",
+            "f4_profile_sha256",
+            "f5_profile_sha256",
+        ):
             value = getattr(self, name)
             if value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is None:
                 raise ValueError(f"{name} must be a lowercase SHA-256 digest")
@@ -298,6 +373,26 @@ class TrainingParams:
             raise ValueError("the selected Sensor V2 stage requires a source checkpoint")
         if self.training_route == "sensor_v2_full" and self.checkpoint:
             raise ValueError("a new full Sensor V2 pipeline cannot also use a resume checkpoint")
+        if self.training_route == "sensor_v2_full":
+            required = {
+                "f0_evidence": self.f0_evidence,
+                "f0_evidence_sha256": self.f0_evidence_sha256,
+                "f4_profile": self.f4_profile,
+                "f4_profile_sha256": self.f4_profile_sha256,
+                "f5_profile": self.f5_profile,
+                "f5_profile_sha256": self.f5_profile_sha256,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(
+                    "sensor_v2_full requires evidence/profile fields: " + ", ".join(missing)
+                )
+            if len(self.seeds) < 3 or len(set(self.seeds)) != len(self.seeds):
+                raise ValueError("sensor_v2_full requires at least three unique seeds")
+            if any(seed < 0 or seed >= 2 ** 31 for seed in self.seeds):
+                raise ValueError("sensor_v2_full seeds must be between 0 and 2147483647")
+        if self.training_route == "sensor_v2_ungated_debug" and self.checkpoint:
+            raise ValueError("a new debug F1-F3 Sensor V2 pipeline cannot also use a resume checkpoint")
         if self.display_name and len(self.display_name) > 120:
             raise ValueError("display_name must be 120 characters or fewer")
         if self.folder and len(self.folder) > 120:
@@ -447,6 +542,7 @@ def evaluation_argv(params: EvaluationParams, *, csv_file: str) -> list[str]:
 def training_argv(
     params: TrainingParams,
     *,
+    isaaclab_launcher: str | None = None,
     physics_profile_file: str | None = None,
     reward_profile_file: str | None = None,
     reward_profile_sha256: str | None = None,
@@ -455,8 +551,47 @@ def training_argv(
 ) -> list[str]:
     validate_panel_training_spring_backend(params.spring_backend)
     if params.training_route == "sensor_v2_full":
+        if not isaaclab_launcher:
+            raise ValueError("sensor_v2_full requires the configured Isaac Lab launcher")
+        argv = [
+            "scripts/rsl_rl/train_sensor_v2_full_pipeline.py",
+            "--isaaclab-launcher",
+            isaaclab_launcher,
+            "--f0-evidence",
+            params.f0_evidence or "",
+            "--f0-evidence-sha256",
+            params.f0_evidence_sha256 or "",
+            "--f4-profile",
+            params.f4_profile or "",
+            "--f4-profile-sha256",
+            params.f4_profile_sha256 or "",
+            "--f5-profile",
+            params.f5_profile or "",
+            "--f5-profile-sha256",
+            params.f5_profile_sha256 or "",
+            "--seeds",
+            *(str(seed) for seed in params.seeds),
+            "--num_envs",
+            str(params.num_envs),
+            "--teacher_iterations",
+            str(params.teacher_iterations),
+            "--distillation_iterations",
+            str(params.distillation_iterations),
+            "--ppo_iterations",
+            str(params.ppo_iterations),
+            "--robust_iterations",
+            str(params.robust_iterations),
+            "--device",
+            params.device,
+        ]
+        if not params.headless:
+            argv.append("--no-headless")
+        return argv
+
+    if params.training_route == "sensor_v2_ungated_debug":
         argv = [
             "scripts/rsl_rl/train_sensor_v2_pipeline.py",
+            "--acknowledge-ungated-debug",
             "--num_envs",
             str(params.num_envs),
             "--teacher_iterations",
@@ -541,7 +676,8 @@ def training_argv(
 
 def agent_for_training_route(route: str | None) -> str | None:
     return {
-        "sensor_v2_full": "rsl_rl_ppo_v2_cfg_entry_point",
+        "sensor_v2_full": "rsl_rl_robust_ppo_v2_cfg_entry_point",
+        "sensor_v2_ungated_debug": "rsl_rl_ppo_v2_cfg_entry_point",
         "sensor_v2_teacher": "rsl_rl_teacher_v2_cfg_entry_point",
         "sensor_v2_distillation": "rsl_rl_distillation_v2_cfg_entry_point",
         "sensor_v2_ppo": "rsl_rl_ppo_v2_cfg_entry_point",
@@ -570,6 +706,7 @@ def play_argv(
     camera_lookat: tuple[float, float, float] | None = None,
     export_policy_only: bool = False,
     agent: str | None = None,
+    seed: int | None = None,
 ) -> list[str]:
     validate_spring_backend(spring_backend)
     argv = [
@@ -585,6 +722,8 @@ def play_argv(
     ]
     if agent:
         argv.extend(["--agent", agent])
+    if seed is not None:
+        argv.extend(["--seed", str(seed)])
     if headless:
         argv.append("--headless")
     if video:

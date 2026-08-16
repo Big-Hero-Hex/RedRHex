@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from tools.sim2real.student_teacher_gap import (  # noqa: E402
     evaluate_student_teacher_gap,
     write_gap_report,
+    write_gap_tensorboard,
 )
 
 
@@ -26,10 +27,28 @@ def main() -> int:
     parser.add_argument("manifest", type=Path, help="Evaluation run manifest JSON.")
     parser.add_argument("--json", type=Path, required=True, help="Output report JSON.")
     parser.add_argument("--csv", type=Path, required=True, help="Output aggregate CSV.")
+    parser.add_argument(
+        "--tensorboard-logdir",
+        type=Path,
+        help="Optional directory for aggregate, teacher-gap, and available Student scalar events.",
+    )
+    parser.add_argument(
+        "--tensorboard-step",
+        type=int,
+        default=0,
+        help="TensorBoard global step (default: 0).",
+    )
     args = parser.parse_args()
 
     result = evaluate_student_teacher_gap(args.manifest)
     write_gap_report(result, args.json, args.csv)
+    if args.tensorboard_logdir is not None:
+        event_path = write_gap_tensorboard(
+            result,
+            args.tensorboard_logdir,
+            step=args.tensorboard_step,
+        )
+        print(f"TensorBoard event: {event_path}")
     print(json.dumps(result["promotion"], indent=2, sort_keys=True))
     return 0 if result["promotion"]["pass"] else 2
 

@@ -588,7 +588,9 @@ def test_training_route_only_shows_relevant_controls(panel, page):
     expect(physics_preset).to_be_visible()
 
     route.select_option("sensor_v2_full")
-    expect(page.locator("#training-route-summary-title")).to_have_text("Full Sensor V2 Pipeline")
+    expect(page.locator("#training-route-summary-title")).to_have_text(
+        "Evidence-Gated Sensor V2 Pipeline"
+    )
     expect(task).to_be_hidden()
     expect(single_iterations).to_be_hidden()
     for field in pipeline_iterations.all():
@@ -601,11 +603,15 @@ def test_training_route_only_shows_relevant_controls(panel, page):
     expect(page.locator('input[name="teacher_iterations"]')).to_have_value("1")
     expect(page.locator('input[name="distillation_iterations"]')).to_have_value("1")
     expect(page.locator('input[name="ppo_iterations"]')).to_have_value("1")
+    expect(page.locator('input[name="robust_iterations"]')).to_be_visible()
+    expect(page.locator('input[name="f0_evidence"]')).to_be_visible()
     full_payload = page.evaluate("formData(document.querySelector('#train-form'))")
     assert "max_iterations" not in full_payload
     assert full_payload["teacher_iterations"] == 1
     assert full_payload["distillation_iterations"] == 1
     assert full_payload["ppo_iterations"] == 1
+    assert full_payload["robust_iterations"] == 1
+    assert full_payload["seeds"] == [42, 43, 44]
     assert "task" not in full_payload
     assert "reward_preset_id" not in full_payload
     assert "reward_overrides" not in full_payload

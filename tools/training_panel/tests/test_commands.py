@@ -112,6 +112,7 @@ class CommandTests(unittest.TestCase):
             video_fps=params.fps,
             rendering_mode=params.rendering_mode,
             initial_command="forward",
+            seed=43,
         )
         self.assertIn("scripts/rsl_rl/play.py", argv)
         self.assertIn("--headless", argv)
@@ -123,6 +124,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--video_fps") + 1], "30")
         self.assertEqual(argv[argv.index("--rendering_mode") + 1], "quality")
         self.assertEqual(argv[argv.index("--initial_command") + 1], "forward")
+        self.assertEqual(argv[argv.index("--seed") + 1], "43")
         self.assertEqual(argv[argv.index("--checkpoint") + 1], "/tmp/model_10.pt")
 
     def test_play_argv_supports_terrain_replay_and_follow_camera(self):
@@ -299,12 +301,21 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--physics-profile") + 1], profile_path)
 
     def test_sensor_v2_pipeline_forwards_physics_profile(self):
-        params = TrainingParams.from_dict({"training_route": "sensor_v2_full", "device": "cpu"})
+        params = TrainingParams.from_dict(
+            {"training_route": "sensor_v2_ungated_debug", "device": "cpu"}
+        )
         argv = training_argv(params, physics_profile_file="/tmp/panel_physics.json")
 
         self.assertIn("scripts/rsl_rl/train_sensor_v2_pipeline.py", argv)
+        self.assertIn("--acknowledge-ungated-debug", argv)
         self.assertEqual(argv[argv.index("--spring-backend") + 1], "native")
         self.assertEqual(argv[argv.index("--physics-profile") + 1], "/tmp/panel_physics.json")
+
+    def test_legacy_ungated_pipeline_route_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "retired.*skipped F1/F2"):
+            TrainingParams.from_dict(
+                {"training_route": "sensor_v2_f1_f3", "device": "cpu"}
+            )
 
     def test_training_params_accept_terrain_overrides(self):
         params = TrainingParams.from_dict(
@@ -421,6 +432,7 @@ class CommandTests(unittest.TestCase):
             )
 
     def test_sensor_v2_full_route_builds_sequential_pipeline_command(self):
+        digest = "a" * 64
         params = TrainingParams.from_dict(
             {
                 "training_route": "sensor_v2_full",
@@ -428,17 +440,41 @@ class CommandTests(unittest.TestCase):
                 "teacher_iterations": 1500,
                 "distillation_iterations": 800,
                 "ppo_iterations": 1500,
+                "robust_iterations": 600,
+                "seeds": [42, 43, 44],
+                "f0_evidence": "/tmp/f0.json",
+                "f0_evidence_sha256": digest,
+                "f4_profile": "/tmp/f4.json",
+                "f4_profile_sha256": digest,
+                "f5_profile": "/tmp/f5.json",
+                "f5_profile_sha256": digest,
                 "device": "cuda:0",
                 "headless": True,
             }
         )
-        argv = training_argv(params)
+        argv = training_argv(params, isaaclab_launcher="/IsaacLab/isaaclab.sh")
         self.assertEqual(params.task, "Template-Redrhex-ForwardSensorV2-Direct-v0")
-        self.assertEqual(argv[0], "scripts/rsl_rl/train_sensor_v2_pipeline.py")
+        self.assertEqual(params.seed, 42)
+        self.assertEqual(argv[0], "scripts/rsl_rl/train_sensor_v2_full_pipeline.py")
+        self.assertEqual(
+            argv[argv.index("--isaaclab-launcher") + 1], "/IsaacLab/isaaclab.sh"
+        )
+        self.assertEqual(argv[argv.index("--f0-evidence") + 1], "/tmp/f0.json")
+        self.assertEqual(argv[argv.index("--f4-profile") + 1], "/tmp/f4.json")
+        self.assertEqual(argv[argv.index("--f5-profile") + 1], "/tmp/f5.json")
         self.assertEqual(argv[argv.index("--teacher_iterations") + 1], "1500")
         self.assertEqual(argv[argv.index("--distillation_iterations") + 1], "800")
         self.assertEqual(argv[argv.index("--ppo_iterations") + 1], "1500")
+        self.assertEqual(argv[argv.index("--robust_iterations") + 1], "600")
+        seeds_at = argv.index("--seeds")
+        self.assertEqual(argv[seeds_at + 1 : seeds_at + 4], ["42", "43", "44"])
+        self.assertNotIn("--spring-backend", argv)
+        self.assertNotIn("--headless", argv)
         self.assertNotIn("--panel_overrides", argv)
+
+    def test_sensor_v2_full_route_fails_closed_without_bound_artifacts(self):
+        with self.assertRaisesRegex(ValueError, "requires evidence/profile fields"):
+            TrainingParams.from_dict({"training_route": "sensor_v2_full"})
 
     def test_sensor_v2_stage_commands_use_explicit_legal_bootstrap_flags(self):
         teacher = TrainingParams.from_dict(

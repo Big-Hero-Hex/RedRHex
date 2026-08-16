@@ -75,3 +75,11 @@ class SensorOnPolicyRunnerV2(_CapabilityCheckedRunnerV2):
             "distilled_actor_exact_bootstrap_v2",
         }
     )
+
+
+class SensorRobustnessRunnerV2(_CapabilityCheckedRunnerV2):
+    """F4 PPO continuation with an explicit PPO-to-PPO bootstrap boundary."""
+
+    required_capabilities = SensorOnPolicyRunnerV2.required_capabilities | frozenset(
+        {"robustness_bootstrap_v2"}
+    )

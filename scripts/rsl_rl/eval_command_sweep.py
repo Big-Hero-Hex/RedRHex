@@ -18,6 +18,13 @@ from typing import Iterable, Sequence
 _REDRHEX_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REDRHEX_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REDRHEX_REPO_ROOT))
+from tools.sim2real.repo_binding import (  # noqa: E402
+    assert_redrhex_module_source,
+    bind_redrhex_source,
+)
+
+
+bind_redrhex_source(_REDRHEX_REPO_ROOT)
 
 from tools.training_panel.training_panel.autopilot_identity import (  # noqa: E402
     build_dependency_manifest,
@@ -39,7 +46,7 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--spring-backend",
     choices=("explicit", "native"),
-    default="explicit",
+    default="native",
     help="Passive torsion-spring implementation used by the environment.",
 )
 parser.add_argument(
@@ -47,6 +54,18 @@ parser.add_argument(
     type=str,
     default=None,
     help="Explicit CalibrationProfileV1 JSON applied during command-sweep evaluation.",
+)
+parser.add_argument(
+    "--sensor-dr-profile",
+    type=str,
+    default=None,
+    help="Sensor V2 only: evidence-bound held_out_evaluation profile JSON.",
+)
+parser.add_argument(
+    "--sensor-dr-profile-sha256",
+    type=str,
+    default=None,
+    help="Required exact SHA-256 for --sensor-dr-profile.",
 )
 parser.add_argument(
     "--agent", type=str, default="rsl_rl_cfg_entry_point", help="Name of the RL agent configuration entry point."
@@ -115,8 +134,19 @@ parser.add_argument(
     choices=["stage1", "stage2", "stage3", "stage4", "stage5", "full"],
     help="Command-sweep profile that matches the 5-stage curriculum.",
 )
+parser.add_argument(
+    "--evaluation-domain",
+    default="nominal",
+    help="Stable domain identity recorded in the summary; labels cannot be added later.",
+)
 parser.add_argument("--command_scale", type=float, default=1.0, help="Scale factor applied to all sweep commands.")
 parser.add_argument("--accept_duration_s", type=float, default=2.0, help="Minimum success duration for lateral/yaw tests.")
+parser.add_argument(
+    "--accept-contiguous-env-ratio",
+    type=float,
+    default=0.50,
+    help="Minimum fraction of environments with one contiguous success window.",
+)
 parser.add_argument("--accept_vx_abs", type=float, default=0.15, help="Forward speed threshold for acceptance.")
 parser.add_argument("--accept_vy_abs", type=float, default=0.15, help="Lateral speed threshold for acceptance.")
 parser.add_argument("--accept_wz_abs", type=float, default=0.40, help="Yaw rate threshold for acceptance.")
@@ -126,6 +156,18 @@ parser.add_argument("--accept_yaw_tilt_bound", type=float, default=0.60, help="M
 parser.add_argument("--accept_yaw_tilt_ratio", type=float, default=0.70, help="Required fraction of yaw samples within tilt bound.")
 parser.add_argument("--accept_forward_lateral_leak", type=float, default=0.12, help="Max |vy| allowed in forward acceptance.")
 parser.add_argument("--accept_forward_yaw_leak", type=float, default=0.30, help="Max |wz| allowed in forward acceptance.")
+parser.add_argument(
+    "--accept-forward-tilt-bound",
+    type=float,
+    default=0.70,
+    help="Maximum reference-relative body tilt during forward acceptance.",
+)
+parser.add_argument(
+    "--accept-forward-min-base-height",
+    type=float,
+    default=0.085,
+    help="Minimum evaluation-only base height during forward acceptance.",
+)
 parser.add_argument("--accept_lateral_forward_leak", type=float, default=0.12, help="Max |vx| allowed in lateral acceptance.")
 parser.add_argument("--accept_lateral_yaw_leak", type=float, default=0.30, help="Max |wz| allowed in lateral acceptance.")
 parser.add_argument("--accept_diag_sign_ratio", type=float, default=0.70, help="Required sign-match ratio for diagonal commands.")
@@ -139,6 +181,15 @@ parser.add_argument("--accept_diag_yaw_leak", type=float, default=0.35, help="Ma
 parser.add_argument("--accept_yaw_lin_leak", type=float, default=0.18, help="Max linear speed allowed in yaw acceptance.")
 parser.add_argument("--accept_min_base_height", type=float, default=0.12, help="Min base height during yaw acceptance.")
 parser.add_argument("--accept_max_fall_rate", type=float, default=0.20, help="Max fall-rate allowed per command.")
+parser.add_argument(
+    "--accept-max-main-action-saturation-ratio",
+    type=float,
+    default=0.05,
+    help=(
+        "Maximum fraction of clipped main-action samples for Sensor V2; "
+        "0.05 is the conservative interim no-anomaly gate."
+    ),
+)
 parser.add_argument("--accept_skill_pass_ratio", type=float, default=0.60, help="Skill-level pass ratio threshold.")
 parser.add_argument("--accept_overall_pass_ratio", type=float, default=0.70, help="Overall command pass-ratio threshold.")
 parser.add_argument(
@@ -150,6 +201,24 @@ parser.add_argument(
 cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+if not 0.0 <= args_cli.accept_contiguous_env_ratio <= 1.0:
+    parser.error("--accept-contiguous-env-ratio must be in [0, 1]")
+if args_cli.accept_forward_tilt_bound <= 0.0:
+    parser.error("--accept-forward-tilt-bound must be positive")
+if args_cli.accept_forward_min_base_height <= 0.0:
+    parser.error("--accept-forward-min-base-height must be positive")
+if not 0.0 <= args_cli.accept_max_main_action_saturation_ratio <= 1.0:
+    parser.error("--accept-max-main-action-saturation-ratio must be in [0, 1]")
+if bool(args_cli.sensor_dr_profile) != bool(args_cli.sensor_dr_profile_sha256):
+    parser.error(
+        "--sensor-dr-profile and --sensor-dr-profile-sha256 must be supplied together"
+    )
+if args_cli.sensor_dr_profile and (
+    not args_cli.task
+    or args_cli.task.split(":")[-1] != "Template-Redrhex-ForwardSensorV2-Direct-v0"
+):
+    parser.error("--sensor-dr-profile is valid only for the ForwardSensorV2 task")
 
 if args_cli.strict_checkpoint_loading:
     if not args_cli.checkpoint or not args_cli.checkpoint_sha256:
@@ -216,7 +285,8 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-import RedRhex.tasks  # noqa: F401
+import RedRhex.tasks as _redrhex_tasks  # noqa: F401
+assert_redrhex_module_source(_redrhex_tasks, _REDRHEX_REPO_ROOT)
 from scripts.rsl_rl.runner_factory import create_runner, get_exportable_actor, runner_protocol
 
 
@@ -358,6 +428,54 @@ def _infer_stage_from_checkpoint_path(path: str) -> int | None:
 
 def circular_distance(a: torch.Tensor, b: float | torch.Tensor) -> torch.Tensor:
     return torch.abs(torch.atan2(torch.sin(a - b), torch.cos(a - b)))
+
+
+def reference_relative_gravity(
+    projected_gravity: torch.Tensor, reference_gravity: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return gravity aligned to the conventional -Z rest frame and tilt.
+
+    The USD root can rest at a non-identity orientation.  Computing roll and
+    pitch directly from its raw projected gravity introduces a constant 90 deg
+    error, so evaluation first applies the minimal rotation from the recorded
+    environment rest vector to ``[0, 0, -1]``.
+    """
+
+    gravity = projected_gravity / torch.linalg.vector_norm(
+        projected_gravity, dim=-1, keepdim=True
+    ).clamp_min(1.0e-9)
+    reference = reference_gravity / torch.linalg.vector_norm(
+        reference_gravity, dim=-1, keepdim=True
+    ).clamp_min(1.0e-9)
+    if reference.shape == (3,):
+        reference = reference.unsqueeze(0).expand_as(gravity)
+    if reference.shape != gravity.shape:
+        raise ValueError("reference projected gravity shape does not match evaluation batch")
+    target = torch.zeros_like(reference)
+    target[:, 2] = -1.0
+    cross = torch.linalg.cross(reference, target, dim=-1)
+    dot = torch.sum(reference * target, dim=-1, keepdim=True).clamp(-1.0, 1.0)
+    denominator = (1.0 + dot).clamp_min(1.0e-8)
+    aligned = (
+        gravity
+        + torch.linalg.cross(cross, gravity, dim=-1)
+        + torch.linalg.cross(cross, torch.linalg.cross(cross, gravity, dim=-1), dim=-1)
+        / denominator
+    )
+    # The only singular case is a 180-degree rest transform. Rotate around X;
+    # the choice is deterministic and preserves the forward axis.
+    opposite = dot.squeeze(-1) < -1.0 + 1.0e-6
+    if bool(opposite.any()):
+        aligned[opposite] = torch.stack(
+            (
+                gravity[opposite, 0],
+                -gravity[opposite, 1],
+                -gravity[opposite, 2],
+            ),
+            dim=-1,
+        )
+    tilt = torch.acos(torch.sum(gravity * reference, dim=-1).clamp(-1.0, 1.0))
+    return aligned, tilt
 
 
 def in_stance_phase(unwrapped_env, phase: torch.Tensor) -> torch.Tensor:
@@ -851,6 +969,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"({spring_profile_sha256})"
         )
 
+    sensor_dr_profile = None
+    sensor_dr_profile_sha256 = None
+    if args_cli.sensor_dr_profile is not None:
+        from tools.sim2real.sensor_dr_profile_v2 import (
+            PHYSICAL_PROFILE_PARAMETERS_V2,
+            apply_sensor_dr_profile_v2,
+            load_sensor_dr_profile_v2,
+        )
+
+        sensor_dr_profile, sensor_dr_profile_sha256 = load_sensor_dr_profile_v2(
+            args_cli.sensor_dr_profile,
+            expected_sha256=args_cli.sensor_dr_profile_sha256,
+            expected_purpose="held_out_evaluation",
+        )
+        physical_overlap = set(sensor_dr_profile.parameters) & PHYSICAL_PROFILE_PARAMETERS_V2
+        if physics_profile is not None and physical_overlap:
+            raise ValueError(
+                "physics and Sensor V2 profiles both define actuator/timing fields: "
+                f"{sorted(physical_overlap)}"
+            )
+        apply_sensor_dr_profile_v2(
+            env_cfg, sensor_dr_profile, sensor_dr_profile_sha256
+        )
+        print(
+            f"[INFO] Sensor V2 held-out DR profile applied: {sensor_dr_profile.profile_id} "
+            f"({sensor_dr_profile_sha256})"
+        )
+
     from tools.sim2real.checkpoint_spring import validate_checkpoint_spring_evaluation
 
     checkpoint_spring_calibration_status = validate_checkpoint_spring_evaluation(
@@ -893,7 +1039,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
 
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    if protocol.strict_checkpoint:
+    if protocol.v2:
+        # Evaluation validates immutable kind/contract/architecture identity,
+        # but training-only run names and iteration counts are not part of an
+        # inference contract.
+        runner.load_inference_v2(resume_path)
+    elif protocol.strict_checkpoint:
         runner.load(resume_path, load_optimizer=False)
     elif args_cli.strict_checkpoint_loading:
         try:
@@ -902,6 +1053,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             runner.load(resume_path)
     else:
         _load_runner_checkpoint_with_policy_fallback(runner, resume_path, env.unwrapped.device)
+    checkpoint_manifest = getattr(runner, "checkpoint_manifest", None)
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     policy_nn = get_exportable_actor(runner, protocol)
@@ -909,6 +1061,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     unwrapped_env = env.unwrapped
     if hasattr(unwrapped_env, "external_control"):
         unwrapped_env.external_control = True
+    if protocol.v2:
+        # ``external_control`` is needed only to inject the fixed command set.
+        # The legacy playback compatibility decoder changes residual scale and
+        # therefore must never replace the decoder used to train/export V2.
+        unwrapped_env.cfg.play_forward_compat_enable = False
 
     command_set = (
         command_set_from_profile(
@@ -947,6 +1104,44 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"runtime={step_dt!r}, expected={args_cli.expected_step_dt!r}"
         )
     eval_duration_s = float(args_cli.sweep_steps) * step_dt
+    forward_contiguous_semantics = (
+        "one_command_scaled_gait_cycle_velocity_means_with_"
+        "pointwise_tilt_height_and_episode_boundary_safety"
+        if hasattr(unwrapped_env, "_action_contract_v2")
+        else "instantaneous_samples"
+    )
+    evaluation_protocol_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "task": args_cli.task,
+                "eval_profile": args_cli.eval_profile,
+                "evaluation_domain": args_cli.evaluation_domain,
+                "commands": [
+                    {
+                        "name": name,
+                        "command": [float(value) for value in cmd],
+                        "skill": skill,
+                    }
+                    for name, cmd, skill in command_set
+                ],
+                "warmup_steps": int(args_cli.warmup_steps),
+                "sweep_steps": int(args_cli.sweep_steps),
+                "step_dt": step_dt,
+                "acceptance": {
+                    name: value
+                    for name, value in vars(args_cli).items()
+                    if name.startswith("accept_")
+                },
+                "forward_contiguous_semantics": forward_contiguous_semantics,
+                "command_profile_sha256": args_cli.command_profile_sha256,
+                "sensor_dr_profile_sha256": sensor_dr_profile_sha256,
+                "physics_profile_sha256": spring_profile_sha256,
+                "spring_backend": args_cli.spring_backend,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
     # Global acceptance accumulators
     sample_count = 0
@@ -968,6 +1163,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     transition_contact_ge4 = 0
 
     action_rate_sum = 0.0
+    main_action_saturation_count = 0
+    main_action_sample_count = 0
+    abad_action_saturation_count = 0
+    abad_action_sample_count = 0
+    abad_action_abs_sum = 0.0
     effort_proxy_sum = 0.0
     energy_count = 0
     effort_proxy_name = "mean(|target_vel * omega|)"
@@ -1021,6 +1221,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         cmd_yaw_leak_sum = 0.0
         cmd_samples = 0
         cmd_success_steps = 0
+        cmd_current_contiguous_success = torch.zeros(
+            num_envs, dtype=torch.long, device=device
+        )
+        cmd_max_contiguous_success = torch.zeros(
+            num_envs, dtype=torch.long, device=device
+        )
+        forward_cycle_window_steps = 1
+        forward_cycle_window_index = 0
+        forward_cycle_velocity_averaging = False
+        forward_rolling_speed = None
+        forward_rolling_lateral = None
+        forward_rolling_yaw = None
+        forward_rolling_speed_sum = None
+        forward_rolling_lateral_sum = None
+        forward_rolling_yaw_sum = None
+        forward_rolling_valid_steps = None
+        if skill == "forward" and hasattr(
+            unwrapped_env, "_action_contract_v2"
+        ):
+            action_contract = unwrapped_env._action_contract_v2
+            forward_cycle_window_steps = int(
+                action_contract.command_scaled_cycle_steps(abs(float(cmd[0])))
+            )
+            forward_cycle_velocity_averaging = True
+            forward_rolling_speed = torch.zeros(
+                forward_cycle_window_steps, num_envs, device=device
+            )
+            forward_rolling_lateral = torch.zeros_like(forward_rolling_speed)
+            forward_rolling_yaw = torch.zeros_like(forward_rolling_speed)
+            forward_rolling_speed_sum = torch.zeros(num_envs, device=device)
+            forward_rolling_lateral_sum = torch.zeros_like(
+                forward_rolling_speed_sum
+            )
+            forward_rolling_yaw_sum = torch.zeros_like(forward_rolling_speed_sum)
+            forward_rolling_valid_steps = torch.zeros(
+                num_envs, dtype=torch.long, device=device
+            )
         cmd_success_vy_steps = 0
         cmd_success_wz_steps = 0
         cmd_diag_sign_match = 0
@@ -1066,6 +1303,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         "complete": bool(complete),
                         "sample_count": steps,
                         "fall_count": int(episode_falls[env_index].item()),
+                        "success_count": int(episode_success[env_index].item()),
                         "mae_vx": float(episode_err_vx[env_index].item()) / steps,
                         "mae_vy": float(episode_err_vy[env_index].item()) / steps,
                         "mae_wz": float(episode_err_wz[env_index].item()) / steps,
@@ -1090,19 +1328,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 accumulator[indices] = 0
 
         last_actions = None
+        last_action_ready = torch.zeros(num_envs, dtype=torch.bool, device=device)
 
         for step in range(total_steps):
             if hasattr(unwrapped_env, "commands"):
                 unwrapped_env.commands[:] = cmd_tensor
 
+            if "history_ready_v2" in obs:
+                history_ready = obs["history_ready_v2"].reshape(-1) > 0.5
+                if history_ready.shape != (num_envs,):
+                    raise RuntimeError(
+                        "history_ready_v2 must contain one readiness value per environment"
+                    )
+            else:
+                history_ready = torch.ones(
+                    num_envs, dtype=torch.bool, device=device
+                )
+
             # Use no_grad instead of inference_mode: inference tensors can break subsequent env.reset() writes.
             with torch.no_grad():
                 actions = policy(obs)
+                # The environment owns the same fail-closed gate.  Mirroring it
+                # here keeps exported action metrics from attributing arbitrary
+                # partial-history actor outputs to the deployed policy.
+                actions = torch.where(
+                    history_ready.unsqueeze(-1), actions, torch.zeros_like(actions)
+                )
                 obs, _, dones, _ = env.step(actions)
                 policy_nn.reset(dones)
 
             if step < args_cli.warmup_steps:
                 last_actions = actions.clone()
+                last_action_ready = history_ready.clone()
+                continue
+
+            valid = history_ready
+            valid_count = int(torch.count_nonzero(valid).item())
+            if valid_count == 0:
+                last_actions = actions.clone()
+                last_action_ready = valid.clone()
                 continue
 
             actual_vx = unwrapped_env.base_lin_vel[:, 0]
@@ -1114,47 +1378,82 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             dvy = torch.abs(actual_vy - cmd[1])
             dwz = torch.abs(actual_wz - cmd[2])
 
-            cmd_err_vx += dvx.sum().item()
-            cmd_err_vy += dvy.sum().item()
-            cmd_err_wz += dwz.sum().item()
+            clipped_actions = torch.clamp(actions, -1.0, 1.0)
+            main_actions = clipped_actions[:, :6]
+            abad_actions = clipped_actions[:, 6:12]
+            main_action_saturation_count += int(
+                torch.count_nonzero(torch.abs(main_actions[valid]) >= 0.999).item()
+            )
+            main_action_sample_count += int(main_actions[valid].numel())
+            abad_action_saturation_count += int(
+                torch.count_nonzero(torch.abs(abad_actions[valid]) >= 0.999).item()
+            )
+            abad_action_sample_count += int(abad_actions[valid].numel())
+            abad_action_abs_sum += float(torch.sum(torch.abs(abad_actions[valid])).item())
+
+            # Keep command and per-episode evidence on the same float64
+            # reduction path so the independently reconciled CSVs do not
+            # disagree solely because of float32 reduction order.
+            cmd_err_vx += dvx[valid].to(dtype=torch.float64).sum().item()
+            cmd_err_vy += dvy[valid].to(dtype=torch.float64).sum().item()
+            cmd_err_wz += dwz[valid].to(dtype=torch.float64).sum().item()
             if skill == "forward":
                 forward_sign = 1.0 if float(cmd[0]) > 0.0 else -1.0
-                cmd_forward_speed_sum += (actual_vx * forward_sign).sum().item()
-                cmd_lateral_leak_sum += torch.abs(actual_vy).sum().item()
-                cmd_yaw_leak_sum += torch.abs(actual_wz).sum().item()
-            cmd_samples += num_envs
-            episode_steps += 1
-            episode_err_vx += dvx.to(dtype=torch.float64)
-            episode_err_vy += dvy.to(dtype=torch.float64)
-            episode_err_wz += dwz.to(dtype=torch.float64)
+                cmd_forward_speed_sum += (actual_vx[valid] * forward_sign).sum().item()
+                cmd_lateral_leak_sum += torch.abs(actual_vy[valid]).sum().item()
+                cmd_yaw_leak_sum += torch.abs(actual_wz[valid]).sum().item()
+            cmd_samples += valid_count
+            episode_steps += valid.to(dtype=torch.long)
+            episode_err_vx += (dvx * valid).to(dtype=torch.float64)
+            episode_err_vy += (dvy * valid).to(dtype=torch.float64)
+            episode_err_wz += (dwz * valid).to(dtype=torch.float64)
 
-            err_vx_sum += dvx.sum().item()
-            err_vy_sum += dvy.sum().item()
-            err_wz_sum += dwz.sum().item()
-            sample_count += num_envs
+            err_vx_sum += dvx[valid].to(dtype=torch.float64).sum().item()
+            err_vy_sum += dvy[valid].to(dtype=torch.float64).sum().item()
+            err_wz_sum += dwz[valid].to(dtype=torch.float64).sum().item()
+            sample_count += valid_count
 
             # Stability
             base_h = unwrapped_env.robot.data.root_pos_w[:, 2]
             gravity_body = unwrapped_env.projected_gravity
-            roll = torch.atan2(gravity_body[:, 1], -gravity_body[:, 2])
-            pitch = torch.atan2(-gravity_body[:, 0], torch.sqrt(gravity_body[:, 1] ** 2 + gravity_body[:, 2] ** 2))
+            reference_gravity = getattr(
+                unwrapped_env,
+                "reference_projected_gravity",
+                gravity_body.new_tensor((0.0, 0.0, -1.0)),
+            )
+            aligned_gravity, reference_tilt = reference_relative_gravity(
+                gravity_body, reference_gravity
+            )
+            roll = torch.atan2(aligned_gravity[:, 1], -aligned_gravity[:, 2])
+            pitch = torch.atan2(
+                -aligned_gravity[:, 0],
+                torch.sqrt(aligned_gravity[:, 1] ** 2 + aligned_gravity[:, 2] ** 2),
+            )
 
-            base_h_sum += base_h.sum().item()
-            base_h_sq_sum += (base_h**2).sum().item()
-            pitch_sq_sum += (pitch**2).sum().item()
-            roll_sq_sum += (roll**2).sum().item()
-            stability_count += num_envs
+            base_h_sum += base_h[valid].sum().item()
+            base_h_sq_sum += (base_h[valid] ** 2).sum().item()
+            pitch_sq_sum += (pitch[valid] ** 2).sum().item()
+            roll_sq_sum += (roll[valid] ** 2).sum().item()
+            stability_count += valid_count
 
             terminated = torch.zeros(num_envs, dtype=torch.bool, device=device)
             time_outs = torch.zeros(num_envs, dtype=torch.bool, device=device)
             if hasattr(unwrapped_env, "reset_terminated") and hasattr(unwrapped_env, "reset_time_outs"):
                 terminated = unwrapped_env.reset_terminated
                 time_outs = unwrapped_env.reset_time_outs
-                fall_events += int(torch.count_nonzero(terminated).item())
-                episode_ends += int(torch.count_nonzero(terminated | time_outs).item())
-                cmd_fall_events += int(torch.count_nonzero(terminated).item())
-                cmd_episode_ends += int(torch.count_nonzero(terminated | time_outs).item())
-                episode_falls += terminated.to(dtype=torch.long)
+                # A terminal transition may coincide with a dropped sensor
+                # generation.  Count it whenever that episode already owns at
+                # least one measured sample; this exactly matches the complete
+                # episode row flushed below and never erases a real fall merely
+                # because its final sensor generation was invalid.
+                measured_episode = episode_steps > 0
+                measured_terminated = terminated & measured_episode
+                measured_ends = (terminated | time_outs) & measured_episode
+                fall_events += int(torch.count_nonzero(measured_terminated).item())
+                episode_ends += int(torch.count_nonzero(measured_ends).item())
+                cmd_fall_events += int(torch.count_nonzero(measured_terminated).item())
+                cmd_episode_ends += int(torch.count_nonzero(measured_ends).item())
+                episode_falls += measured_terminated.to(dtype=torch.long)
 
             # Contact statistics
             if hasattr(unwrapped_env, "_contact_count"):
@@ -1163,7 +1462,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 contact_count = unwrapped_env._current_leg_in_stance.float().sum(dim=1).to(torch.long)
             else:
                 contact_count = torch.zeros(num_envs, dtype=torch.long, device=device)
-            contact_hist += torch.bincount(contact_count.cpu(), minlength=7)
+            contact_hist += torch.bincount(contact_count[valid].cpu(), minlength=7)
 
             # Forward gait metrics
             if skill == "forward" and hasattr(unwrapped_env, "_main_drive_indices"):
@@ -1179,12 +1478,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 mean_phase_b = torch.atan2(torch.sin(phase_b).mean(dim=1), torch.cos(phase_b).mean(dim=1))
 
                 phase_diff = circular_distance(mean_phase_a, mean_phase_b)
-                forward_phase_diff_sum += phase_diff.mean().item()
-                forward_phase_err_to_pi_sum += torch.abs(phase_diff - math.pi).mean().item()
+                forward_phase_diff_sum += phase_diff[valid].mean().item()
+                forward_phase_err_to_pi_sum += torch.abs(
+                    phase_diff[valid] - math.pi
+                ).mean().item()
 
                 stance_fraction = leg_in_stance.float().mean(dim=1)
-                forward_stance_frac_sum += stance_fraction.mean().item()
-                forward_stance_frac_err_sum += torch.abs(stance_fraction - 0.65).mean().item()
+                forward_stance_frac_sum += stance_fraction[valid].mean().item()
+                forward_stance_frac_err_sum += torch.abs(
+                    stance_fraction[valid] - 0.65
+                ).mean().item()
 
                 signed_speed = torch.abs(main_vel * direction_multiplier)
                 stance_mask = leg_in_stance.float()
@@ -1192,8 +1495,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 stance_speed = (signed_speed * stance_mask).sum(dim=1) / stance_mask.sum(dim=1).clamp(min=1.0)
                 swing_speed = (signed_speed * swing_mask).sum(dim=1) / swing_mask.sum(dim=1).clamp(min=1.0)
 
-                forward_stance_speed_sum += stance_speed.mean().item()
-                forward_swing_speed_sum += swing_speed.mean().item()
+                forward_stance_speed_sum += stance_speed[valid].mean().item()
+                forward_swing_speed_sum += swing_speed[valid].mean().item()
                 forward_count += 1
 
                 start_phase = unwrapped_env.stance_phase_start
@@ -1206,17 +1509,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 dist_b = torch.minimum(circular_distance(mean_phase_b, start_phase), circular_distance(mean_phase_b, end_phase))
                 transition_mask = torch.minimum(dist_a, dist_b) < transition_window
 
-                transition_samples += int(torch.count_nonzero(transition_mask).item())
-                transition_contact_ge4 += int(torch.count_nonzero((contact_count >= 4) & transition_mask).item())
+                measured_transition = transition_mask & valid
+                transition_samples += int(torch.count_nonzero(measured_transition).item())
+                transition_contact_ge4 += int(
+                    torch.count_nonzero(
+                        (contact_count >= 4) & measured_transition
+                    ).item()
+                )
 
             # Energy / smoothness
             if last_actions is not None:
                 action_rate = torch.linalg.vector_norm(actions - last_actions, dim=1)
-                action_rate_sum += action_rate.mean().item()
+                rate_mask = valid & last_action_ready
+                if torch.any(rate_mask):
+                    action_rate_sum += action_rate[rate_mask].mean().item()
             last_actions = actions.clone()
+            last_action_ready = valid.clone()
 
             # Per-command acceptance counters
-            not_fallen = ~terminated
+            # A timeout/reset also breaks a contiguous window even when it is
+            # not a fall; samples must never bridge episode boundaries.
+            not_fallen = ~(terminated | time_outs) & valid
             abs_cmd_vx = abs(float(cmd[0]))
             abs_cmd_vy = abs(float(cmd[1]))
             abs_cmd_wz = abs(float(cmd[2]))
@@ -1224,13 +1537,69 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             if skill == "forward":
                 vx_req = max(args_cli.accept_vx_abs, args_cli.accept_lin_ratio * abs_cmd_vx)
-                success_mask = (
-                    (actual_vx * float(cmd[0]) > 0.0)
-                    & (torch.abs(actual_vx) >= vx_req)
-                    & (torch.abs(actual_vy) <= args_cli.accept_forward_lateral_leak)
-                    & (torch.abs(actual_wz) <= args_cli.accept_forward_yaw_leak)
-                    & not_fallen
-                )
+                if forward_cycle_velocity_averaging:
+                    assert forward_rolling_speed is not None
+                    assert forward_rolling_lateral is not None
+                    assert forward_rolling_yaw is not None
+                    assert forward_rolling_speed_sum is not None
+                    assert forward_rolling_lateral_sum is not None
+                    assert forward_rolling_yaw_sum is not None
+                    assert forward_rolling_valid_steps is not None
+                    signed_speed = actual_vx * (1.0 if float(cmd[0]) > 0.0 else -1.0)
+                    lateral_leak = torch.abs(actual_vy)
+                    yaw_leak = torch.abs(actual_wz)
+                    forward_rolling_speed_sum += (
+                        signed_speed
+                        - forward_rolling_speed[forward_cycle_window_index]
+                    )
+                    forward_rolling_lateral_sum += (
+                        lateral_leak
+                        - forward_rolling_lateral[forward_cycle_window_index]
+                    )
+                    forward_rolling_yaw_sum += (
+                        yaw_leak - forward_rolling_yaw[forward_cycle_window_index]
+                    )
+                    forward_rolling_speed[forward_cycle_window_index] = signed_speed
+                    forward_rolling_lateral[
+                        forward_cycle_window_index
+                    ] = lateral_leak
+                    forward_rolling_yaw[forward_cycle_window_index] = yaw_leak
+                    forward_cycle_window_index = (
+                        forward_cycle_window_index + 1
+                    ) % forward_cycle_window_steps
+                    stable_sample = (
+                        (reference_tilt <= args_cli.accept_forward_tilt_bound)
+                        & (base_h >= args_cli.accept_forward_min_base_height)
+                        & not_fallen
+                    )
+                    forward_rolling_valid_steps = torch.where(
+                        stable_sample,
+                        forward_rolling_valid_steps + 1,
+                        torch.zeros_like(forward_rolling_valid_steps),
+                    )
+                    window_denominator = float(forward_cycle_window_steps)
+                    success_mask = (
+                        (forward_rolling_valid_steps >= forward_cycle_window_steps)
+                        & (forward_rolling_speed_sum / window_denominator >= vx_req)
+                        & (
+                            forward_rolling_lateral_sum / window_denominator
+                            <= args_cli.accept_forward_lateral_leak
+                        )
+                        & (
+                            forward_rolling_yaw_sum / window_denominator
+                            <= args_cli.accept_forward_yaw_leak
+                        )
+                    )
+                else:
+                    success_mask = (
+                        (actual_vx * float(cmd[0]) > 0.0)
+                        & (torch.abs(actual_vx) >= vx_req)
+                        & (torch.abs(actual_vy) <= args_cli.accept_forward_lateral_leak)
+                        & (torch.abs(actual_wz) <= args_cli.accept_forward_yaw_leak)
+                        & (reference_tilt <= args_cli.accept_forward_tilt_bound)
+                        & (base_h >= args_cli.accept_forward_min_base_height)
+                        & not_fallen
+                    )
             elif skill == "lateral":
                 vy_req = max(args_cli.accept_vy_abs, args_cli.accept_lin_ratio * abs_cmd_vy)
                 success_mask = (
@@ -1244,9 +1613,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             elif skill == "diagonal":
                 vx_req = max(0.08, args_cli.accept_diag_component_ratio * abs_cmd_vx)
                 vy_req = max(0.08, args_cli.accept_diag_component_ratio * abs_cmd_vy)
-                diag_sign_ok = (actual_vx * float(cmd[0]) > 0.0) & (actual_vy * float(cmd[1]) > 0.0)
+                diag_sign_ok = (
+                    (actual_vx * float(cmd[0]) > 0.0)
+                    & (actual_vy * float(cmd[1]) > 0.0)
+                    & valid
+                )
                 cmd_diag_sign_match += int(torch.count_nonzero(diag_sign_ok).item())
-                cmd_diag_sign_total += int(diag_sign_ok.numel())
+                cmd_diag_sign_total += valid_count
                 success_mask = (
                     diag_sign_ok
                     & (torch.abs(actual_vx) >= vx_req)
@@ -1271,6 +1644,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 cmd_success_wz_steps += int(torch.count_nonzero(success_mask).item())
 
             cmd_success_steps += int(torch.count_nonzero(success_mask).item())
+            cmd_current_contiguous_success = torch.where(
+                success_mask,
+                cmd_current_contiguous_success + 1,
+                torch.zeros_like(cmd_current_contiguous_success),
+            )
+            cmd_max_contiguous_success = torch.maximum(
+                cmd_max_contiguous_success, cmd_current_contiguous_success
+            )
             episode_success += success_mask.to(dtype=torch.long)
 
             energy_metrics = collect_energy_metrics(
@@ -1281,55 +1662,70 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 float(cmd[0]),
                 float(cmd[1]),
             )
-            if torch.count_nonzero(energy_metrics["mech_power_total"]).item() > 0:
+            def measured_energy_mean(metric: str) -> float:
+                return float(energy_metrics[metric][valid].mean().item())
+
+            if torch.count_nonzero(
+                energy_metrics["mech_power_total"][valid]
+            ).item() > 0:
                 effort_proxy_name = "mean(total_mech_power)"
-                effort_proxy_sum += energy_metrics["mech_power_total"].mean().item()
+                effort_proxy_sum += measured_energy_mean("mech_power_total")
             elif hasattr(unwrapped_env, "_target_drive_vel"):
                 effort_proxy_name = "mean(|target_vel * omega|)"
                 omegas = unwrapped_env.joint_vel[:, unwrapped_env._main_drive_indices]
                 effort_proxy = torch.mean(torch.abs(unwrapped_env._target_drive_vel * omegas), dim=1)
-                effort_proxy_sum += effort_proxy.mean().item()
+                effort_proxy_sum += effort_proxy[valid].mean().item()
             else:
                 effort_proxy_sum += 0.0
             energy_count += 1
 
-            spring_energy_sum += energy_metrics["spring_energy"].mean().item()
-            spring_release_sum += energy_metrics["spring_release"].mean().item()
-            spring_store_sum += energy_metrics["spring_store"].mean().item()
-            damper_dissipation_sum += energy_metrics["damper_dissipation"].mean().item()
-            mech_power_main_sum += energy_metrics["mech_power_main"].mean().item()
-            mech_power_total_sum += energy_metrics["mech_power_total"].mean().item()
-            cot_proxy_sum += energy_metrics["cot_proxy"].mean().item()
-            motion_speed_sum += energy_metrics["motion_speed"].mean().item()
-            progress_speed_sum += energy_metrics["progress_speed"].mean().item()
-            energy_cost_sum += energy_metrics["energy_cost"].mean().item()
-            progress_distance_sum += energy_metrics["progress_distance"].mean().item()
-            energy_per_distance_sum += energy_metrics["energy_per_distance"].mean().item()
+            spring_energy_sum += measured_energy_mean("spring_energy")
+            spring_release_sum += measured_energy_mean("spring_release")
+            spring_store_sum += measured_energy_mean("spring_store")
+            damper_dissipation_sum += measured_energy_mean("damper_dissipation")
+            mech_power_main_sum += measured_energy_mean("mech_power_main")
+            mech_power_total_sum += measured_energy_mean("mech_power_total")
+            cot_proxy_sum += measured_energy_mean("cot_proxy")
+            motion_speed_sum += measured_energy_mean("motion_speed")
+            progress_speed_sum += measured_energy_mean("progress_speed")
+            energy_cost_sum += measured_energy_mean("energy_cost")
+            progress_distance_sum += measured_energy_mean("progress_distance")
+            energy_per_distance_sum += measured_energy_mean("energy_per_distance")
 
-            cmd_mech_power_main_sum += energy_metrics["mech_power_main"].mean().item()
-            cmd_mech_power_total_sum += energy_metrics["mech_power_total"].mean().item()
-            cmd_cot_sum += energy_metrics["cot_proxy"].mean().item()
-            cmd_spring_energy_sum += energy_metrics["spring_energy"].mean().item()
-            cmd_spring_release_sum += energy_metrics["spring_release"].mean().item()
-            cmd_spring_store_sum += energy_metrics["spring_store"].mean().item()
-            cmd_spring_recovery_ratio_sum += energy_metrics["spring_recovery_ratio"].mean().item()
-            cmd_motion_speed_sum += energy_metrics["motion_speed"].mean().item()
-            cmd_progress_speed_sum += energy_metrics["progress_speed"].mean().item()
-            cmd_energy_cost_sum += energy_metrics["energy_cost"].mean().item()
-            cmd_progress_distance_sum += energy_metrics["progress_distance"].mean().item()
-            cmd_energy_per_distance_sum += energy_metrics["energy_per_distance"].mean().item()
+            cmd_mech_power_main_sum += measured_energy_mean("mech_power_main")
+            cmd_mech_power_total_sum += measured_energy_mean("mech_power_total")
+            cmd_cot_sum += measured_energy_mean("cot_proxy")
+            cmd_spring_energy_sum += measured_energy_mean("spring_energy")
+            cmd_spring_release_sum += measured_energy_mean("spring_release")
+            cmd_spring_store_sum += measured_energy_mean("spring_store")
+            cmd_spring_recovery_ratio_sum += measured_energy_mean("spring_recovery_ratio")
+            cmd_motion_speed_sum += measured_energy_mean("motion_speed")
+            cmd_progress_speed_sum += measured_energy_mean("progress_speed")
+            cmd_energy_cost_sum += measured_energy_mean("energy_cost")
+            cmd_progress_distance_sum += measured_energy_mean("progress_distance")
+            cmd_energy_per_distance_sum += measured_energy_mean("energy_per_distance")
             cmd_energy_steps += 1
-            episode_energy += energy_metrics["mech_power_total"].to(dtype=torch.float64)
-            episode_energy_effort += energy_metrics["energy_per_distance"].to(dtype=torch.float64)
+            episode_energy += (
+                energy_metrics["mech_power_total"] * valid
+            ).to(dtype=torch.float64)
+            episode_energy_effort += (
+                energy_metrics["energy_per_distance"] * valid
+            ).to(dtype=torch.float64)
 
-            skill_mech_power_total_sum[skill] += energy_metrics["mech_power_total"].mean().item()
-            skill_cot_sum[skill] += energy_metrics["cot_proxy"].mean().item()
-            skill_spring_recovery_ratio_sum[skill] += energy_metrics["spring_recovery_ratio"].mean().item()
-            skill_motion_speed_sum[skill] += energy_metrics["motion_speed"].mean().item()
-            skill_progress_speed_sum[skill] += energy_metrics["progress_speed"].mean().item()
-            skill_energy_cost_sum[skill] += energy_metrics["energy_cost"].mean().item()
-            skill_progress_distance_sum[skill] += energy_metrics["progress_distance"].mean().item()
-            skill_energy_per_distance_sum[skill] += energy_metrics["energy_per_distance"].mean().item()
+            skill_mech_power_total_sum[skill] += measured_energy_mean("mech_power_total")
+            skill_cot_sum[skill] += measured_energy_mean("cot_proxy")
+            skill_spring_recovery_ratio_sum[skill] += measured_energy_mean(
+                "spring_recovery_ratio"
+            )
+            skill_motion_speed_sum[skill] += measured_energy_mean("motion_speed")
+            skill_progress_speed_sum[skill] += measured_energy_mean("progress_speed")
+            skill_energy_cost_sum[skill] += measured_energy_mean("energy_cost")
+            skill_progress_distance_sum[skill] += measured_energy_mean(
+                "progress_distance"
+            )
+            skill_energy_per_distance_sum[skill] += measured_energy_mean(
+                "energy_per_distance"
+            )
             skill_energy_steps[skill] += 1
             energy_kpi_count += 1
 
@@ -1345,6 +1741,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "cmd_vx": cmd[0],
             "cmd_vy": cmd[1],
             "cmd_wz": cmd[2],
+            "sample_count": int(cmd_samples),
+            "success_sample_count": int(cmd_success_steps),
+            "fall_events": int(cmd_fall_events),
+            "episode_ends": int(cmd_episode_ends),
             "mae_vx": cmd_err_vx / denom,
             "mae_vy": cmd_err_vy / denom,
             "mae_wz": cmd_err_wz / denom,
@@ -1353,8 +1753,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         result["actual_lateral_leak_mean"] = cmd_lateral_leak_sum / denom
         result["actual_yaw_leak_mean"] = cmd_yaw_leak_sum / denom
         result["skill"] = skill
-        result["success_duration_s"] = float(cmd_success_steps) * step_dt / float(max(1, num_envs))
-        result["success_ratio"] = result["success_duration_s"] / float(max(1e-6, eval_duration_s))
+        result["gait_cycle_window_steps"] = forward_cycle_window_steps
+        result["gait_cycle_window_duration_s"] = (
+            forward_cycle_window_steps * step_dt
+        )
+        result["contiguous_success_semantics"] = (
+            "one_command_scaled_gait_cycle_velocity_means_with_"
+            "pointwise_tilt_height_and_episode_boundary_safety"
+            if forward_cycle_velocity_averaging
+            else "instantaneous_samples"
+        )
+        contiguous_duration_s = cmd_max_contiguous_success.float() * step_dt
+        result["aggregate_success_duration_s"] = (
+            float(cmd_success_steps) * step_dt / float(max(1, num_envs))
+        )
+        result["success_duration_s"] = float(torch.median(contiguous_duration_s).item())
+        result["success_ratio"] = result["aggregate_success_duration_s"] / float(
+            max(1e-6, eval_duration_s)
+        )
+        result["contiguous_success_env_ratio"] = float(
+            torch.mean(
+                (contiguous_duration_s >= args_cli.accept_duration_s).float()
+            ).item()
+        )
         result["success_vy_duration_s"] = float(cmd_success_vy_steps) * step_dt / float(max(1, num_envs))
         result["success_wz_duration_s"] = float(cmd_success_wz_steps) * step_dt / float(max(1, num_envs))
         result["diag_sign_match_ratio"] = float(cmd_diag_sign_match) / float(max(1, cmd_diag_sign_total))
@@ -1417,9 +1838,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         result["score"] = score
 
         accept_pass = (
-            (result["success_duration_s"] >= args_cli.accept_duration_s)
+            (
+                result["contiguous_success_env_ratio"]
+                >= args_cli.accept_contiguous_env_ratio
+            )
             and (result["fall_rate"] <= args_cli.accept_max_fall_rate)
         )
+        if skill == "forward":
+            forward_mae_limit = max(
+                args_cli.accept_vx_abs,
+                (1.0 - args_cli.accept_lin_ratio) * abs(float(cmd[0])),
+            )
+            accept_pass = accept_pass and result["mae_vx"] <= forward_mae_limit
         if skill == "diagonal":
             accept_pass = accept_pass and (result["diag_sign_match_ratio"] >= args_cli.accept_diag_sign_ratio)
         if skill == "yaw":
@@ -1458,6 +1888,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     transition_ratio_ge4 = float(transition_contact_ge4) / float(max(1, transition_samples))
 
     action_rate_mean = action_rate_sum / float(max(1, energy_count))
+    main_action_saturation_ratio = float(main_action_saturation_count) / float(
+        max(1, main_action_sample_count)
+    )
+    abad_action_saturation_ratio = float(abad_action_saturation_count) / float(
+        max(1, abad_action_sample_count)
+    )
+    abad_action_magnitude_mean = abad_action_abs_sum / float(
+        max(1, abad_action_sample_count)
+    )
     effort_proxy_mean = effort_proxy_sum / float(max(1, energy_count))
     mech_power_main_mean = mech_power_main_sum / float(max(1, energy_kpi_count))
     mech_power_total_mean = mech_power_total_sum / float(max(1, energy_kpi_count))
@@ -1492,6 +1931,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         and (min_skill_pass_ratio >= args_cli.accept_skill_pass_ratio)
         and (max_command_fall_rate <= args_cli.accept_max_fall_rate)
     )
+    if protocol.v2:
+        overall_accept_pass = (
+            overall_accept_pass
+            and main_action_saturation_ratio
+            <= args_cli.accept_max_main_action_saturation_ratio
+            and abad_action_magnitude_mean <= 1.0e-6
+        )
 
     print("\n=== Command Tracking (MAE) ===")
     print(
@@ -1592,6 +2038,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"contact.histogram: {summarize_contact_hist(contact_hist)}")
     print(f"contact.transition_ratio_ge4: {transition_ratio_ge4:.6f}")
     print(f"energy.action_rate_mean: {action_rate_mean:.6f}")
+    print(f"policy.main_action_saturation_ratio: {main_action_saturation_ratio:.6f}")
+    print(f"policy.abad_action_saturation_ratio: {abad_action_saturation_ratio:.6f}")
+    print(f"policy.abad_action_magnitude_mean: {abad_action_magnitude_mean:.6f}")
     print(f"energy.effort_proxy_mean [{effort_proxy_name}]: {effort_proxy_mean:.6f}")
     # ★ Energy-aware KPIs
     _ekc = float(max(1, energy_kpi_count))
@@ -1632,14 +2081,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "cmd_vx",
                     "cmd_vy",
                     "cmd_wz",
+                    "sample_count",
+                    "success_sample_count",
+                    "fall_events",
+                    "episode_ends",
                     "mae_vx",
                     "mae_vy",
                     "mae_wz",
                     "actual_forward_speed_mean",
                     "actual_lateral_leak_mean",
                     "actual_yaw_leak_mean",
+                    "gait_cycle_window_steps",
+                    "gait_cycle_window_duration_s",
+                    "contiguous_success_semantics",
+                    "aggregate_success_duration_s",
                     "success_duration_s",
                     "success_ratio",
+                    "contiguous_success_env_ratio",
                     "success_vy_duration_s",
                     "success_wz_duration_s",
                     "diag_sign_match_ratio",
@@ -1679,6 +2137,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "complete",
                     "sample_count",
                     "fall_count",
+                    "success_count",
                     "mae_vx",
                     "mae_vy",
                     "mae_wz",
@@ -1699,7 +2158,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             {"metric": "evaluation.sweep_steps", "value": int(args_cli.sweep_steps)},
             {"metric": "evaluation.step_dt", "value": float(step_dt)},
             {"metric": "evaluation.duration_s", "value": float(eval_duration_s)},
+            {
+                "metric": "evaluation.protocol_sha256",
+                "value": evaluation_protocol_sha256,
+            },
             {"metric": "eval.profile", "value": args_cli.eval_profile},
+            {"metric": "evaluation.domain", "value": args_cli.evaluation_domain},
             {"metric": "evaluation.agent_entry_point", "value": args_cli.agent},
             {
                 "metric": "command.profile_sha256",
@@ -1725,6 +2189,68 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             {"metric": "spring.profile_id", "value": spring_profile_id},
             {"metric": "spring.profile_sha256", "value": spring_profile_sha256},
             {
+                "metric": "sensor_dr.profile_id",
+                "value": sensor_dr_profile.profile_id if sensor_dr_profile is not None else None,
+            },
+            {
+                "metric": "sensor_dr.profile_sha256",
+                "value": sensor_dr_profile_sha256,
+            },
+            {
+                "metric": "sensor_dr.profile_path",
+                "value": (
+                    str(Path(args_cli.sensor_dr_profile).expanduser().resolve())
+                    if sensor_dr_profile is not None
+                    else None
+                ),
+            },
+            {
+                "metric": "sensor_dr.profile_purpose",
+                "value": sensor_dr_profile.purpose if sensor_dr_profile is not None else None,
+            },
+            {
+                "metric": "sensor_dr.active_categories",
+                "value": (
+                    ",".join(sorted(sensor_dr_profile.active_categories))
+                    if sensor_dr_profile is not None
+                    else None
+                ),
+            },
+            {
+                "metric": "sensor_dr.parameters_json",
+                "value": (
+                    json.dumps(
+                        sensor_dr_profile.parameters,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if sensor_dr_profile is not None
+                    else None
+                ),
+            },
+            {
+                "metric": "sensor_dr.physical_stage_scale",
+                "value": getattr(env_cfg, "sensor_dr_physical_stage_scale", None),
+            },
+            {
+                "metric": "sensor_dr.physical_material_writes_required",
+                "value": getattr(
+                    env_cfg, "sensor_dr_require_physical_material_writes", False
+                ),
+            },
+            {
+                "metric": "sensor_dr.physical_mass_applied",
+                "value": bool(
+                    getattr(unwrapped_env, "_mass_physical_randomized", False)
+                ),
+            },
+            {
+                "metric": "sensor_dr.physical_friction_applied",
+                "value": bool(
+                    getattr(unwrapped_env, "_friction_physical_randomized", False)
+                ),
+            },
+            {
                 "metric": "artifact.command_csv_sha256",
                 "value": command_csv_sha256,
             },
@@ -1733,6 +2259,117 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "value": episode_csv_sha256,
             },
             {"metric": "evidence.episode_row_count", "value": len(episode_results)},
+            {
+                "metric": "acceptance.contiguous_env_ratio_threshold",
+                "value": args_cli.accept_contiguous_env_ratio,
+            },
+            {
+                "metric": "acceptance.duration_s",
+                "value": args_cli.accept_duration_s,
+            },
+            {
+                "metric": "acceptance.max_fall_rate",
+                "value": args_cli.accept_max_fall_rate,
+            },
+            {
+                "metric": "acceptance.forward_vx_abs",
+                "value": args_cli.accept_vx_abs,
+            },
+            {
+                "metric": "acceptance.forward_lin_ratio",
+                "value": args_cli.accept_lin_ratio,
+            },
+            {
+                "metric": "acceptance.lateral_vy_abs",
+                "value": args_cli.accept_vy_abs,
+            },
+            {
+                "metric": "acceptance.yaw_wz_abs",
+                "value": args_cli.accept_wz_abs,
+            },
+            {
+                "metric": "acceptance.yaw_wz_ratio",
+                "value": args_cli.accept_wz_ratio,
+            },
+            {
+                "metric": "acceptance.diag_sign_ratio",
+                "value": args_cli.accept_diag_sign_ratio,
+            },
+            {
+                "metric": "acceptance.diag_component_ratio",
+                "value": args_cli.accept_diag_component_ratio,
+            },
+            {
+                "metric": "acceptance.diag_yaw_leak",
+                "value": args_cli.accept_diag_yaw_leak,
+            },
+            {
+                "metric": "acceptance.yaw_tilt_ratio",
+                "value": args_cli.accept_yaw_tilt_ratio,
+            },
+            {
+                "metric": "acceptance.yaw_tilt_bound_rad",
+                "value": args_cli.accept_yaw_tilt_bound,
+            },
+            {
+                "metric": "acceptance.yaw_linear_leak",
+                "value": args_cli.accept_yaw_lin_leak,
+            },
+            {
+                "metric": "acceptance.yaw_min_base_height_m",
+                "value": args_cli.accept_min_base_height,
+            },
+            {
+                "metric": "acceptance.skill_pass_ratio_threshold",
+                "value": args_cli.accept_skill_pass_ratio,
+            },
+            {
+                "metric": "acceptance.overall_pass_ratio_threshold",
+                "value": args_cli.accept_overall_pass_ratio,
+            },
+            {
+                "metric": "acceptance.forward_contiguous_semantics",
+                "value": forward_contiguous_semantics,
+            },
+            {
+                "metric": "acceptance.forward_tilt_bound_rad",
+                "value": args_cli.accept_forward_tilt_bound,
+            },
+            {
+                "metric": "acceptance.forward_lateral_leak",
+                "value": args_cli.accept_forward_lateral_leak,
+            },
+            {
+                "metric": "acceptance.forward_yaw_leak",
+                "value": args_cli.accept_forward_yaw_leak,
+            },
+            {
+                "metric": "acceptance.forward_min_base_height_m",
+                "value": args_cli.accept_forward_min_base_height,
+            },
+            {
+                "metric": "acceptance.lateral_forward_leak",
+                "value": args_cli.accept_lateral_forward_leak,
+            },
+            {
+                "metric": "acceptance.lateral_yaw_leak",
+                "value": args_cli.accept_lateral_yaw_leak,
+            },
+            {
+                "metric": "acceptance.max_main_action_saturation_ratio",
+                "value": args_cli.accept_max_main_action_saturation_ratio,
+            },
+            {
+                "metric": "acceptance.main_action_saturation_ratio_source",
+                "value": (
+                    "interim no-saturation-anomaly gate; sensitivity "
+                    "strict/base/relaxed=0.00/0.05/0.10"
+                ),
+            },
+            {
+                "metric": "evaluation.v2_play_compat_enabled",
+                "value": bool(getattr(unwrapped_env.cfg, "play_forward_compat_enable", False)),
+            },
             {"metric": "tracking.mean_abs_vx", "value": mean_abs_vx},
             {"metric": "tracking.mean_abs_vy", "value": mean_abs_vy},
             {"metric": "tracking.mean_abs_wz", "value": mean_abs_wz},
@@ -1749,8 +2386,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             {"metric": "stability.base_height_var", "value": base_h_var},
             {"metric": "stability.pitch_rms", "value": pitch_rms},
             {"metric": "stability.roll_rms", "value": roll_rms},
+            {
+                "metric": "stability.attitude_reference",
+                "value": "environment.reference_projected_gravity",
+            },
+            {
+                "metric": "contact.supervision_status",
+                "value": "proxy_only_not_valid_for_supervision",
+            },
             {"metric": "contact.transition_ratio_ge4", "value": transition_ratio_ge4},
             {"metric": "energy.action_rate_mean", "value": action_rate_mean},
+            {
+                "metric": "policy.main_action_saturation_ratio",
+                "value": main_action_saturation_ratio,
+            },
+            {
+                "metric": "policy.abad_action_saturation_ratio",
+                "value": abad_action_saturation_ratio,
+            },
+            {
+                "metric": "policy.abad_action_magnitude_mean",
+                "value": abad_action_magnitude_mean,
+            },
             {"metric": "energy.effort_proxy_mean", "value": effort_proxy_mean},
             {"metric": "energy.effort_proxy_name", "value": effort_proxy_name},
             {"metric": "energy.spring_energy_mean", "value": spring_energy_sum / _ekc},
@@ -1774,6 +2431,60 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             {"metric": "acceptance.overall_score_mean", "value": overall_score_mean},
             {"metric": "acceptance.overall_status", "value": "PASS" if overall_accept_pass else "FAIL"},
         ]
+        if protocol.v2:
+            if checkpoint_manifest is None:
+                raise RuntimeError(
+                    "Sensor V2 evaluation did not retain its checkpoint manifest"
+                )
+            summary_rows.extend(
+                (
+                    {"metric": "checkpoint.kind", "value": checkpoint_manifest.kind},
+                    {"metric": "checkpoint.stage", "value": checkpoint_manifest.stage},
+                    {
+                        "metric": "checkpoint.observation_contract_sha256",
+                        "value": checkpoint_manifest.contract_hash,
+                    },
+                    {
+                        "metric": "checkpoint.action_contract_sha256",
+                        "value": checkpoint_manifest.action_contract_hash,
+                    },
+                    {
+                        "metric": "checkpoint.training_calibration_sha256",
+                        "value": checkpoint_manifest.calibration_hash,
+                    },
+                    {
+                        "metric": "checkpoint.architecture_sha256",
+                        "value": checkpoint_manifest.architecture_hash,
+                    },
+                    {
+                        "metric": "checkpoint.config_sha256",
+                        "value": checkpoint_manifest.config_hash,
+                    },
+                    {
+                        "metric": "checkpoint.canonical_config_sha256",
+                        "value": checkpoint_manifest.canonical_config_hash,
+                    },
+                    {
+                        "metric": "checkpoint.training_seed",
+                        "value": checkpoint_manifest.training_seed,
+                    },
+                )
+            )
+        else:
+            legacy_kind = (
+                "legacy_distillation_v1"
+                if protocol.class_name == "DistillationRunner"
+                else "legacy_ppo_v1"
+            )
+            summary_rows.extend(
+                (
+                    {"metric": "checkpoint.kind", "value": legacy_kind},
+                    {
+                        "metric": "checkpoint.config_sha256",
+                        "value": runtime_identities["config"],
+                    },
+                )
+            )
         for skill, ratio in skill_pass_ratio.items():
             summary_rows.append({"metric": f"acceptance.skill_pass_ratio.{skill}", "value": ratio})
         for skill, metrics in skill_energy_summary.items():
@@ -1796,8 +2507,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO] Wrote summary table: {summary_path}")
 
     env.close()
+    if not overall_accept_pass:
+        raise SystemExit(2)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
-    simulation_app.close()
+    _exit_code = 2
+    try:
+        _exit_code = int(main() or 0)
+    finally:
+        simulation_app.close()
+    raise SystemExit(_exit_code)

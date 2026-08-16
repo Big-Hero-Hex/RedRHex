@@ -46,6 +46,18 @@ parser.add_argument(
     help="Explicit CalibrationProfileV1 JSON override; defaults never load a candidate profile.",
 )
 parser.add_argument(
+    "--sensor-dr-profile",
+    type=str,
+    default=None,
+    help="Sensor V2 only: evidence-bound F4 training_curriculum profile JSON.",
+)
+parser.add_argument(
+    "--sensor-dr-profile-sha256",
+    type=str,
+    default=None,
+    help="Required exact SHA-256 for --sensor-dr-profile.",
+)
+parser.add_argument(
     "--spring-backend",
     choices=("explicit", "native"),
     default="native",
@@ -132,11 +144,32 @@ parser.add_argument(
     default=None,
     help="V2 only: strict student_distilled_v2 checkpoint used to bootstrap a new F3 PPO run.",
 )
+parser.add_argument(
+    "--ppo_checkpoint",
+    type=str,
+    default=None,
+    help="V2 only: strict student_ppo_v2 checkpoint used to bootstrap F4 robustness PPO.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+
+
+_V2_AGENT_CLASS_BY_ENTRY_POINT = {
+    "rsl_rl_distillation_v2_cfg_entry_point": "SensorDistillationRunnerV2",
+    "rsl_rl_distillation_v2_no_aux_cfg_entry_point": "SensorDistillationRunnerV2",
+    "rsl_rl_distillation_v2_velocity_cfg_entry_point": "SensorDistillationRunnerV2",
+    "rsl_rl_distillation_v2_velocity_dynamics_cfg_entry_point": "SensorDistillationRunnerV2",
+    "rsl_rl_ppo_v2_cfg_entry_point": "SensorOnPolicyRunnerV2",
+    "rsl_rl_robust_ppo_v2_cfg_entry_point": "SensorRobustnessRunnerV2",
+}
+_V2_BOOTSTRAP_RUNNER_CLASS = {
+    "teacher_checkpoint": "SensorDistillationRunnerV2",
+    "student_checkpoint": "SensorOnPolicyRunnerV2",
+    "ppo_checkpoint": "SensorRobustnessRunnerV2",
+}
 
 
 def _is_sensor_v2_task(task_name: str | None) -> bool:
@@ -158,19 +191,31 @@ def _validate_checkpoint_cli() -> None:
     bootstrap = [
         name
         for name, value in (
-            ("--teacher_checkpoint", args_cli.teacher_checkpoint),
-            ("--student_checkpoint", args_cli.student_checkpoint),
+            ("teacher_checkpoint", args_cli.teacher_checkpoint),
+            ("student_checkpoint", args_cli.student_checkpoint),
+            ("ppo_checkpoint", args_cli.ppo_checkpoint),
         )
         if value is not None
     ]
     if len(bootstrap) > 1:
-        parser.error("--teacher_checkpoint and --student_checkpoint are mutually exclusive")
-    if bootstrap and args_cli.resume:
-        parser.error(f"{bootstrap[0]} cannot be combined with --resume")
-    if bootstrap and args_cli.checkpoint is not None:
-        parser.error(f"{bootstrap[0]} cannot be combined with --checkpoint")
-    if bootstrap and not _is_sensor_v2_task(args_cli.task):
-        parser.error(f"{bootstrap[0]} is valid only for the ForwardSensorV2 task")
+        parser.error("V2 bootstrap checkpoint flags are mutually exclusive")
+    if bootstrap:
+        checkpoint_name = bootstrap[0]
+        flag = f"--{checkpoint_name}"
+        if args_cli.resume:
+            parser.error(f"{flag} cannot be combined with --resume")
+        if args_cli.checkpoint is not None:
+            parser.error(f"{flag} cannot be combined with --checkpoint")
+        if not _is_sensor_v2_task(args_cli.task):
+            parser.error(f"{flag} is valid only for the ForwardSensorV2 task")
+        expected_class = _V2_BOOTSTRAP_RUNNER_CLASS[checkpoint_name]
+        selected_class = _V2_AGENT_CLASS_BY_ENTRY_POINT.get(args_cli.agent)
+        if selected_class != expected_class:
+            parser.error(
+                f"{flag} requires a Sensor V2 agent entry point whose runner class is "
+                f"{expected_class}; --agent {args_cli.agent!r} resolves to "
+                f"{selected_class or 'no allowlisted V2 runner class'}"
+            )
     if _is_sensor_v2_task(args_cli.task) and args_cli.resume and args_cli.checkpoint is None:
         parser.error("V2 resume requires --resume --checkpoint PATH for exact same-kind loading")
     if _is_sensor_v2_task(args_cli.task) and args_cli.resume_policy_only:
@@ -179,6 +224,37 @@ def _validate_checkpoint_cli() -> None:
         parser.error("--resume_policy_only requires --resume")
     if args_cli.strict_checkpoint_loading and args_cli.checkpoint is None:
         parser.error("--strict-checkpoint-loading requires --checkpoint")
+
+
+def _validate_bootstrap_runner_class(class_name: str) -> None:
+    """Recheck the Hydra-resolved class before constructing an environment."""
+
+    for checkpoint_name, expected_class in _V2_BOOTSTRAP_RUNNER_CLASS.items():
+        if getattr(args_cli, checkpoint_name) is None:
+            continue
+        if class_name != expected_class:
+            raise ValueError(
+                f"--{checkpoint_name} requires runner class {expected_class}, got {class_name!r}"
+            )
+        return
+
+
+def _validate_sensor_dr_cli() -> None:
+    supplied = args_cli.sensor_dr_profile is not None
+    pinned = args_cli.sensor_dr_profile_sha256 is not None
+    if supplied != pinned:
+        parser.error(
+            "--sensor-dr-profile and --sensor-dr-profile-sha256 must be supplied together"
+        )
+    if supplied and not _is_sensor_v2_task(args_cli.task):
+        parser.error("--sensor-dr-profile is valid only for the ForwardSensorV2 task")
+    robust_agent = "rsl_rl_robust_ppo_v2_cfg_entry_point"
+    if supplied and args_cli.agent != robust_agent:
+        parser.error(f"--sensor-dr-profile requires --agent {robust_agent}")
+    if supplied and args_cli.ppo_checkpoint is None:
+        parser.error("F4 --sensor-dr-profile requires --ppo_checkpoint")
+    if args_cli.ppo_checkpoint is not None and not supplied:
+        parser.error("--ppo_checkpoint requires an evidence-bound --sensor-dr-profile")
 
 
 def _validate_sha256_bound_file(label: str, raw_path: str | None, expected: str | None) -> None:
@@ -198,9 +274,13 @@ def _validate_sha256_bound_file(label: str, raw_path: str | None, expected: str 
 
 _validate_spring_backend_cli()
 _validate_checkpoint_cli()
+_validate_sensor_dr_cli()
 _validate_sha256_bound_file("reward-profile", args_cli.reward_profile, args_cli.reward_profile_sha256)
 _validate_sha256_bound_file("terrain-profile", args_cli.terrain_profile, args_cli.terrain_profile_sha256)
 _validate_sha256_bound_file("checkpoint", args_cli.checkpoint, args_cli.checkpoint_sha256)
+_validate_sha256_bound_file(
+    "sensor-dr-profile", args_cli.sensor_dr_profile, args_cli.sensor_dr_profile_sha256
+)
 
 # always enable cameras to record video
 if args_cli.video:
@@ -344,6 +424,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     """Train with RSL-RL agent."""
     # override configurations with non-hydra CLI arguments
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    _validate_bootstrap_runner_class(agent_cfg.class_name)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
@@ -452,7 +533,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     env_cfg.spring_backend = args_cli.spring_backend
     protocol = runner_protocol(agent_cfg.class_name)
-    bootstrap_path = args_cli.teacher_checkpoint or args_cli.student_checkpoint
+    bootstrap_path = (
+        args_cli.teacher_checkpoint
+        or args_cli.student_checkpoint
+        or args_cli.ppo_checkpoint
+    )
     resume_requested = agent_cfg.resume or bootstrap_path is not None or (
         not protocol.v2 and agent_cfg.algorithm.class_name == "Distillation"
     )
@@ -494,6 +579,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(
             f"[INFO] Explicit physics profile applied to config: {spring_profile_id} "
             f"({spring_profile_sha256})"
+        )
+
+    sensor_dr_profile = None
+    sensor_dr_profile_sha256 = None
+    if args_cli.sensor_dr_profile is not None:
+        from tools.sim2real.sensor_dr_profile_v2 import (
+            PHYSICAL_PROFILE_PARAMETERS_V2,
+            apply_sensor_dr_profile_v2,
+            load_sensor_dr_profile_v2,
+        )
+
+        sensor_dr_profile, sensor_dr_profile_sha256 = load_sensor_dr_profile_v2(
+            args_cli.sensor_dr_profile,
+            expected_sha256=args_cli.sensor_dr_profile_sha256,
+            expected_purpose="training_curriculum",
+        )
+        physical_overlap = set(sensor_dr_profile.parameters) & PHYSICAL_PROFILE_PARAMETERS_V2
+        if physics_profile is not None and physical_overlap:
+            raise ValueError(
+                "physics and Sensor V2 profiles both define actuator/timing fields: "
+                f"{sorted(physical_overlap)}"
+            )
+        apply_sensor_dr_profile_v2(
+            env_cfg, sensor_dr_profile, sensor_dr_profile_sha256
+        )
+        print(
+            f"[INFO] Sensor V2 training DR profile applied: {sensor_dr_profile.profile_id} "
+            f"({sensor_dr_profile_sha256})"
         )
 
     spring_calibration_status = (
@@ -568,6 +681,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 runner.load_teacher_v2(resume_path)
             elif args_cli.student_checkpoint:
                 runner.bootstrap_student_v2(resume_path)
+            elif args_cli.ppo_checkpoint:
+                runner.bootstrap_robustness_v2(resume_path)
             else:
                 runner.load(resume_path, load_optimizer=True)
         elif args_cli.resume_policy_only:
@@ -630,6 +745,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             physics_profile,
             config_application=physics_profile_config_application,
             runtime_application=physics_profile_runtime_application,
+        )
+    if sensor_dr_profile is not None:
+        sensor_dr_snapshot = {
+            **sensor_dr_profile.to_dict(),
+            "profile_sha256": sensor_dr_profile_sha256,
+        }
+        dump_yaml(
+            os.path.join(log_dir, "params", "sensor_domain_randomization_v2.yaml"),
+            sensor_dr_snapshot,
         )
 
     # run training

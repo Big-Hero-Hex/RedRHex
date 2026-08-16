@@ -9,6 +9,7 @@ import os
 import platform
 import time
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -18,28 +19,41 @@ from rsl_rl.modules import ActorCritic
 from rsl_rl.runners import OnPolicyRunner
 from tensordict import TensorDict
 
-from redrhex_policy_io import (
-    ForwardResidualActionContractV2,
-    SensorCalibrationProfileV2,
-    StudentObservationContractV2,
-)
+from redrhex_policy_io import SensorCalibrationProfileV2, StudentObservationContractV2
 
+from .bundle_contract import causal_attitude_parameters_v2, environment_rest_projected_gravity_v2
+from ...sensor_v2_action import forward_residual_action_contract_v2_from_config
 from .checkpoint import (
     CheckpointIntentV2,
     CheckpointKindV2,
     CheckpointManifestV2,
     architecture_hash_v2,
     canonical_hash_v2,
+    canonical_training_config_hash_v2,
     file_sha256_v2,
     load_checkpoint_v2,
     save_checkpoint_v2,
 )
 from .distillation import SensorDistillationLossWeightsV2, SensorDistillationV2
 from .export import BundleRecordsV2
-from .models import SensorStudentCoreV2, SensorStudentTeacherV2
+from .models import (
+    ACTION_DIM_V2,
+    SENSOR_HISTORY_LENGTH_V2,
+    SensorStudentCoreV2,
+    SensorStudentTeacherV2,
+    pad_main_actions_v2,
+    strict_forward_actions_v2,
+)
 from .ppo import SensorActorCriticV2, SensorPPOBatchV2, SensorPPOV2
 from .schedules import LinearWeightScheduleV2, RolloutMixtureScheduleV2
-from .storage import SensorDistillationBatchV2, SensorDistillationStorageV2
+from .storage import (
+    SensorDistillationBatchV2,
+    SensorDistillationStorageV2,
+    causal_gae_step_v2,
+    causal_transition_mask_v2,
+    clone_observations_v2,
+    has_trainable_history_v2,
+)
 
 
 _TEACHER_CAPABILITIES = frozenset(
@@ -61,13 +75,22 @@ _PPO_CAPABILITIES = frozenset(
         "distilled_actor_exact_bootstrap_v2",
     }
 )
+_ROBUST_PPO_CAPABILITIES = _PPO_CAPABILITIES | frozenset(
+    {"robustness_bootstrap_v2"}
+)
 
-
-def _first(value: Any, fallback: float) -> float:
-    if isinstance(value, (list, tuple)) and value:
-        return float(value[0])
-    return float(fallback)
-
+_TENSORBOARD_ALIASES_V2 = {
+    "Distill/action_loss_main": ("loss/main_drive_huber", "loss/teacher_bc_main"),
+    "Distill/action_loss_abad": ("loss/forward_abad_huber", "loss/teacher_bc_abad"),
+    "Distill/action_mae_main": ("mae/main_drive",),
+    "Distill/action_mae_abad": ("mae/forward_abad",),
+    "Distill/teacher_student_disagreement": (
+        "rollout/teacher_student_disagreement",
+    ),
+    "Estimator/base_vel_rmse_x": ("rmse/base_velocity_x",),
+    "Estimator/base_vel_rmse_y": ("rmse/base_velocity_y",),
+    "Estimator/base_vel_rmse_z": ("rmse/base_velocity_z",),
+}
 
 def _mount_quaternion_wxyz(rpy: Any) -> tuple[float, float, float, float]:
     roll, pitch, yaw = (float(value) for value in rpy)
@@ -95,6 +118,22 @@ def _package_versions() -> dict[str, str]:
     return versions
 
 
+def _environment_provenance_v2(env: Any) -> dict[str, str]:
+    cfg = env.cfg
+    values = {
+        "sensor_dr_profile_id": getattr(cfg, "sensor_dr_profile_id", None),
+        "sensor_dr_profile_sha256": getattr(cfg, "sensor_dr_profile_sha256", None),
+        "sensor_dr_profile_purpose": getattr(cfg, "sensor_dr_profile_purpose", None),
+        "sensor_dr_physical_stage_scale": getattr(
+            cfg, "sensor_dr_physical_stage_scale", None
+        ),
+        "sensor_history_action_gate": getattr(
+            cfg, "sensor_history_action_gate", None
+        ),
+    }
+    return {name: str(value) for name, value in values.items() if value is not None}
+
+
 def _build_bundle_records(env: Any) -> BundleRecordsV2:
     cfg = env.cfg
     attitude_mode = str(cfg.sensor_attitude_mode)
@@ -104,57 +143,36 @@ def _build_bundle_records(env: Any) -> BundleRecordsV2:
             ("quaternion_norm_tolerance", 1.0e-3),
         )
     else:
-        low, high = (float(value) for value in cfg.sensor_accel_norm_gate_mps2)
-        attitude_parameters = (
-            ("accel_correction_gain", float(cfg.sensor_gravity_correction_gain)),
-            ("accel_gate_high_m_s2", high),
-            ("accel_gate_low_m_s2", low),
-            ("gravity_magnitude_m_s2", 9.81),
+        attitude_parameters = causal_attitude_parameters_v2(
+            correction_gain=float(cfg.sensor_gravity_correction_gain),
+            accel_norm_gate_m_s2=cfg.sensor_accel_norm_gate_mps2,
+            gravity_vector_m_s2=getattr(cfg.sim, "gravity", (0.0, 0.0, -9.81)),
         )
     observation = StudentObservationContractV2(
         attitude_mode=attitude_mode,
         imu_frame_id=str(cfg.sensor_imu_frame_id),
         policy_body_frame_id="base_link",
         imu_to_body_wxyz=_mount_quaternion_wxyz(cfg.sensor_imu_mount_rpy_rad),
+        rest_projected_gravity=environment_rest_projected_gravity_v2(env),
         attitude_parameters=attitude_parameters,
     )
 
-    drive_scale = _first(
-        getattr(cfg, "stage_drive_vel_scale", None),
-        getattr(cfg, "main_drive_vel_scale", 8.0),
-    )
-    residual_ratio = _first(
-        getattr(cfg, "stage_forward_policy_drive_residual_scale", None),
-        getattr(cfg, "main_drive_residual_scale", 0.1),
-    )
-    swing_velocity = 2.0 * math.pi * float(getattr(cfg, "swing_velocity_ratio", 1.5))
-    action = ForwardResidualActionContractV2(
-        main_residual_scale_rad_s=drive_scale * residual_ratio,
-        forward_command_reference_m_s=float(getattr(cfg, "drive_bias_vx_ref", 0.45)),
-        forward_bias_scale=_first(
-            getattr(cfg, "stage_forward_bias_scale", None),
-            getattr(cfg, "forward_drive_action_scale", 1.0),
-        ),
-        phase_lock_gain=float(getattr(cfg, "forward_phase_lock_gain", 1.2)),
-        phase_correction_limit_rad_s=2.0,
-        residual_cap_ratio=_first(
-            getattr(cfg, "stage_forward_residual_cap_ratio", None),
-            getattr(cfg, "forward_residual_cap_ratio", 0.26),
-        ),
-        main_velocity_limit_rad_s=max(swing_velocity * 1.5, drive_scale * 1.5),
-    )
+    action = forward_residual_action_contract_v2_from_config(cfg)
     calibration = SensorCalibrationProfileV2.provisional(
         observation,
         action,
         profile_id=str(cfg.calibration_profile_id),
     )
     contract_record = observation.to_dict()
+    versions = _package_versions()
+    versions.update(_environment_provenance_v2(env))
     return BundleRecordsV2(
         contract=contract_record,
         action_contract=action.to_dict(),
         calibration=calibration.to_dict(),
+        training_calibration=calibration.to_dict(),
         feature_layout={"features": contract_record["feature_layout"]},
-        versions=_package_versions(),
+        versions=versions,
     )
 
 
@@ -182,6 +200,8 @@ def _manifest(
         calibration_hash=canonical_hash_v2(records.calibration),
         architecture_hash=architecture_hash_v2(model),
         config_hash=canonical_hash_v2(config),
+        canonical_config_hash=canonical_training_config_hash_v2(config),
+        training_seed=config["seed"],
         action_order=tuple(records.action_contract["action_ordering"]),
         iteration=int(iteration),
         source_checkpoint_hash=source_checkpoint_hash,
@@ -215,12 +235,34 @@ def _assert_shared_contract(actual: CheckpointManifestV2, expected: CheckpointMa
         raise ValueError(f"V2 source checkpoint changes shared contracts: {', '.join(mismatches)}")
 
 
+def _assert_inference_identity(
+    actual: CheckpointManifestV2,
+    expected: CheckpointManifestV2,
+    *,
+    model: torch.nn.Module,
+    allowed_stages: set[str],
+) -> None:
+    """Validate immutable inference identity while ignoring training-only config."""
+
+    _assert_shared_contract(actual, expected)
+    if actual.kind != expected.kind:
+        raise ValueError(
+            f"V2 inference checkpoint kind {actual.kind!r} does not match {expected.kind!r}"
+        )
+    if actual.stage not in allowed_stages:
+        raise ValueError(
+            f"V2 inference checkpoint stage {actual.stage!r} is not in {sorted(allowed_stages)}"
+        )
+    if actual.architecture_hash != architecture_hash_v2(model):
+        raise ValueError("V2 inference checkpoint changes the policy architecture")
+
+
 def _teacher_policy(obs: TensorDict, policy_cfg: dict[str, Any], device: str) -> ActorCritic:
     hidden = policy_cfg.get("teacher_hidden_dims", policy_cfg.get("actor_hidden_dims", [256, 128, 128]))
     normalization = bool(
         policy_cfg.get("teacher_obs_normalization", policy_cfg.get("actor_obs_normalization", True))
     )
-    return ActorCritic(
+    return StrictForwardTeacherActorCriticV2(
         obs,
         {
             "policy": ["teacher_physical_v2"],
@@ -236,6 +278,64 @@ def _teacher_policy(obs: TensorDict, policy_cfg: dict[str, Any], device: str) ->
     ).to(device)
 
 
+class StrictForwardTeacherActorCriticV2(ActorCritic):
+    """Stock-RSL-compatible teacher with only six stochastic main actions.
+
+    The environment and hardware contract expose a 12-D public action for
+    compatibility, but ABAD is fixed to zero throughout forward F0--F5.  This
+    class keeps PPO log-probability, entropy, and KL strictly six-dimensional,
+    while padding the public action and distribution statistics to the 12-D
+    storage shape expected by RSL-RL.
+    """
+
+    def __init__(
+        self,
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+        num_actions: int,
+        **kwargs: Any,
+    ) -> None:
+        if int(num_actions) != ACTION_DIM_V2:
+            raise ValueError(
+                f"Teacher V2 requires a {ACTION_DIM_V2}-D public action contract"
+            )
+        if bool(kwargs.get("state_dependent_std", False)):
+            raise ValueError("Teacher V2 does not support state-dependent action noise")
+        super().__init__(
+            obs,
+            obs_groups,
+            ACTION_DIM_V2 // 2,
+            **kwargs,
+        )
+
+    def act(self, obs: TensorDict, **kwargs: Any) -> torch.Tensor:
+        return pad_main_actions_v2(super().act(obs, **kwargs))
+
+    def act_inference(self, obs: TensorDict) -> torch.Tensor:
+        return pad_main_actions_v2(super().act_inference(obs))
+
+    def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
+        if actions.shape[-1] != ACTION_DIM_V2:
+            raise ValueError(
+                f"Teacher V2 actions must end in dimension {ACTION_DIM_V2}"
+            )
+        return self.distribution.log_prob(actions[..., : ACTION_DIM_V2 // 2]).sum(
+            dim=-1
+        )
+
+    @property
+    def action_mean(self) -> torch.Tensor:
+        return pad_main_actions_v2(self.distribution.mean)
+
+    @property
+    def action_std(self) -> torch.Tensor:
+        main = self.distribution.stddev
+        # RSL-RL computes KL over its public 12-D storage tensors.  Constant
+        # unit dummy statistics make each deterministic ABAD contribution
+        # exactly zero without introducing division-by-zero or NaN.
+        return torch.cat((main, torch.ones_like(main)), dim=-1)
+
+
 class _TeacherInferenceAdapter(torch.nn.Module):
     """Expose a stock TensorDict teacher as a one-tensor inference module."""
 
@@ -245,18 +345,61 @@ class _TeacherInferenceAdapter(torch.nn.Module):
 
     def act_inference(self, privileged_observation: torch.Tensor) -> torch.Tensor:
         normalized = self.policy.actor_obs_normalizer(privileged_observation)
-        return self.policy.actor(normalized)
+        return pad_main_actions_v2(self.policy.actor(normalized))
 
 
 class VersionedTeacherBackendV2(OnPolicyRunner):
     sensor_v2_capabilities = _TEACHER_CAPABILITIES
 
     def __init__(self, env: Any, config: dict[str, Any], *, log_dir: str | None, device: str) -> None:
+        if not hasattr(env.cfg, "sensor_history_action_gate"):
+            raise ValueError("F1 Teacher V2 requires the Sensor V2 environment contract")
+        # Teacher A observes privileged instantaneous state, not sensor history.
+        # Leaving the student warmup gate enabled would make PPO assign the
+        # sampled-action log probability to a zero residual actually executed
+        # for the first 60 samples of every episode.
+        env.cfg.sensor_history_action_gate = False
         self._manifest_config = copy.deepcopy(config)
         self._base_records = _build_bundle_records(env)
         self.checkpoint_manifest: CheckpointManifestV2 | None = None
         self.bundle_records = self._base_records
+        self._teacher_learn_active = False
+        self._teacher_learn_has_iterations = False
         super().__init__(env, copy.deepcopy(config), log_dir=log_dir, device=device)
+
+    def _construct_algorithm(self, obs: TensorDict):
+        """Construct stock PPO around the strict six-stochastic-action policy."""
+
+        from rsl_rl.algorithms import PPO
+
+        policy_class = self.policy_cfg.pop("class_name")
+        if policy_class != "StrictForwardTeacherActorCriticV2":
+            raise ValueError(
+                "F1 Teacher V2 requires StrictForwardTeacherActorCriticV2"
+            )
+        actor_critic = StrictForwardTeacherActorCriticV2(
+            obs,
+            self.cfg["obs_groups"],
+            self.env.num_actions,
+            **self.policy_cfg,
+        ).to(self.device)
+        algorithm_class = self.alg_cfg.pop("class_name")
+        if algorithm_class != "PPO":
+            raise ValueError("F1 Teacher V2 supports only the stock PPO objective")
+        algorithm = PPO(
+            actor_critic,
+            device=self.device,
+            **self.alg_cfg,
+            multi_gpu_cfg=self.multi_gpu_cfg,
+        )
+        algorithm.init_storage(
+            "rl",
+            self.env.num_envs,
+            self.num_steps_per_env,
+            obs,
+            [self.env.num_actions],
+        )
+        return algorithm
 
     @property
     def _stage(self) -> str:
@@ -276,8 +419,30 @@ class VersionedTeacherBackendV2(OnPolicyRunner):
             iteration=iteration,
         )
 
+    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+        """Adapt RSL-RL's completed-index cursor to the V2 next-update cursor."""
+
+        count = int(num_learning_iterations)
+        if count < 0:
+            raise ValueError("num_learning_iterations must be non-negative")
+        start = self.current_learning_iteration
+        self._teacher_learn_active = True
+        self._teacher_learn_has_iterations = count > 0
+        try:
+            super().learn(count, init_at_random_ep_len=init_at_random_ep_len)
+        except BaseException:
+            raise
+        else:
+            self.current_learning_iteration = start + count
+        finally:
+            self._teacher_learn_active = False
+            self._teacher_learn_has_iterations = False
+
     def save(self, path: str, infos: dict | None = None) -> None:
-        manifest = self._expected_manifest(self.current_learning_iteration)
+        checkpoint_iteration = self.current_learning_iteration + int(
+            self._teacher_learn_active and self._teacher_learn_has_iterations
+        )
+        manifest = self._expected_manifest(checkpoint_iteration)
         self.checkpoint_manifest = manifest
         self.bundle_records = _records_with_manifest(self._base_records, manifest)
         save_checkpoint_v2(
@@ -285,7 +450,7 @@ class VersionedTeacherBackendV2(OnPolicyRunner):
             manifest=manifest,
             model=self.alg.policy,
             optimizer=self.alg.optimizer,
-            update=self.current_learning_iteration,
+            update=checkpoint_iteration,
             extra_state={
                 "infos": infos,
                 "bundle_records": asdict(self.bundle_records),
@@ -317,6 +482,26 @@ class VersionedTeacherBackendV2(OnPolicyRunner):
         self.tot_time = float(extra.get("tot_time", 0.0))
         return extra.get("infos")
 
+    def load_inference_v2(self, path: str, map_location: str | None = None) -> None:
+        expected = self._expected_manifest(0)
+        manifest, payload = load_checkpoint_v2(
+            path,
+            model=self.alg.policy,
+            intent=CheckpointIntentV2.INFERENCE,
+            map_location=map_location or self.device,
+        )
+        _assert_inference_identity(
+            manifest,
+            expected,
+            model=self.alg.policy,
+            allowed_stages={self._stage},
+        )
+        self.current_learning_iteration = manifest.iteration
+        self.checkpoint_manifest = manifest
+        self.bundle_records = _restore_records(
+            payload, _records_with_manifest(self._base_records, manifest)
+        )
+
     def get_exportable_actor(self) -> torch.nn.Module:
         return self.alg.policy
 
@@ -329,6 +514,11 @@ class _CustomRunnerV2:
     def __init__(self, env: Any, config: dict[str, Any], *, log_dir: str | None, device: str) -> None:
         self.env = env
         self.cfg = copy.deepcopy(config)
+        environment_provenance = _environment_provenance_v2(env)
+        if environment_provenance:
+            # The checkpoint config hash must bind the F4 profile even though
+            # its numerical ranges belong to the environment, not the actor.
+            self.cfg["environment_provenance_v2"] = environment_provenance
         self.device = device
         self.log_dir = log_dir
         self.num_steps_per_env = int(config["num_steps_per_env"])
@@ -352,10 +542,43 @@ class _CustomRunnerV2:
 
             self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
 
-    def _randomize_episode_lengths(self) -> None:
-        self.env.episode_length_buf = torch.randint_like(
-            self.env.episode_length_buf,
-            high=int(self.env.max_episode_length),
+    @staticmethod
+    def _history_ready_mask(observations: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        """Return the per-environment actor-history validity mask."""
+
+        try:
+            ready = observations["history_ready_v2"]
+        except KeyError as exc:
+            raise KeyError("Sensor V2 runner requires history_ready_v2") from exc
+        if ready.ndim == 2 and ready.shape[-1] == 1:
+            ready = ready[:, 0]
+        if ready.ndim != 1:
+            raise ValueError(
+                "history_ready_v2 must have shape [num_envs] or [num_envs,1]; "
+                f"got {tuple(ready.shape)}"
+            )
+        return ready > 0.5
+
+    def _warm_sensor_history(self, observations: Any) -> Any:
+        """Let every environment independently reach a full causal history once."""
+
+        obs = observations
+        maximum_steps = SENSOR_HISTORY_LENGTH_V2 * 10
+        zero_actions = torch.zeros(
+            self.env.num_envs,
+            ACTION_DIM_V2,
+            device=self.env.device,
+        )
+        for _ in range(maximum_steps + 1):
+            ready = self._history_ready_mask(obs)
+            if has_trainable_history_v2(ready):
+                return obs
+            with torch.no_grad():
+                obs, _, _, _ = self.env.step(zero_actions)
+                obs = obs.to(self.device)
+        raise RuntimeError(
+            "Sensor V2 could not accumulate one complete physical history before "
+            f"learning after {maximum_steps} steps"
         )
 
     def _write_metrics(
@@ -369,6 +592,10 @@ class _CustomRunnerV2:
         if self.writer is not None:
             for name, value in metrics.items():
                 self.writer.add_scalar(name, value, iteration)
+            for alias, sources in _TENSORBOARD_ALIASES_V2.items():
+                source = next((name for name in sources if name in metrics), None)
+                if source is not None:
+                    self.writer.add_scalar(alias, metrics[source], iteration)
             self.writer.add_scalar("Train/mean_reward", reward_mean, iteration)
             self.writer.add_scalar("Perf/iteration_time", elapsed, iteration)
         compact = " ".join(
@@ -379,6 +606,21 @@ class _CustomRunnerV2:
             f"reward={reward_mean:.4f} time={elapsed:.3f}s {compact}",
             flush=True,
         )
+
+    @staticmethod
+    def _collect_sensor_dr_extras(
+        extras: Mapping[str, Any], values: dict[str, list[float]]
+    ) -> None:
+        log_values = extras.get("log")
+        if not isinstance(log_values, Mapping):
+            return
+        for name, raw in log_values.items():
+            if not str(name).startswith("SensorDR/"):
+                continue
+            tensor = torch.as_tensor(raw).detach().float()
+            if tensor.numel() == 0 or not bool(torch.isfinite(tensor).all()):
+                continue
+            values[str(name)].append(float(tensor.mean().item()))
 
     def _expected_manifest(self, model: torch.nn.Module, iteration: int) -> CheckpointManifestV2:
         return _manifest(
@@ -453,6 +695,12 @@ class SensorDistillationBackendV2(_CustomRunnerV2):
             weights=weights,
         )
         self.num_learning_epochs = int(algorithm_cfg["num_learning_epochs"])
+        self.num_mini_batches = int(algorithm_cfg.get("num_mini_batches", 4))
+        if self.num_mini_batches <= 0:
+            raise ValueError("num_mini_batches must be positive")
+        self.max_mini_batch_size = int(algorithm_cfg.get("max_mini_batch_size", 2048))
+        if self.max_mini_batch_size <= 0:
+            raise ValueError("max_mini_batch_size must be positive")
         self.schedule = RolloutMixtureScheduleV2(
             total_updates=self.total_updates,
             anneal_fraction=float(algorithm_cfg["rollout_anneal_fraction"]),
@@ -487,8 +735,11 @@ class SensorDistillationBackendV2(_CustomRunnerV2):
             raise ValueError("F2 requires a strict Teacher A checkpoint loaded with --teacher_checkpoint")
         self._prepare_writer()
         if init_at_random_ep_len:
-            self._randomize_episode_lengths()
-        obs = self.env.get_observations().to(self.device)
+            print(
+                "[INFO] Sensor V2 preserves the coherent reset CPG phase; "
+                "random episode-age initialization is disabled."
+            )
+        obs = self._warm_sensor_history(self.env.get_observations().to(self.device))
         start = self.current_learning_iteration
         stop = start + int(num_learning_iterations)
         for iteration in range(start, stop):
@@ -498,12 +749,25 @@ class SensorDistillationBackendV2(_CustomRunnerV2):
                 device=self.device,
             )
             rewards_seen = []
+            sensor_dr_metrics: dict[str, list[float]] = defaultdict(list)
             beta, noise_std = self.schedule.value(iteration)
             for _ in range(self.num_steps_per_env):
-                history = obs["sensor_history_v2"]
-                command = obs["command_v2"]
-                privileged = obs["teacher_physical_v2"]
-                self.student.update_normalization(history, command)
+                rollout_obs = clone_observations_v2(
+                    obs,
+                    (
+                        "sensor_history_v2",
+                        "command_v2",
+                        "teacher_physical_v2",
+                        "aux_base_vel_target",
+                        "history_ready_v2",
+                    ),
+                )
+                history = rollout_obs["sensor_history_v2"]
+                command = rollout_obs["command_v2"]
+                privileged = rollout_obs["teacher_physical_v2"]
+                ready = self._history_ready_mask(rollout_obs)
+                if bool(ready.any()):
+                    self.student.update_normalization(history[ready], command[ready])
                 with torch.no_grad():
                     actions = self.model.rollout(
                         history,
@@ -512,34 +776,74 @@ class SensorDistillationBackendV2(_CustomRunnerV2):
                         beta=beta,
                         noise_std=noise_std,
                     )
-                    next_obs, rewards, dones, _ = self.env.step(actions.executed.to(self.env.device))
-                    next_obs = next_obs.to(self.device)
-                    storage.add(
-                        SensorDistillationBatchV2(
-                            sensor_history=history,
-                            command=command,
-                            teacher_actions=actions.teacher,
-                            student_actions=actions.student,
-                            executed_actions=actions.executed,
-                            base_velocity_target=obs["aux_base_vel_target"],
-                            next_sensor_frame_target=next_obs["sensor_frame_v2"],
-                            terminal=dones.to(self.device),
-                        )
+                    next_obs, rewards, dones, extras = self.env.step(
+                        actions.executed.to(self.env.device)
                     )
+                    self._collect_sensor_dr_extras(extras, sensor_dr_metrics)
+                    next_obs = next_obs.to(self.device)
+                    next_ready = self._history_ready_mask(next_obs)
+                    transition_valid = causal_transition_mask_v2(
+                        dones.to(self.device),
+                        next_ready,
+                    )
+                    if bool(ready.any()):
+                        storage.add(
+                            SensorDistillationBatchV2(
+                                sensor_history=history[ready],
+                                command=command[ready],
+                                teacher_actions=actions.teacher[ready],
+                                student_actions=actions.student[ready],
+                                executed_actions=actions.executed[ready],
+                                base_velocity_target=rollout_obs["aux_base_vel_target"][ready],
+                                next_sensor_frame_target=next_obs["sensor_frame_v2"][ready],
+                                terminal=~transition_valid[ready],
+                            )
+                        )
                 rewards_seen.append(rewards.to(self.device))
                 obs = next_obs
             metric_lists: dict[str, list[float]] = defaultdict(list)
+            if storage.size == 0:
+                raise RuntimeError(
+                    "Sensor V2 F2 rollout contained no complete physical histories"
+                )
             for _ in range(self.num_learning_epochs):
-                for name, value in self.algorithm.update(storage.batch()).items():
-                    metric_lists[name].append(value)
+                for mini_batch in storage.mini_batches(
+                    self.num_mini_batches,
+                    max_batch_size=self.max_mini_batch_size,
+                ):
+                    for name, value in self.algorithm.update(mini_batch).items():
+                        metric_lists[name].append(value)
             metrics = {name: sum(values) / len(values) for name, values in metric_lists.items()}
+            metrics.update(
+                {
+                    name: sum(values) / len(values)
+                    for name, values in sensor_dr_metrics.items()
+                    if values
+                }
+            )
+            metrics["rollout/history_ready_fraction"] = storage.size / float(
+                self.num_steps_per_env * self.env.num_envs
+            )
             metrics["rollout/teacher_coefficient"] = beta
             metrics["rollout/noise_std"] = noise_std
             reward_mean = float(torch.cat([value.reshape(-1) for value in rewards_seen]).mean().item())
-            self.current_learning_iteration = iteration
-            self._write_metrics(metrics, iteration=iteration, reward_mean=reward_mean, elapsed=time.time() - tick)
-            if self.log_dir is not None and iteration % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"))
+            self.current_learning_iteration = iteration + 1
+            self._write_metrics(
+                metrics,
+                iteration=self.current_learning_iteration,
+                reward_mean=reward_mean,
+                elapsed=time.time() - tick,
+            )
+            if (
+                self.log_dir is not None
+                and self.current_learning_iteration % self.save_interval == 0
+            ):
+                self.save(
+                    os.path.join(
+                        self.log_dir,
+                        f"model_{self.current_learning_iteration}.pt",
+                    )
+                )
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
         self._finish()
@@ -574,6 +878,29 @@ class SensorDistillationBackendV2(_CustomRunnerV2):
         self.checkpoint_manifest = manifest
         self.bundle_records = _restore_records(payload, _records_with_manifest(self._base_records, manifest))
 
+    def load_inference_v2(self, path: str, map_location: str | None = None) -> None:
+        expected = self._expected_manifest(self.student, 0)
+        manifest, payload = load_checkpoint_v2(
+            path,
+            model=self.student,
+            intent=CheckpointIntentV2.INFERENCE,
+            map_location=map_location or self.device,
+        )
+        _assert_inference_identity(
+            manifest,
+            expected,
+            model=self.student,
+            allowed_stages={"distillation_f2"},
+        )
+        self.current_learning_iteration = manifest.iteration
+        self.source_checkpoint_hash = manifest.source_checkpoint_hash
+        self.source_checkpoint_kind = manifest.source_checkpoint_kind
+        self.teacher_loaded = True
+        self.checkpoint_manifest = manifest
+        self.bundle_records = _restore_records(
+            payload, _records_with_manifest(self._base_records, manifest)
+        )
+
     def get_inference_policy(self, device: str | None = None):
         if device is not None:
             self.student.to(device)
@@ -596,6 +923,8 @@ class SensorOnPolicyBackendV2(_CustomRunnerV2):
         algorithm_cfg = copy.deepcopy(config["algorithm"])
         policy_cfg.pop("class_name", None)
         algorithm_cfg.pop("class_name", None)
+        if str(algorithm_cfg.get("schedule", "fixed")) != "fixed":
+            raise ValueError("SensorPPOV2 supports only a fixed learning rate; adaptive KL is not implemented")
         self.policy = SensorActorCriticV2(
             critic_observation_dim=int(obs["critic_privileged_v2"].shape[-1]),
             critic_hidden_dims=tuple(policy_cfg["critic_hidden_dims"]),
@@ -665,11 +994,16 @@ class SensorOnPolicyBackendV2(_CustomRunnerV2):
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         if not self.student_loaded:
-            raise ValueError("F3 requires a distilled checkpoint loaded with --student_checkpoint")
+            raise ValueError(
+                f"{self.stage} requires its strict bootstrap checkpoint before learning"
+            )
         self._prepare_writer()
         if init_at_random_ep_len:
-            self._randomize_episode_lengths()
-        obs = self.env.get_observations().to(self.device)
+            print(
+                "[INFO] Sensor V2 preserves the coherent reset CPG phase; "
+                "random episode-age initialization is disabled."
+            )
+        obs = self._warm_sensor_history(self.env.get_observations().to(self.device))
         start = self.current_learning_iteration
         stop = start + int(num_learning_iterations)
         observation_names = (
@@ -688,60 +1022,101 @@ class SensorOnPolicyBackendV2(_CustomRunnerV2):
             teacher_actions: list[torch.Tensor] = []
             velocity_targets: list[torch.Tensor] = []
             next_frame_targets: list[torch.Tensor] = []
+            history_ready_seen: list[torch.Tensor] = []
+            next_history_ready_seen: list[torch.Tensor] = []
+            sensor_dr_metrics: dict[str, list[float]] = defaultdict(list)
             for _ in range(self.num_steps_per_env):
-                self.policy.update_normalization(obs)
+                rollout_obs = clone_observations_v2(
+                    obs,
+                    (
+                        *observation_names,
+                        "teacher_physical_v2",
+                        "aux_base_vel_target",
+                        "history_ready_v2",
+                    ),
+                )
+                ready = self._history_ready_mask(rollout_obs)
                 with torch.no_grad():
-                    actions = self.policy.act(obs)
+                    actions = self.policy.act(rollout_obs)
                     log_probability = self.policy.get_actions_log_prob(actions)
-                    value = self.policy.evaluate(obs)
-                    teacher_action = self.teacher.act_inference(obs["teacher_physical_v2"])
+                    value = self.policy.evaluate(rollout_obs)
+                    teacher_action = strict_forward_actions_v2(
+                        self.teacher.act_inference(rollout_obs["teacher_physical_v2"])
+                    )
                     next_obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     next_obs = next_obs.to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
+                    next_ready = self._history_ready_mask(next_obs)
                     time_outs = extras.get("time_outs")
                     if time_outs is not None:
                         rewards = rewards + self.gamma * value.squeeze(-1) * time_outs.to(self.device).float()
+                    self._collect_sensor_dr_extras(extras, sensor_dr_metrics)
                 for name in observation_names:
-                    observations[name].append(obs[name])
+                    observations[name].append(rollout_obs[name])
                 actions_seen.append(actions)
                 log_probabilities.append(log_probability)
                 values.append(value)
                 rewards_seen.append(rewards)
                 dones_seen.append(dones)
                 teacher_actions.append(teacher_action)
-                velocity_targets.append(obs["aux_base_vel_target"])
-                next_frame_targets.append(next_obs["sensor_frame_v2"])
+                velocity_targets.append(rollout_obs["aux_base_vel_target"])
+                next_frame_targets.append(next_obs["sensor_frame_v2"].detach().clone())
+                history_ready_seen.append(ready)
+                next_history_ready_seen.append(next_ready)
                 obs = next_obs
 
             with torch.no_grad():
                 next_value = self.policy.evaluate(obs)
             reward_tensor = torch.stack(rewards_seen).unsqueeze(-1)
             done_tensor = torch.stack(dones_seen).unsqueeze(-1).float()
+            history_ready_tensor = torch.stack(history_ready_seen).unsqueeze(-1)
+            next_history_ready_tensor = torch.stack(next_history_ready_seen).unsqueeze(-1)
+            transition_valid_tensor = causal_transition_mask_v2(
+                done_tensor,
+                next_history_ready_tensor,
+            )
             value_tensor = torch.stack(values)
             returns = torch.zeros_like(value_tensor)
             advantage = torch.zeros_like(next_value)
             for step in reversed(range(self.num_steps_per_env)):
                 following_value = next_value if step == self.num_steps_per_env - 1 else value_tensor[step + 1]
-                not_terminal = 1.0 - done_tensor[step]
-                delta = reward_tensor[step] + self.gamma * not_terminal * following_value - value_tensor[step]
-                advantage = delta + self.gamma * self.lam * not_terminal * advantage
-                returns[step] = advantage + value_tensor[step]
+                returns[step], advantage = causal_gae_step_v2(
+                    reward=reward_tensor[step],
+                    value=value_tensor[step],
+                    following_value=following_value,
+                    following_advantage=advantage,
+                    current_ready=history_ready_tensor[step],
+                    transition_valid=transition_valid_tensor[step],
+                    gamma=self.gamma,
+                    lam=self.lam,
+                )
             advantages = returns - value_tensor
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1.0e-8)
 
-            flat_obs = self._flatten_observations(observations)
-            flat = {
-                "actions": torch.stack(actions_seen).flatten(0, 1),
-                "log_probabilities": torch.stack(log_probabilities).flatten(0, 1),
-                "values": value_tensor.flatten(0, 1),
-                "advantages": advantages.flatten(0, 1),
-                "returns": returns.flatten(0, 1),
-                "teacher_actions": torch.stack(teacher_actions).flatten(0, 1),
-                "velocity_targets": torch.stack(velocity_targets).flatten(0, 1),
-                "next_frame_targets": torch.stack(next_frame_targets).flatten(0, 1),
-                "terminal": torch.stack(dones_seen).flatten(0, 1),
+            ready_flat = history_ready_tensor.flatten().bool()
+            ready_count = int(ready_flat.sum().item())
+            if ready_count == 0:
+                raise RuntimeError(
+                    "Sensor V2 PPO rollout contained no complete physical histories"
+                )
+            flat_obs = {
+                name: value[ready_flat]
+                for name, value in self._flatten_observations(observations).items()
             }
+            flat = {
+                "actions": torch.stack(actions_seen).flatten(0, 1)[ready_flat],
+                "log_probabilities": torch.stack(log_probabilities).flatten(0, 1)[ready_flat],
+                "values": value_tensor.flatten(0, 1)[ready_flat],
+                "advantages": advantages.flatten(0, 1)[ready_flat],
+                "returns": returns.flatten(0, 1)[ready_flat],
+                "teacher_actions": torch.stack(teacher_actions).flatten(0, 1)[ready_flat],
+                "velocity_targets": torch.stack(velocity_targets).flatten(0, 1)[ready_flat],
+                "next_frame_targets": torch.stack(next_frame_targets).flatten(0, 1)[ready_flat],
+                "terminal": (~transition_valid_tensor).flatten(0, 1)[ready_flat],
+            }
+            flat["advantages"] = (
+                flat["advantages"] - flat["advantages"].mean()
+            ) / (flat["advantages"].std(unbiased=False) + 1.0e-8)
             batch_size = flat["actions"].shape[0]
             mini_batch_count = min(self.num_mini_batches, batch_size)
             mini_batch_size = batch_size // mini_batch_count
@@ -770,12 +1145,46 @@ class SensorOnPolicyBackendV2(_CustomRunnerV2):
                         teacher_bc_coefficient=bc_coefficient,
                     ).items():
                         metric_lists[name].append(value)
+            # Keep normalization frozen from action sampling through all PPO
+            # epochs.  Updating it during collection would make the stored old
+            # log-probability and the recomputed log-probability use different
+            # input transforms, corrupting the importance ratio.  The complete
+            # ready-only rollout becomes the normalization state for the next
+            # iteration after the current update is finished.
+            self.policy.update_normalization(flat_obs)
             metrics = {name: sum(values) / len(values) for name, values in metric_lists.items()}
+            metrics.update(
+                {
+                    name: sum(values) / len(values)
+                    for name, values in sensor_dr_metrics.items()
+                    if values
+                }
+            )
+            metrics["rollout/history_ready_fraction"] = ready_count / float(
+                self.num_steps_per_env * self.env.num_envs
+            )
+            metrics["policy/main_action_noise_std"] = float(
+                self.policy.main_action_std.detach().mean().item()
+            )
+            metrics["policy/initial_main_action_noise_std"] = self.policy.initial_noise_std
             reward_mean = float(reward_tensor.mean().item())
-            self.current_learning_iteration = iteration
-            self._write_metrics(metrics, iteration=iteration, reward_mean=reward_mean, elapsed=time.time() - tick)
-            if self.log_dir is not None and iteration % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, f"model_{iteration}.pt"))
+            self.current_learning_iteration = iteration + 1
+            self._write_metrics(
+                metrics,
+                iteration=self.current_learning_iteration,
+                reward_mean=reward_mean,
+                elapsed=time.time() - tick,
+            )
+            if (
+                self.log_dir is not None
+                and self.current_learning_iteration % self.save_interval == 0
+            ):
+                self.save(
+                    os.path.join(
+                        self.log_dir,
+                        f"model_{self.current_learning_iteration}.pt",
+                    )
+                )
         if self.log_dir is not None:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
         self._finish()
@@ -810,6 +1219,30 @@ class SensorOnPolicyBackendV2(_CustomRunnerV2):
         self.checkpoint_manifest = manifest
         self.bundle_records = _restore_records(payload, _records_with_manifest(self._base_records, manifest))
 
+    def load_inference_v2(self, path: str, map_location: str | None = None) -> None:
+        expected = self._expected_manifest(self.policy, 0)
+        manifest, payload = load_checkpoint_v2(
+            path,
+            model=self.policy,
+            intent=CheckpointIntentV2.INFERENCE,
+            map_location=map_location or self.device,
+        )
+        allowed_stages = {"ppo_f3"} if self.stage == "ppo_f3" else {"ppo_f3", "ppo_f4"}
+        _assert_inference_identity(
+            manifest,
+            expected,
+            model=self.policy,
+            allowed_stages=allowed_stages,
+        )
+        self.current_learning_iteration = manifest.iteration
+        self.source_checkpoint_hash = manifest.source_checkpoint_hash
+        self.source_checkpoint_kind = manifest.source_checkpoint_kind
+        self.student_loaded = True
+        self.checkpoint_manifest = manifest
+        self.bundle_records = _restore_records(
+            payload, _records_with_manifest(self._base_records, manifest)
+        )
+
     def get_inference_policy(self, device: str | None = None):
         if device is not None:
             self.policy.to(device)
@@ -820,6 +1253,37 @@ class SensorOnPolicyBackendV2(_CustomRunnerV2):
         return self.policy.actor
 
 
+class SensorRobustnessBackendV2(SensorOnPolicyBackendV2):
+    """F4 continuation with a fresh optimizer and evidence-profiled environment."""
+
+    sensor_v2_capabilities = _ROBUST_PPO_CAPABILITIES
+    stage = "ppo_f4"
+
+    def bootstrap_robustness_v2(self, path: str) -> None:
+        manifest, payload = load_checkpoint_v2(
+            path,
+            model=self.policy,
+            intent=CheckpointIntentV2.ROBUSTNESS_BOOTSTRAP,
+            map_location=self.device,
+        )
+        expected = self._expected_manifest(self.policy, 0)
+        _assert_shared_contract(manifest, expected)
+        if manifest.architecture_hash != architecture_hash_v2(self.policy):
+            raise ValueError("F4 source checkpoint changes the Sensor V2 policy architecture")
+        if manifest.stage not in {"ppo_f3", "ppo_f4"}:
+            raise ValueError(
+                "F4 accepts only an F3 PPO checkpoint or an earlier F4 curriculum checkpoint"
+            )
+        teacher_state = payload.get("extra_state", {}).get("teacher_state_dict")
+        if not isinstance(teacher_state, dict):
+            raise ValueError("F4 source checkpoint is missing the frozen Teacher A state")
+        self.teacher_policy.load_state_dict(teacher_state, strict=True)
+        self.source_checkpoint_hash = file_sha256_v2(path)
+        self.source_checkpoint_kind = manifest.kind
+        self.current_learning_iteration = 0
+        self.student_loaded = True
+
+
 def backend_factories_v2() -> dict[str, Any]:
     """Return the exact backend allowlist consumed by the outer runner factory."""
 
@@ -827,4 +1291,5 @@ def backend_factories_v2() -> dict[str, Any]:
         "VersionedTeacherRunnerV2": VersionedTeacherBackendV2,
         "SensorDistillationRunnerV2": SensorDistillationBackendV2,
         "SensorOnPolicyRunnerV2": SensorOnPolicyBackendV2,
+        "SensorRobustnessRunnerV2": SensorRobustnessBackendV2,
     }

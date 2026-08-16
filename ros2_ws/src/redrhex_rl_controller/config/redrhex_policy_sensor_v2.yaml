@@ -11,6 +11,7 @@ redrhex_rl_controller_v2:
       expected_contract_hash: "UNVERIFIED"
       expected_action_contract_hash: "UNVERIFIED"
       expected_calibration_hash: "UNVERIFIED"
+      expected_checkpoint_hash: "UNVERIFIED"
 
     observation:
       sensor_frame_dim: 36
@@ -30,8 +31,12 @@ redrhex_rl_controller_v2:
       expected_rest_projected_gravity: [0.0, 0.0, -1.0]
       quaternion_norm_tolerance: 0.02
       causal_accel_correction_gain: 0.02
+      accel_magnitude_tolerance_ratio: 0.25
+      gravity_magnitude_m_s2: 9.80665
       sensor_timeout_s: 0.10
       min_channel_period_s: 0.001
+      max_sensor_source_skew_s: 0.008333333333333333
+      max_history_period_error_ratio: 0.25
       command_timeout_s: 0.25
 
     calibration:
@@ -67,8 +72,21 @@ redrhex_rl_controller_v2:
       max_abs_roll_rad: 0.7
       max_abs_pitch_rad: 0.7
       action_clip: 1.0
-      main_drive_vel_limit_rad_s: 30.0
+      # This conservative, unverified hardware limit is below the current
+      # 15 rad/s bundle contract.  Preflight and the runtime motor gate must
+      # therefore remain blocked until hardware evidence justifies alignment
+      # or a 9 rad/s policy is retrained and revalidated.
+      main_drive_vel_limit_rad_s: 9.0
+      main_drive_slew_rate_rad_s2: 120.0
       abad_pos_limit_rad: 0.7
+
+    commands:
+      vx_min: 0.0
+      vx_max: 0.56
+      vy_min: -0.08
+      vy_max: 0.08
+      wz_min: -0.10
+      wz_max: 0.10
 
     hardware_gate:
       # Code support is intentionally deploy-disabled until recorded evidence

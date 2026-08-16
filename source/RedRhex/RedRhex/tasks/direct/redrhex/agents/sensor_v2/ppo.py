@@ -11,7 +11,17 @@ from torch.distributions import Normal
 from torch.nn import functional as F
 
 from .distillation import SensorDistillationLossWeightsV2, _masked_huber
-from .models import ACTION_DIM_V2, MAIN_ACTION_DIM_V2, SensorStudentCoreV2
+from .models import (
+    ACTION_DIM_V2,
+    MAIN_ACTION_DIM_V2,
+    SensorStudentCoreV2,
+    pad_main_actions_v2,
+    strict_forward_actions_v2,
+)
+
+
+INITIAL_MAIN_ACTION_NOISE_STD_V2 = 0.05
+MAX_INITIAL_MAIN_ACTION_NOISE_STD_V2 = 0.10
 
 
 def _observation(observations: Mapping[str, torch.Tensor], name: str) -> torch.Tensor:
@@ -32,13 +42,17 @@ class SensorActorCriticV2(nn.Module):
         *,
         student: SensorStudentCoreV2 | None = None,
         critic_hidden_dims: tuple[int, ...] = (256, 128, 128),
-        init_noise_std: float = 0.55,
+        init_noise_std: float = INITIAL_MAIN_ACTION_NOISE_STD_V2,
     ) -> None:
         super().__init__()
         if critic_observation_dim <= 0:
             raise ValueError("critic_observation_dim must be positive")
-        if init_noise_std <= 0.0:
-            raise ValueError("init_noise_std must be positive")
+        if not 0.0 < init_noise_std <= MAX_INITIAL_MAIN_ACTION_NOISE_STD_V2:
+            raise ValueError(
+                "init_noise_std must be positive and at most "
+                f"{MAX_INITIAL_MAIN_ACTION_NOISE_STD_V2} for strict-forward Sensor PPO V2"
+            )
+        self.initial_noise_std = float(init_noise_std)
         self.actor = student if student is not None else SensorStudentCoreV2()
         layers: list[nn.Module] = []
         input_dim = critic_observation_dim
@@ -47,7 +61,7 @@ class SensorActorCriticV2(nn.Module):
             input_dim = output_dim
         layers.append(nn.Linear(input_dim, 1))
         self.critic = nn.Sequential(*layers)
-        self.std = nn.Parameter(torch.full((ACTION_DIM_V2,), float(init_noise_std)))
+        self.std = nn.Parameter(torch.full((MAIN_ACTION_DIM_V2,), self.initial_noise_std))
         self.distribution: Normal | None = None
 
     @staticmethod
@@ -58,15 +72,15 @@ class SensorActorCriticV2(nn.Module):
 
     def update_distribution(self, observations: Mapping[str, torch.Tensor]) -> None:
         history, command = self._actor_inputs(observations)
-        mean = self.actor.act(history, command)
+        mean = self.actor.act(history, command)[..., :MAIN_ACTION_DIM_V2]
         # A small positive floor prevents an invalid distribution if optimizer
         # momentum briefly drives a learned standard deviation through zero.
-        self.distribution = Normal(mean, self.std.abs().clamp_min(1.0e-6).expand_as(mean))
+        self.distribution = Normal(mean, self.main_action_std.expand_as(mean))
 
     def act(self, observations: Mapping[str, torch.Tensor], **_: object) -> torch.Tensor:
         self.update_distribution(observations)
         assert self.distribution is not None
-        return self.distribution.sample()
+        return pad_main_actions_v2(self.distribution.sample())
 
     def act_inference(self, observations: Mapping[str, torch.Tensor]) -> torch.Tensor:
         history, command = self._actor_inputs(observations)
@@ -79,19 +93,25 @@ class SensorActorCriticV2(nn.Module):
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         if self.distribution is None:
             raise RuntimeError("call act or update_distribution before requesting action log probability")
-        return self.distribution.log_prob(actions).sum(dim=-1)
+        if actions.ndim < 2 or actions.shape[-1] != ACTION_DIM_V2:
+            raise ValueError(f"actions must end in dimension {ACTION_DIM_V2}; got {tuple(actions.shape)}")
+        return self.distribution.log_prob(actions[..., :MAIN_ACTION_DIM_V2]).sum(dim=-1)
 
     @property
     def action_mean(self) -> torch.Tensor:
         if self.distribution is None:
             raise RuntimeError("action distribution has not been initialized")
-        return self.distribution.mean
+        return pad_main_actions_v2(self.distribution.mean)
 
     @property
     def action_std(self) -> torch.Tensor:
         if self.distribution is None:
             raise RuntimeError("action distribution has not been initialized")
-        return self.distribution.stddev
+        return pad_main_actions_v2(self.distribution.stddev)
+
+    @property
+    def main_action_std(self) -> torch.Tensor:
+        return self.std.abs().clamp_min(1.0e-6)
 
     @property
     def entropy(self) -> torch.Tensor:
@@ -181,8 +201,9 @@ class SensorPPOV2:
 
         history, command = self.policy._actor_inputs(batch.observations)
         predicted_actions, velocity, next_frame = self.policy.actor(history, command)
-        bc_main = F.huber_loss(predicted_actions[..., :MAIN_ACTION_DIM_V2], batch.teacher_actions[..., :6].detach())
-        bc_abad = F.huber_loss(predicted_actions[..., 6:12], batch.teacher_actions[..., 6:12].detach())
+        teacher_actions = strict_forward_actions_v2(batch.teacher_actions.detach())
+        bc_main = F.huber_loss(predicted_actions[..., :MAIN_ACTION_DIM_V2], teacher_actions[..., :6])
+        bc_abad = F.huber_loss(predicted_actions[..., 6:12], teacher_actions[..., 6:12])
         velocity_loss = F.huber_loss(velocity, batch.base_velocity_target.detach())
         dynamics_loss = _masked_huber(next_frame, batch.next_sensor_frame_target.detach(), ~batch.terminal.bool())
         latent, _ = self.policy.actor.encode(history, command)
@@ -214,6 +235,15 @@ class SensorPPOV2:
                 teacher_bc_coefficient, device=total.device, dtype=total.dtype
             ),
             "policy/entropy": entropy.mean().detach(),
+            "rmse/base_velocity_x": (
+                velocity[..., 0] - batch.base_velocity_target[..., 0]
+            ).square().mean().sqrt().detach(),
+            "rmse/base_velocity_y": (
+                velocity[..., 1] - batch.base_velocity_target[..., 1]
+            ).square().mean().sqrt().detach(),
+            "rmse/base_velocity_z": (
+                velocity[..., 2] - batch.base_velocity_target[..., 2]
+            ).square().mean().sqrt().detach(),
         }
         return total, metrics
 

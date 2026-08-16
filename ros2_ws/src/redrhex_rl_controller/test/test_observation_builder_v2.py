@@ -122,7 +122,12 @@ def test_stale_dropout_and_out_of_order_data_clear_history():
     assert builder.update_imu(_imu(2.0))
     assert builder.update_joint_state(_joints(2.0))
     _mark_valid(builder, 2.0)
-    builder.append_sensor_frame(2.0)
+    builder.prime_velocity_baseline()
+    next_stamp = 2.0 + 1.0 / 60.0
+    assert builder.update_imu(_imu(next_stamp))
+    assert builder.update_joint_state(_joints(next_stamp))
+    _mark_valid(builder, next_stamp)
+    builder.append_sensor_frame(next_stamp)
     assert builder.update_imu(_imu(1.9)) is False
     assert builder.history_size == 0
 
@@ -132,6 +137,93 @@ def test_validated_quaternion_has_no_covariance_or_frame_fallback():
     assert builder.update_imu(_imu(1.0, covariance=[-1.0] + [0.0] * 8)) is False
     assert builder.update_imu(_imu(1.1, frame_id="wrong_frame")) is False
     assert builder.status(1.1).ok is False
+
+
+def test_validated_quaternion_rejects_all_zero_unknown_covariance():
+    builder = SensorObservationBuilderV2(_config())
+    assert builder.update_imu(_imu(1.0, covariance=[0.0] * 9)) is False
+    assert builder.history_ready is False
+
+
+def test_runtime_can_prime_velocity_without_adding_a_fake_history_frame():
+    builder = SensorObservationBuilderV2(_config())
+    assert builder.update_imu(_imu(1.0))
+    assert builder.update_joint_state(_joints(1.0))
+    _mark_valid(builder, 1.0)
+    assert builder.has_complete_new_sensor_generation is True
+    builder.prime_velocity_baseline()
+    assert builder.history_size == 0
+    assert builder.velocity_baseline_required is False
+
+    assert builder.update_imu(_imu(1.0 + 1.0 / 60.0))
+    assert builder.has_complete_new_sensor_generation is False
+    assert builder.update_joint_state(
+        _joints(1.0 + 1.0 / 60.0, main_position=0.01)
+    )
+    _mark_valid(builder, 1.0 + 1.0 / 60.0)
+    assert builder.has_complete_new_sensor_generation is True
+    frame = builder.append_sensor_frame(builder.latest_sensor_source_time_s)
+    assert builder.history_size == 1
+    assert frame[18:24] == pytest.approx([0.6] * 6)
+
+
+def test_imu_joint_source_skew_rejects_generation_and_resets_history():
+    config = _config()
+    config["max_sensor_source_skew_s"] = 0.5 / 60.0
+    builder = SensorObservationBuilderV2(config)
+    assert builder.update_imu(_imu(1.0))
+    assert builder.update_joint_state(_joints(1.0))
+    _mark_valid(builder, 1.0)
+    builder.append_sensor_frame(1.0)
+    assert builder.history_size == 1
+
+    imu_stamp = 1.0 + 1.0 / 60.0
+    joint_stamp = imu_stamp + 0.01
+    assert builder.update_imu(_imu(imu_stamp))
+    assert builder.update_joint_state(_joints(joint_stamp, main_position=0.01))
+    _mark_valid(builder, joint_stamp)
+    with pytest.raises(RuntimeError, match="source skew"):
+        builder.append_sensor_frame(builder.latest_sensor_source_time_s)
+    assert builder.history_size == 0
+    assert builder.velocity_baseline_required is True
+
+
+def test_partial_generation_waits_without_triggering_false_source_skew():
+    builder = SensorObservationBuilderV2(_config())
+    assert builder.update_imu(_imu(1.0))
+    assert builder.update_joint_state(_joints(1.0))
+    _mark_valid(builder, 1.0)
+    builder.append_sensor_frame(1.0)
+
+    next_stamp = 1.0 + 1.0 / 60.0
+    assert builder.update_imu(_imu(next_stamp))
+    assert builder.has_complete_new_sensor_generation is False
+    assert builder.status(next_stamp).ok is True
+    assert builder.history_size == 1
+
+    assert builder.update_joint_state(_joints(next_stamp, main_position=0.01))
+    _mark_valid(builder, next_stamp)
+    builder.append_sensor_frame(next_stamp)
+    assert builder.history_size == 2
+
+
+def test_30_hz_generation_cadence_cannot_fill_60_hz_history():
+    config = _config()
+    config["max_history_period_error_ratio"] = 0.25
+    builder = SensorObservationBuilderV2(config)
+    assert builder.update_imu(_imu(1.0))
+    assert builder.update_joint_state(_joints(1.0))
+    _mark_valid(builder, 1.0)
+    builder.prime_velocity_baseline()
+
+    slow_stamp = 1.0 + 1.0 / 30.0
+    assert builder.update_imu(_imu(slow_stamp))
+    assert builder.update_joint_state(_joints(slow_stamp, main_position=0.01))
+    _mark_valid(builder, slow_stamp)
+    with pytest.raises(RuntimeError, match="source cadence"):
+        builder.append_sensor_frame(builder.latest_sensor_source_time_s)
+    assert builder.history_size == 0
+    assert builder.velocity_baseline_required is True
 
 
 def test_causal_mode_uses_gyro_accel_without_quaternion_fallback():

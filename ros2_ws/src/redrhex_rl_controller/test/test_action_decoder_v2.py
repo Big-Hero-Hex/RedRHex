@@ -34,13 +34,15 @@ def test_hardware_limits_can_tighten_but_never_loosen_bundle_semantics():
         ForwardResidualActionDecoderV2(contract, {"main_drive_vel_limit_rad_s": 6.0})
     with pytest.raises(ValueError, match="only tighten"):
         ForwardResidualActionDecoderV2(contract, {"action_clip": 1.1})
+    with pytest.raises(ValueError, match="exactly match"):
+        ForwardResidualActionDecoderV2(contract, {"init_main_drive_pos": [0.0] * 6})
 
 
 def test_decoder_rejects_non_forward_commands_and_slew_limits_output():
     contract = ForwardResidualActionContractV2(main_velocity_limit_rad_s=9.0)
     decoder = ForwardResidualActionDecoderV2(
         contract,
-        {"main_drive_slew_rate_rad_s2": 6.0},
+        {"main_drive_slew_rate_rad_s2": 0.6},
     )
     with pytest.raises(ValueError, match="lateral and yaw"):
         decoder.decode(np.zeros(12), np.zeros(6), np.array([0.2, 0.2, 0.0]), 1.0 / 60.0)
@@ -50,7 +52,14 @@ def test_decoder_rejects_non_forward_commands_and_slew_limits_output():
         np.array([0.45, 0.0, 0.0]),
         1.0 / 60.0,
     )
-    assert np.max(np.abs(result.target_main_drive_velocity)) <= 0.100001
+    assert np.max(np.abs(result.target_main_drive_velocity)) <= 0.010001
+    assert decoder.last_target_status is not None
+    assert decoder.last_target_status.contract_slew_rate_rad_s2 is None
+    assert decoder.last_target_status.hardware_slew_applied is True
+    assert decoder.last_target_status.hardware_slew_target_main_drive_velocity.shape == (6,)
+    assert np.max(
+        np.abs(decoder.last_target_status.raw_contract_target_main_drive_velocity)
+    ) > np.max(np.abs(result.target_main_drive_velocity))
 
 
 def test_decoder_hash_is_the_loaded_bundle_contract_hash():

@@ -769,16 +769,24 @@ function formData(form) {
   data.headless = IS_REMOTE_DESKTOP || form.elements.headless.checked;
   data.resume = Boolean(data.checkpoint);
   data.num_envs = Number(data.num_envs);
-  if (route === "sensor_v2_full") {
+  if (["sensor_v2_full", "sensor_v2_ungated_debug"].includes(route)) {
     delete data.max_iterations;
     data.teacher_iterations = Number(data.teacher_iterations);
     data.distillation_iterations = Number(data.distillation_iterations);
     data.ppo_iterations = Number(data.ppo_iterations);
+    if (route === "sensor_v2_full") {
+      delete data.seed;
+      data.robust_iterations = Number(data.robust_iterations);
+      data.seeds = String(data.seeds || "").split(/[\s,]+/).filter(Boolean).map(Number);
+    } else {
+      for (const key of ["robust_iterations", "seeds", "f0_evidence", "f0_evidence_sha256", "f4_profile", "f4_profile_sha256", "f5_profile", "f5_profile_sha256"]) delete data[key];
+    }
   } else {
     data.max_iterations = Number(data.max_iterations);
     delete data.teacher_iterations;
     delete data.distillation_iterations;
     delete data.ppo_iterations;
+    for (const key of ["robust_iterations", "seeds", "f0_evidence", "f0_evidence_sha256", "f4_profile", "f4_profile_sha256", "f5_profile", "f5_profile_sha256"]) delete data[key];
   }
   if (isSensor) {
     delete data.task;
@@ -1151,9 +1159,9 @@ function runParamSummary(run) {
   }
   if (params.task) parts.push(`task: ${params.task}`);
   if (params.num_envs !== undefined) parts.push(`envs: ${params.num_envs}`);
-  if (params.training_route === "sensor_v2_full") {
+  if (["sensor_v2_full", "sensor_v2_ungated_debug"].includes(params.training_route)) {
     parts.push(
-      `iters: ${params.teacher_iterations}/${params.distillation_iterations}/${params.ppo_iterations}`
+      `iters: ${params.teacher_iterations}/${params.distillation_iterations}/${params.ppo_iterations}${params.training_route === "sensor_v2_full" ? `/${params.robust_iterations}` : ""}`
     );
   } else if (params.max_iterations !== undefined) {
     parts.push(`iters: ${params.max_iterations}`);
@@ -2181,10 +2189,10 @@ function renderRunDetails() {
       if (stepsText) rows.push(["Throughput", stepsText]);
       if (typeof progress.mean_reward === "number") rows.push(["Mean reward", progress.mean_reward.toFixed(2)]);
     }
-    if (run.params?.training_route === "sensor_v2_full") {
+    if (["sensor_v2_full", "sensor_v2_ungated_debug"].includes(run.params?.training_route)) {
       rows.push([
-        "F1/F2/F3 iters",
-        `${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}`,
+        run.params.training_route === "sensor_v2_full" ? "F1/F2/F3/F4 iters" : "F1/F2/F3 iters",
+        `${run.params.teacher_iterations}/${run.params.distillation_iterations}/${run.params.ppo_iterations}${run.params.training_route === "sensor_v2_full" ? `/${run.params.robust_iterations}` : ""}`,
       ]);
     } else if (run.params?.max_iterations != null) rows.push(["Iters", run.params.max_iterations]);
     const ckptIter = checkpointIteration(run.latest_checkpoint);
@@ -3962,10 +3970,13 @@ function applyPreset(kind) {
   } else {
     form.elements.num_envs.value = 64;
   }
-  if (form.elements.training_route.value === "sensor_v2_full") {
+  if (["sensor_v2_full", "sensor_v2_ungated_debug"].includes(form.elements.training_route.value)) {
     form.elements.teacher_iterations.value = iterations;
     form.elements.distillation_iterations.value = iterations;
     form.elements.ppo_iterations.value = iterations;
+    if (form.elements.training_route.value === "sensor_v2_full") {
+      form.elements.robust_iterations.value = iterations;
+    }
   } else {
     form.elements.max_iterations.value = iterations;
   }
@@ -3988,6 +3999,11 @@ function applyTrainingParamsToForm(params) {
   form.elements.teacher_iterations.value = params.teacher_iterations ?? 1500;
   form.elements.distillation_iterations.value = params.distillation_iterations ?? 800;
   form.elements.ppo_iterations.value = params.ppo_iterations ?? 1500;
+  form.elements.robust_iterations.value = params.robust_iterations ?? 600;
+  form.elements.seeds.value = (params.seeds || [42, 43, 44]).join(",");
+  for (const name of ["f0_evidence", "f0_evidence_sha256", "f4_profile", "f4_profile_sha256", "f5_profile", "f5_profile_sha256"]) {
+    form.elements[name].value = params[name] || "";
+  }
   form.elements.device.value = params.device || "cuda:0";
   form.elements.spring_backend.value = params.spring_backend || "native";
   form.elements.seed.value = params.seed ?? "";
@@ -4001,7 +4017,8 @@ function updateTrainingRouteForm() {
   if (!form) return;
   const route = form.elements.training_route.value || "standard";
   const isSensor = route.startsWith("sensor_v2");
-  const isPipeline = route === "sensor_v2_full";
+  const isFullPipeline = route === "sensor_v2_full";
+  const isPipeline = isFullPipeline || route === "sensor_v2_ungated_debug";
   const requiresCheckpoint = route === "sensor_v2_distillation" || route === "sensor_v2_ppo";
   const routeUi = {
     standard: {
@@ -4014,8 +4031,12 @@ function updateTrainingRouteForm() {
       checkpointPlaceholder: "Select Resume on a history run",
     },
     sensor_v2_full: {
-      title: "Full Sensor V2 Pipeline",
-      help: "Runs F1 Teacher, F2 Distillation, and F3 Student PPO in sequence. Set only the three stage iteration counts below.",
+      title: "Evidence-Gated Sensor V2 Pipeline",
+      help: "Requires passed Isaac F0 evidence, distinct evidence-bound F4/F5 profiles, and at least three seeds before running F1 through F5.",
+    },
+    sensor_v2_ungated_debug: {
+      title: "Legacy Sensor V2 F1-F3 Pipeline",
+      help: "Compatibility route for the earlier Teacher, Distillation, and Student PPO sequence.",
     },
     sensor_v2_teacher: {
       title: "F1 Teacher Only",
@@ -4058,6 +4079,17 @@ function updateTrainingRouteForm() {
     const input = element.querySelector("input");
     if (input) input.disabled = !isPipeline;
   });
+  document.querySelectorAll(".sensor-v2-full-field").forEach((element) => {
+    element.hidden = !isFullPipeline;
+    const input = element.querySelector("input");
+    if (input) {
+      input.disabled = !isFullPipeline;
+      input.required = isFullPipeline;
+    }
+  });
+  const singleSeed = $("#single-seed-field");
+  if (singleSeed) singleSeed.hidden = isFullPipeline;
+  form.elements.seed.disabled = isFullPipeline;
   const singleIterations = $("#single-stage-iterations-field");
   if (singleIterations) singleIterations.hidden = isPipeline;
   form.elements.max_iterations.disabled = isPipeline;

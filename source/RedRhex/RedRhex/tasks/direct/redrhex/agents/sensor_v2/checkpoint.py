@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -23,6 +25,24 @@ from .models import (
 
 CHECKPOINT_FORMAT_V2 = "redrhex.sensor-training.v2"
 
+# These fields identify where/how a run was executed, but do not define its
+# training behavior.  Keep this allowlist deliberately small: any unknown or
+# newly introduced config field remains hash-bound by default.
+CANONICAL_CONFIG_EXECUTION_IDENTITY_FIELDS_V2 = frozenset(
+    {
+        "device",
+        "experiment_name",
+        "load_checkpoint",
+        "load_run",
+        "logger",
+        "neptune_project",
+        "resume",
+        "run_name",
+        "seed",
+        "wandb_project",
+    }
+)
+
 
 class CheckpointKindV2(str, Enum):
     TEACHER = "teacher_v2"
@@ -34,6 +54,7 @@ class CheckpointIntentV2(str, Enum):
     DISTILLATION_BOOTSTRAP = "distillation_bootstrap"
     DISTILLATION_RESUME = "distillation_resume"
     PPO_BOOTSTRAP = "ppo_bootstrap"
+    ROBUSTNESS_BOOTSTRAP = "robustness_bootstrap"
     PPO_RESUME = "ppo_resume"
     TEACHER_RESUME = "teacher_resume"
     INFERENCE = "inference"
@@ -52,6 +73,8 @@ class CheckpointManifestV2:
     calibration_hash: str
     architecture_hash: str
     config_hash: str
+    canonical_config_hash: str
+    training_seed: int
     action_order: tuple[str, ...]
     iteration: int = 0
     scheduler_state_present: bool = False
@@ -79,12 +102,19 @@ class CheckpointManifestV2:
             raise ValueError("checkpoint observation/action contract IDs must not be empty")
         if self.iteration < 0:
             raise ValueError("checkpoint iteration must be non-negative")
+        if (
+            isinstance(self.training_seed, bool)
+            or not isinstance(self.training_seed, int)
+            or self.training_seed < 0
+        ):
+            raise ValueError("training_seed must be a non-negative integer")
         for name in (
             "contract_hash",
             "action_contract_hash",
             "calibration_hash",
             "architecture_hash",
             "config_hash",
+            "canonical_config_hash",
         ):
             value = getattr(self, name)
             if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
@@ -125,6 +155,35 @@ def canonical_hash_v2(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
+def normalize_training_config_v2(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return config content with only execution identity fields removed."""
+
+    if not isinstance(config, Mapping):
+        raise TypeError("Sensor V2 training config must be a mapping")
+
+    def normalize(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            normalized: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise TypeError("Sensor V2 training config keys must be strings")
+                if key in CANONICAL_CONFIG_EXECUTION_IDENTITY_FIELDS_V2:
+                    continue
+                normalized[key] = normalize(item)
+            return normalized
+        if isinstance(value, (list, tuple)):
+            return [normalize(item) for item in value]
+        return copy.deepcopy(value)
+
+    return normalize(config)
+
+
+def canonical_training_config_hash_v2(config: Mapping[str, Any]) -> str:
+    """Hash training semantics independently of seed/run/log identity."""
+
+    return canonical_hash_v2(normalize_training_config_v2(config))
+
+
 def architecture_hash_v2(module: nn.Module) -> str:
     """Hash state keys, shapes, and dtypes without hashing learned values."""
 
@@ -153,7 +212,9 @@ def validate_checkpoint_intent_v2(kind: CheckpointKindV2 | str, intent: Checkpoi
         (CheckpointKindV2.TEACHER, CheckpointIntentV2.TEACHER_RESUME),
         (CheckpointKindV2.DISTILLED, CheckpointIntentV2.DISTILLATION_RESUME),
         (CheckpointKindV2.DISTILLED, CheckpointIntentV2.PPO_BOOTSTRAP),
+        (CheckpointKindV2.PPO, CheckpointIntentV2.ROBUSTNESS_BOOTSTRAP),
         (CheckpointKindV2.PPO, CheckpointIntentV2.PPO_RESUME),
+        (CheckpointKindV2.TEACHER, CheckpointIntentV2.INFERENCE),
         (CheckpointKindV2.DISTILLED, CheckpointIntentV2.INFERENCE),
         (CheckpointKindV2.PPO, CheckpointIntentV2.INFERENCE),
     }
@@ -176,7 +237,8 @@ def _assert_manifest_matches(
         "action_contract_hash",
         "calibration_hash",
         "architecture_hash",
-        "config_hash",
+        "canonical_config_hash",
+        "training_seed",
         "sensor_frame_dim",
         "history_length",
         "command_dim",

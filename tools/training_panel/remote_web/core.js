@@ -737,6 +737,7 @@ export const REMOTE_PROTOCOL_VERSION = "3.7.0-remote-parity";
 export const TRAINING_ROUTES = Object.freeze([
   "standard",
   "sensor_v2_full",
+  "sensor_v2_ungated_debug",
   "sensor_v2_teacher",
   "sensor_v2_distillation",
   "sensor_v2_ppo",
@@ -767,10 +768,19 @@ export function sanitizeTrainingParams(raw = {}) {
   for (const key of ["seed", "display_name", "folder", "tweak_source_run_id", "tweak_source_label"]) {
     if (raw[key] !== undefined && raw[key] !== null && raw[key] !== "") common[key] = raw[key];
   }
-  if (route === "sensor_v2_full") {
+  if (["sensor_v2_full", "sensor_v2_ungated_debug"].includes(route)) {
     common.teacher_iterations = Number(raw.teacher_iterations || 1500);
     common.distillation_iterations = Number(raw.distillation_iterations || 800);
     common.ppo_iterations = Number(raw.ppo_iterations || 1500);
+    if (route === "sensor_v2_full") {
+      common.robust_iterations = Number(raw.robust_iterations || 600);
+      common.seeds = Array.isArray(raw.seeds)
+        ? raw.seeds.map(Number)
+        : String(raw.seeds || "42,43,44").split(/[\s,]+/).filter(Boolean).map(Number);
+      for (const key of ["f0_evidence", "f0_evidence_sha256", "f4_profile", "f4_profile_sha256", "f5_profile", "f5_profile_sha256"]) {
+        common[key] = String(raw[key] || "").trim();
+      }
+    }
     return common;
   }
   common.max_iterations = Number(raw.max_iterations || 1);

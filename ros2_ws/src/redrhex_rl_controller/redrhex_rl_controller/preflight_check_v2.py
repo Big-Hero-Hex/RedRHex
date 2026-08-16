@@ -10,6 +10,10 @@ from pathlib import Path
 
 import numpy as np
 
+from .deployment_guard_v2 import (
+    DeploymentGuardV2,
+    action_target_envelope_matches_v2,
+)
 from .deployment_route import SENSOR_ONLY_CONTRACT_ID_V2, resolve_deployment_route
 from .policy_onnx_runner_v2 import SensorPolicyONNXRunnerV2
 
@@ -66,6 +70,30 @@ def validate_v2_config(params: dict) -> tuple[list[dict[str, object]], list[str]
     )
     _append(result, "fixed_sensor_layout", fixed_layout)
 
+    sample_period_s = 1.0 / 60.0
+    max_source_skew_s = float(
+        _nested(params, "observation", "max_sensor_source_skew_s", default=-1.0)
+    )
+    max_period_error_ratio = float(
+        _nested(
+            params,
+            "observation",
+            "max_history_period_error_ratio",
+            default=-1.0,
+        )
+    )
+    source_timing_ok = (
+        0.0 < max_source_skew_s <= sample_period_s
+        and 0.0 <= max_period_error_ratio < 1.0
+    )
+    _append(
+        result,
+        "source_skew_and_cadence_bounds",
+        source_timing_ok,
+        max_sensor_source_skew_s=max_source_skew_s,
+        max_history_period_error_ratio=max_period_error_ratio,
+    )
+
     main_names = list(_nested(params, "observation", "main_drive_joint_names", default=[]))
     abad_names = list(_nested(params, "observation", "abad_joint_names", default=[]))
     ordering_ok = (
@@ -95,8 +123,24 @@ def validate_v2_config(params: dict) -> tuple[list[dict[str, object]], list[str]
     if not encoder_evidence:
         blockers.append("all twelve encoder signs and zeros are not verified")
 
+    recorded_hardware_evidence = bool(
+        _nested(params, "hardware_gate", "recorded_imu_evidence", default=False)
+    ) and bool(
+        _nested(params, "hardware_gate", "recorded_encoder_evidence", default=False)
+    )
+    _append(result, "recorded_hardware_evidence", recorded_hardware_evidence)
+    if not recorded_hardware_evidence:
+        blockers.append("hardware-gate IMU and encoder evidence is not recorded")
+
+    allow_motor_enable = bool(
+        _nested(params, "hardware_gate", "allow_motor_enable", default=False)
+    )
+    _append(result, "explicit_motor_enable_authorization", allow_motor_enable)
+    if not allow_motor_enable:
+        blockers.append("hardware_gate.allow_motor_enable is false")
+
     hashes: dict[str, str] = {}
-    for name in ("contract", "action_contract", "calibration"):
+    for name in ("contract", "action_contract", "calibration", "checkpoint"):
         value = str(_nested(params, "policy", f"expected_{name}_hash", default=""))
         hashes[name] = value
         ok = bool(_SHA256_RE.fullmatch(value))
@@ -111,11 +155,24 @@ def validate_v2_config(params: dict) -> tuple[list[dict[str, object]], list[str]
         and bool(_nested(params, "action", "independent_limits_may_only_tighten", default=False))
     )
     _append(result, "strict_forward_residual_action", action_ok)
+    decoder_hash = str(
+        _nested(params, "action", "expected_decoder_hash", default="")
+    )
+    decoder_hash_ok = bool(_SHA256_RE.fullmatch(decoder_hash)) and (
+        decoder_hash == hashes["action_contract"]
+    )
+    _append(
+        result,
+        "decoder_hash_matches_action_contract",
+        decoder_hash_ok,
+        value=decoder_hash,
+    )
+    if not decoder_hash_ok:
+        blockers.append("decoder hash is missing or differs from the action contract")
 
     start_disabled = (
         not bool(_nested(params, "state_machine", "enable_policy_on_start", default=True))
         and not bool(_nested(params, "state_machine", "enable_motor_output_on_start", default=True))
-        and not bool(_nested(params, "hardware_gate", "allow_motor_enable", default=True))
     )
     _append(result, "disabled_on_start", start_disabled)
     return list(result["checks"]), blockers
@@ -155,6 +212,10 @@ def main(argv=None) -> int:
             expected_calibration_sha256=str(
                 _nested(params, "policy", "expected_calibration_hash", default="")
             ),
+            expected_checkpoint_sha256=str(
+                _nested(params, "policy", "expected_checkpoint_hash", default="")
+            ),
+            require_hardware_ready=False,
             use_cuda=args.use_cuda,
             use_tensorrt=args.use_tensorrt,
         )
@@ -166,6 +227,71 @@ def main(argv=None) -> int:
             report,
             "bundle_load_and_zero_inference",
             bool(output.actions.shape == (12,) and output.base_velocity_estimate.shape == (3,)),
+        )
+        calibration_ready = runner.calibration_profile.hardware_ready
+        _append(
+            report,
+            "bundle_calibration_hardware_ready",
+            calibration_ready,
+            readiness_blockers=list(
+                runner.calibration_profile.readiness_blockers
+            ),
+        )
+        if not calibration_ready:
+            blockers.extend(
+                f"bundle calibration: {name}"
+                for name in runner.calibration_profile.readiness_blockers
+            )
+        configured_action_clip = float(
+            _nested(params, "safety", "action_clip", default=-1.0)
+        )
+        configured_velocity_limit = float(
+            _nested(
+                params,
+                "safety",
+                "main_drive_vel_limit_rad_s",
+                default=-1.0,
+            )
+        )
+        contract_action_clip = float(runner.action_contract.action_clip)
+        contract_velocity_limit = float(
+            runner.action_contract.main_velocity_limit_rad_s
+        )
+        action_envelope_ok = action_target_envelope_matches_v2(
+            configured_action_clip=configured_action_clip,
+            configured_main_velocity_limit_rad_s=configured_velocity_limit,
+            contract_action_clip=contract_action_clip,
+            contract_main_velocity_limit_rad_s=contract_velocity_limit,
+        )
+        _append(
+            report,
+            "action_target_envelope_matches_bundle",
+            action_envelope_ok,
+            configured_action_clip=configured_action_clip,
+            contract_action_clip=contract_action_clip,
+            configured_main_velocity_limit_rad_s=configured_velocity_limit,
+            contract_main_velocity_limit_rad_s=contract_velocity_limit,
+        )
+        if not action_envelope_ok:
+            blockers.append(
+                "configured action clip/main velocity limit changes bundle targets"
+            )
+        guard = DeploymentGuardV2(
+            allow_motor_enable=bool(
+                _nested(
+                    params,
+                    "hardware_gate",
+                    "allow_motor_enable",
+                    default=False,
+                )
+            ),
+            calibration_hardware_ready=calibration_ready,
+            action_target_envelope_compatible=action_envelope_ok,
+        )
+        _append(
+            report,
+            "runtime_motor_enable_gate",
+            guard.hardware_authorized,
         )
     except Exception as exc:
         _append(report, "preflight_exception", False, error=str(exc))

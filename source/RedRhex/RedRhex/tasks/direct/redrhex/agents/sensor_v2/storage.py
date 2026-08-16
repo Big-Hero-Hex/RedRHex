@@ -2,11 +2,85 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 import torch
 
 from .models import ACTION_DIM_V2, COMMAND_DIM_V2, SENSOR_FRAME_DIM_V2, SENSOR_HISTORY_LENGTH_V2
+
+
+def clone_observations_v2(
+    observations: Mapping[str, torch.Tensor],
+    names: tuple[str, ...],
+) -> dict[str, torch.Tensor]:
+    """Take ownership of rollout observations before the environment mutates live buffers."""
+
+    return {name: observations[name].detach().clone() for name in names}
+
+
+def causal_transition_mask_v2(
+    dones: torch.Tensor,
+    next_history_ready: torch.Tensor,
+) -> torch.Tensor:
+    """Return transitions whose causal next observation may be bootstrapped."""
+
+    if dones.shape != next_history_ready.shape:
+        raise ValueError(
+            "dones and next_history_ready must have identical shapes; "
+            f"got {tuple(dones.shape)} and {tuple(next_history_ready.shape)}"
+        )
+    return ~dones.bool() & next_history_ready.bool()
+
+
+def has_trainable_history_v2(history_ready: torch.Tensor) -> bool:
+    """Return whether this tick contains at least one causally valid actor row."""
+
+    if history_ready.ndim != 1:
+        raise ValueError(
+            "history_ready must have shape [num_envs]; "
+            f"got {tuple(history_ready.shape)}"
+        )
+    return bool(history_ready.bool().any())
+
+
+def causal_gae_step_v2(
+    *,
+    reward: torch.Tensor,
+    value: torch.Tensor,
+    following_value: torch.Tensor,
+    following_advantage: torch.Tensor,
+    current_ready: torch.Tensor,
+    transition_valid: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute one GAE step without crossing an invalid next-history boundary."""
+
+    tensors = {
+        "value": value,
+        "following_value": following_value,
+        "following_advantage": following_advantage,
+        "current_ready": current_ready,
+        "transition_valid": transition_valid,
+    }
+    mismatches = {
+        name: tuple(tensor.shape)
+        for name, tensor in tensors.items()
+        if tensor.shape != reward.shape
+    }
+    if mismatches:
+        raise ValueError(
+            f"GAE tensors must match reward shape {tuple(reward.shape)}; got {mismatches}"
+        )
+    valid = current_ready.to(dtype=value.dtype)
+    continuation = transition_valid.to(dtype=value.dtype)
+    delta = (reward + gamma * continuation * following_value - value) * valid
+    advantage = (
+        delta + gamma * lam * continuation * following_advantage
+    ) * valid
+    returns = torch.where(current_ready.bool(), advantage + value, value)
+    return returns, advantage
 
 
 @dataclass(frozen=True)
@@ -96,3 +170,40 @@ class SensorDistillationStorageV2:
             next_sensor_frame_target=self.next_sensor_frame_target[valid],
             terminal=self.terminal[valid],
         )
+
+    def mini_batches(
+        self,
+        num_mini_batches: int,
+        *,
+        max_batch_size: int | None = None,
+        shuffle: bool = True,
+    ) -> Iterator[SensorDistillationBatchV2]:
+        """Yield a complete partition without materializing the full TCN graph at once."""
+
+        if num_mini_batches <= 0:
+            raise ValueError("num_mini_batches must be positive")
+        if max_batch_size is not None and max_batch_size <= 0:
+            raise ValueError("max_batch_size must be positive")
+        batch = self.batch()
+        required_for_cap = (
+            (self.size + max_batch_size - 1) // max_batch_size
+            if max_batch_size is not None
+            else 1
+        )
+        partition_count = min(max(num_mini_batches, required_for_cap), self.size)
+        indices = (
+            torch.randperm(self.size, device=self.device)
+            if shuffle
+            else torch.arange(self.size, device=self.device)
+        )
+        for index in torch.tensor_split(indices, partition_count):
+            yield SensorDistillationBatchV2(
+                sensor_history=batch.sensor_history[index],
+                command=batch.command[index],
+                teacher_actions=batch.teacher_actions[index],
+                student_actions=batch.student_actions[index],
+                executed_actions=batch.executed_actions[index],
+                base_velocity_target=batch.base_velocity_target[index],
+                next_sensor_frame_target=batch.next_sensor_frame_target[index],
+                terminal=batch.terminal[index],
+            )

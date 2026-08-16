@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import importlib
 import math
+from dataclasses import dataclass
 from typing import Any, Sequence
 
-from .contracts import ContractError
+from ._action_core import decode_forward_residual_arrays_v2
+from .contracts import ContractError, ForwardResidualActionContractV2
 
 
 def _torch() -> Any:
@@ -27,6 +29,133 @@ def wrapped_velocity_torch(current_position_rad: Any, previous_position_rad: Any
     if current_position_rad.ndim < 1:
         raise ContractError("Torch positions must be non-scalar")
     return wrap_angle_torch(current_position_rad - previous_position_rad) / dt_s
+
+
+@dataclass(frozen=True)
+class DecodedForwardActionV2Torch:
+    """Batched Torch result used by the Sensor-V2 simulator adapter."""
+
+    safe_action: Any
+    nominal_main_velocity_rad_s: Any
+    residual_main_velocity_rad_s: Any
+    target_main_velocity_rad_s: Any
+    target_abad_position_rad: Any
+    action_warmup_scale: Any
+
+
+def _prefix_tensor(
+    value: Any,
+    prefix: Any,
+    *,
+    dtype: Any,
+    device: Any,
+    name: str,
+) -> Any:
+    torch = _torch()
+    result = torch.as_tensor(value, dtype=dtype, device=device)
+    if result.ndim == 0:
+        return result.expand(prefix) if len(prefix) else result
+    if result.shape != prefix:
+        raise ContractError(f"{name} must be scalar or have shape {tuple(prefix)}")
+    return result
+
+
+def decode_forward_residual_action_v2_torch(
+    action: Any,
+    command: Any,
+    gait_phase_rad: Any,
+    main_position_rad: Any,
+    *,
+    control_step: Any = None,
+    contract: ForwardResidualActionContractV2 | None = None,
+) -> DecodedForwardActionV2Torch:
+    """Decode batched simulator actions with the exact NumPy/ROS V2 math."""
+
+    torch = _torch()
+    contract = contract or ForwardResidualActionContractV2()
+    values = torch.as_tensor(action)
+    if not values.is_floating_point():
+        values = values.to(dtype=torch.float32)
+    command_tensor = torch.as_tensor(command, dtype=values.dtype, device=values.device)
+    position = torch.as_tensor(main_position_rad, dtype=values.dtype, device=values.device)
+    if values.ndim < 1 or values.shape[-1] != 12:
+        raise ContractError("Torch action must end in dimension 12")
+    prefix = values.shape[:-1]
+    if command_tensor.shape != (*prefix, 3):
+        raise ContractError(f"Torch command must have shape {tuple(prefix)} + (3,)")
+    if position.shape != (*prefix, 6):
+        raise ContractError(f"Torch main_position_rad must have shape {tuple(prefix)} + (6,)")
+    if not bool(torch.isfinite(values).all()):
+        raise ContractError("Torch action contains NaN or Inf")
+    if not bool(torch.isfinite(command_tensor).all()):
+        raise ContractError("Torch command contains NaN or Inf")
+    if not bool(torch.isfinite(position).all()):
+        raise ContractError("Torch main_position_rad contains NaN or Inf")
+    if bool(
+        torch.any(
+            torch.abs(command_tensor[..., 1])
+            > contract.MAX_ABS_LATERAL_COMMAND_M_S
+        )
+    ) or bool(
+        torch.any(
+            torch.abs(command_tensor[..., 2])
+            > contract.MAX_ABS_YAW_COMMAND_RAD_S
+        )
+    ):
+        raise ContractError("V2 forward decoder rejects lateral and yaw commands")
+
+    phase = _prefix_tensor(
+        gait_phase_rad,
+        prefix,
+        dtype=values.dtype,
+        device=values.device,
+        name="gait_phase_rad",
+    )
+    if not bool(torch.isfinite(phase).all()):
+        raise ContractError("gait_phase_rad must be finite")
+    if control_step is None or contract.action_warmup_steps == 0:
+        warmup_scale = torch.ones(prefix or (), dtype=values.dtype, device=values.device)
+    else:
+        step = _prefix_tensor(
+            control_step,
+            prefix,
+            dtype=values.dtype,
+            device=values.device,
+            name="control_step",
+        )
+        if (
+            not bool(torch.isfinite(step).all())
+            or bool(torch.any(step < 0.0))
+            or not bool(torch.equal(step, torch.round(step)))
+        ):
+            raise ContractError("control_step must contain non-negative integers")
+        warmup_scale = torch.clamp(
+            (step + 1.0) / float(contract.action_warmup_steps),
+            min=0.0,
+            max=1.0,
+        )
+
+    def constant(items: Sequence[float]) -> Any:
+        return torch.as_tensor(items, dtype=values.dtype, device=values.device)
+
+    phase_offsets = torch.zeros(6, dtype=values.dtype, device=values.device)
+    phase_offsets[list(contract.TRIPOD_B)] = contract.TRIPOD_PHASE_OFFSET_RAD
+    decoded = decode_forward_residual_arrays_v2(
+        values,
+        command_tensor,
+        phase,
+        position,
+        warmup_scale,
+        contract=contract,
+        namespace=torch,
+        action_mask=constant((1.0,) * 6 + (0.0,) * 6),
+        phase_offsets=phase_offsets,
+        direction=constant(contract.LEG_DIRECTION_MULTIPLIER),
+        main_output_sign=constant(contract.main_output_sign),
+        abad_neutral=constant(contract.abad_neutral_position_rad),
+        abad_output_sign=constant(contract.abad_output_sign),
+    )
+    return DecodedForwardActionV2Torch(*decoded, action_warmup_scale=warmup_scale)
 
 
 def _quat_rotate_wxyz_torch(quaternion: Any, vector: Any) -> Any:

@@ -152,6 +152,7 @@ def remote_capabilities(paths: PanelPaths, *, drive_status: dict | None = None) 
         "training_routes": [
             "standard",
             "sensor_v2_full",
+            "sensor_v2_ungated_debug",
             "sensor_v2_teacher",
             "sensor_v2_distillation",
             "sensor_v2_ppo",

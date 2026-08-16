@@ -142,6 +142,13 @@ class SensorObservationBuilderV2:
         self.min_channel_period_s = float(cfg.get("min_channel_period_s", 0.001))
         self.history_length = int(cfg.get("history_length", HISTORY_LENGTH_V2))
         self.sample_rate_hz = float(cfg.get("sample_rate_hz", SAMPLE_RATE_HZ_V2))
+        nominal_sample_period_s = 1.0 / self.sample_rate_hz
+        self.max_sensor_source_skew_s = float(
+            cfg.get("max_sensor_source_skew_s", 0.5 * nominal_sample_period_s)
+        )
+        self.max_history_period_error_ratio = float(
+            cfg.get("max_history_period_error_ratio", 0.25)
+        )
         self.max_history_gap_s = float(cfg.get("max_history_gap_s", 2.5 / self.sample_rate_hz))
         self.require_joint_validity = bool(cfg.get("require_joint_validity", True))
         mount_rpy_deg = cfg.get("imu_mount_rpy_deg", [0.0, 0.0, 0.0])
@@ -211,8 +218,8 @@ class SensorObservationBuilderV2:
             required_freshness_channels,
             max_age_s=self.sensor_timeout_s,
         )
-        self._last_history_sample_time: float | None = None
         self._last_history_generation: tuple[float | None, tuple[float | None, ...]] | None = None
+        self._velocity_baseline_required = True
         self._invalid_channels: dict[str, str] = {}
         self._channel_times: dict[str, float] = {}
         self._joint_times: dict[str, float] = {}
@@ -248,6 +255,20 @@ class SensorObservationBuilderV2:
             raise ValueError("validated_quaternion requires recorded rest-gravity evidence")
         if self.history_length != HISTORY_LENGTH_V2 or self.sample_rate_hz != SAMPLE_RATE_HZ_V2:
             raise ValueError("V2 history is fixed at 60 frames sampled at 60 Hz")
+        nominal_sample_period_s = 1.0 / self.sample_rate_hz
+        if (
+            not math.isfinite(self.max_sensor_source_skew_s)
+            or self.max_sensor_source_skew_s <= 0.0
+            or self.max_sensor_source_skew_s > nominal_sample_period_s
+        ):
+            raise ValueError(
+                "max_sensor_source_skew_s must be positive and no greater than one V2 sample period"
+            )
+        if (
+            not math.isfinite(self.max_history_period_error_ratio)
+            or not 0.0 <= self.max_history_period_error_ratio < 1.0
+        ):
+            raise ValueError("max_history_period_error_ratio must be in [0, 1)")
         if not 0.0 <= self.accel_correction_gain <= 1.0:
             raise ValueError("causal_accel_correction_gain must be in [0, 1]")
         for name, value in (
@@ -275,9 +296,115 @@ class SensorObservationBuilderV2:
     def reset_history(self, reason: str | None = None) -> None:
         self._history.reset()
         self._frame_builder.reset()
-        self._last_history_sample_time = None
+        self._velocity_baseline_required = True
         if reason:
             self._invalid_channels["history"] = str(reason)
+
+    def _sensor_generation(self) -> tuple[float | None, tuple[float | None, ...]]:
+        return (
+            self._channel_times.get("imu"),
+            tuple(self._joint_times.get(name) for name in self.all_joint_names),
+        )
+
+    @property
+    def velocity_baseline_required(self) -> bool:
+        """Whether one physical sample must be consumed before history starts."""
+
+        return self._velocity_baseline_required
+
+    @property
+    def has_complete_new_sensor_generation(self) -> bool:
+        """True only after the IMU and every encoder have all advanced."""
+
+        generation = self._sensor_generation()
+        imu_time, joint_times = generation
+        if imu_time is None or any(stamp is None for stamp in joint_times):
+            return False
+        previous = self._last_history_generation
+        if previous is None:
+            return True
+        previous_imu, previous_joints = previous
+        if previous_imu is None or any(stamp is None for stamp in previous_joints):
+            return True
+        return bool(
+            imu_time > previous_imu
+            and all(
+                current > old
+                for current, old in zip(joint_times, previous_joints, strict=True)
+            )
+        )
+
+    @property
+    def latest_sensor_source_time_s(self) -> float:
+        generation = self._sensor_generation()
+        values = (generation[0], *generation[1])
+        if any(value is None for value in values):
+            raise RuntimeError("V2 sensor source timestamp is unavailable")
+        return max(float(value) for value in values)
+
+    def _sensor_source_skew_s(self) -> float | None:
+        generation = self._sensor_generation()
+        values = (generation[0], *generation[1])
+        if any(value is None for value in values):
+            return None
+        stamps = tuple(float(value) for value in values)
+        return max(stamps) - min(stamps)
+
+    def _source_skew_reason(self) -> str | None:
+        source_skew_s = self._sensor_source_skew_s()
+        if (
+            source_skew_s is None
+            or source_skew_s <= self.max_sensor_source_skew_s + 1.0e-6
+        ):
+            return None
+        return (
+            "IMU/joint source skew exceeds the V2 bound: "
+            f"{source_skew_s:.9f}s > {self.max_sensor_source_skew_s:.9f}s"
+        )
+
+    def _validate_history_source_cadence(
+        self,
+        generation: tuple[float | None, tuple[float | None, ...]],
+    ) -> None:
+        previous = self._last_history_generation
+        if previous is None:
+            return
+        current_values = (generation[0], *generation[1])
+        previous_values = (previous[0], *previous[1])
+        if any(value is None for value in current_values + previous_values):
+            raise RuntimeError("V2 source cadence requires complete sensor generations")
+        periods_s = tuple(
+            float(current) - float(old)
+            for current, old in zip(current_values, previous_values, strict=True)
+        )
+        nominal_period_s = 1.0 / self.sample_rate_hz
+        period_error_ratios = tuple(
+            abs(period_s - nominal_period_s) / nominal_period_s
+            for period_s in periods_s
+        )
+        if (
+            max(periods_s) > self.max_history_gap_s
+            or max(period_error_ratios)
+            > self.max_history_period_error_ratio + 1.0e-9
+        ):
+            reason = (
+                "sensor source cadence violates the 60 Hz V2 contract: "
+                f"period_range=[{min(periods_s):.9f}, {max(periods_s):.9f}]s, "
+                f"expected={nominal_period_s:.9f}s, "
+                f"max_error_ratio={max(period_error_ratios):.6f}"
+            )
+            self.reset_history(reason)
+            raise RuntimeError(reason)
+
+    def prime_velocity_baseline(self) -> np.ndarray:
+        """Consume one complete physical generation without exposing fake velocity."""
+
+        if not self.has_complete_new_sensor_generation:
+            raise RuntimeError("V2 velocity baseline requires a new complete sensor generation")
+        frame = self.build_sensor_frame(self.latest_sensor_source_time_s)
+        self._last_history_generation = self._sensor_generation()
+        self._velocity_baseline_required = False
+        return frame
 
     def _accept_source_event(self, channel: str, source_time_s: float) -> bool:
         previous = self._channel_times.get(channel)
@@ -330,7 +457,12 @@ class SensorObservationBuilderV2:
                 [orientation.x, orientation.y, orientation.z, orientation.w], dtype=np.float64
             )
             norm = float(np.linalg.norm(quaternion))
-            covariance_ok = covariance.shape == (9,) and covariance[0] >= 0.0 and np.isfinite(covariance).all()
+            covariance_ok = (
+                covariance.shape == (9,)
+                and covariance[0] >= 0.0
+                and np.isfinite(covariance).all()
+                and bool(np.any(covariance != 0.0))
+            )
             if (
                 not covariance_ok
                 or not np.isfinite(quaternion).all()
@@ -513,6 +645,13 @@ class SensorObservationBuilderV2:
             imu_time - now_s > timestamp_tolerance_s or now_s - imu_time > self.sensor_timeout_s
         ):
             reasons.append("IMU stale or future-dated")
+        source_skew_reason = (
+            self._source_skew_reason()
+            if self.has_complete_new_sensor_generation
+            else None
+        )
+        if source_skew_reason is not None:
+            reasons.append(source_skew_reason)
         for name in self.all_joint_names:
             stamp = self._joint_times.get(name)
             if stamp is None:
@@ -528,7 +667,9 @@ class SensorObservationBuilderV2:
                 or now_s - validity_stamp > self.sensor_timeout_s
             ):
                 reasons.append(f"joint {name} validity stale or future-dated")
-        if reasons and self.history_size:
+        if source_skew_reason is not None:
+            self.reset_history(source_skew_reason)
+        elif reasons and self.history_size:
             self.reset_history("sensor dropout invalidated V2 history")
         return ObservationStatusV2(
             ok=not reasons,
@@ -561,22 +702,22 @@ class SensorObservationBuilderV2:
         return frame
 
     def append_sensor_frame(self, now_s: float) -> np.ndarray:
-        frame = self.build_sensor_frame(now_s)
-        generation = (
-            self._channel_times.get("imu"),
-            tuple(self._joint_times.get(name) for name in self.all_joint_names),
-        )
+        generation = self._sensor_generation()
         if generation == self._last_history_generation:
             self.reset_history("repeated sensor generation at a V2 policy tick")
             raise RuntimeError("V2 rejects repeated sensor generations")
-        if (
-            self._last_history_sample_time is not None
-            and now_s - self._last_history_sample_time > self.max_history_gap_s
-        ):
-            self.reset_history("history sampling gap exceeded")
+        if not self.has_complete_new_sensor_generation:
+            self.reset_history("incomplete sensor generation at a V2 policy tick")
+            raise RuntimeError("V2 requires every IMU/joint source to advance")
+        source_skew_reason = self._source_skew_reason()
+        if source_skew_reason is not None:
+            self.reset_history(source_skew_reason)
+            raise RuntimeError(source_skew_reason)
+        self._validate_history_source_cadence(generation)
+        frame = self.build_sensor_frame(now_s)
         self._history.append(frame)
-        self._last_history_sample_time = float(now_s)
         self._last_history_generation = generation
+        self._velocity_baseline_required = False
         return frame
 
     def policy_inputs(self, now_s: float) -> SensorPolicyInputV2:

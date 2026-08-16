@@ -59,7 +59,8 @@
             <select name="training_route" id="training-route">
               <optgroup label="Common">
                 <option value="standard">Standard PPO — No Distillation</option>
-                <option value="sensor_v2_full">Sensor V2 — Full F1 → F2 → F3 Pipeline</option>
+                <option value="sensor_v2_full">Sensor V2 — Evidence-Gated F0 → F5 Pipeline</option>
+                <option value="sensor_v2_ungated_debug">Sensor V2 — DEBUG F1 → F3 (non-promotable)</option>
               </optgroup>
               <optgroup label="Advanced — Single Sensor V2 Stage">
                 <option value="sensor_v2_teacher">F1 — Teacher only</option>
@@ -102,6 +103,39 @@
             F3 Student PPO Iterations
             <input name="ppo_iterations" type="number" min="1" value="1500" required />
           </label>
+          <label class="sensor-v2-full-field" hidden>
+            F4 Robust PPO Iterations
+            <input name="robust_iterations" type="number" min="1" value="600" disabled />
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            Experimental Seeds
+            <input name="seeds" value="42,43,44" disabled />
+            <small>At least three unique comma-separated seeds.</small>
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            F0 Evidence JSON
+            <input name="f0_evidence" placeholder="/absolute/path/f0.json" disabled />
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            F0 Evidence SHA-256
+            <input name="f0_evidence_sha256" minlength="64" maxlength="64" disabled />
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            F4 Training Profile JSON
+            <input name="f4_profile" placeholder="/absolute/path/f4.json" disabled />
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            F4 Profile SHA-256
+            <input name="f4_profile_sha256" minlength="64" maxlength="64" disabled />
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            F5 Held-Out Profile JSON
+            <input name="f5_profile" placeholder="/absolute/path/f5.json" disabled />
+          </label>
+          <label class="sensor-v2-full-field" hidden>
+            F5 Profile SHA-256
+            <input name="f5_profile_sha256" minlength="64" maxlength="64" disabled />
+          </label>
           <label>
             Device
             <input name="device" value="cuda:0" />
@@ -114,7 +148,7 @@
             </select>
             <small>Explicit is retained for spring-release characterization, but its current uncalibrated 200 N·m/rad setup is numerically unstable and cannot start Panel training.</small>
           </label>
-          <label>
+          <label id="single-seed-field">
             Seed
             <input name="seed" type="number" placeholder="optional" />
           </label>

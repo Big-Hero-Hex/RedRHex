@@ -392,13 +392,22 @@ class ForwardResidualActionContractV2:
     """Canonical forward CPG plus six learned main-drive residuals."""
 
     main_residual_scale_rad_s: float = 0.8
-    forward_command_reference_m_s: float = 0.45
+    forward_command_reference_m_s: float = 0.40
     forward_bias_scale: float = 1.0
     phase_lock_gain: float = 1.2
     phase_correction_limit_rad_s: float = 2.0
     residual_cap_ratio: float = 0.26
     action_clip: float = 1.0
-    main_velocity_limit_rad_s: float = 3.0 * math.pi
+    action_warmup_steps: int = 30
+    main_velocity_limit_rad_s: float = 15.0
+    initial_main_position_rad: tuple[float, ...] = (
+        math.pi / 4.0,
+        math.pi / 4.0,
+        math.pi / 4.0,
+        -math.pi / 4.0,
+        -math.pi / 4.0,
+        -math.pi / 4.0,
+    )
     abad_neutral_position_rad: tuple[float, ...] = (0.0,) * 6
     main_output_sign: tuple[float, ...] = (1.0,) * 6
     abad_output_sign: tuple[float, ...] = (1.0,) * 6
@@ -407,11 +416,20 @@ class ForwardResidualActionContractV2:
 
     ACTION_DIM: ClassVar[int] = 12
     POLICY_RATE_HZ: ClassVar[float] = 60.0
-    NOMINAL_GAIT_FREQUENCY_HZ: ClassVar[float] = 1.0
+    # The fixed 0.9 Hz clock and 65/35 time split reproduce the validated
+    # forward baseline.  The small 60-degree stance arc must consume most of
+    # the cycle; using the uniform clock angle directly regresses to an
+    # unsupported 1/6-cycle stance and caused deterministic body collapse.
+    NOMINAL_GAIT_FREQUENCY_HZ: ClassVar[float] = 0.9
     STANCE_PHASE_START_RAD: ClassVar[float] = -math.pi / 6.0
     STANCE_PHASE_END_RAD: ClassVar[float] = math.pi / 6.0
-    STANCE_VELOCITY_RATIO: ClassVar[float] = 0.15
-    SWING_VELOCITY_RATIO: ClassVar[float] = 1.5
+    STANCE_DUTY_CYCLE: ClassVar[float] = 0.65
+    STANCE_VELOCITY_RATIO: ClassVar[float] = (1.0 / 6.0) / STANCE_DUTY_CYCLE
+    SWING_VELOCITY_RATIO: ClassVar[float] = (5.0 / 6.0) / (1.0 - STANCE_DUTY_CYCLE)
+    FORWARD_ACTIVE_MIN_M_S: ClassVar[float] = 0.10
+    MAX_ABS_LATERAL_COMMAND_M_S: ClassVar[float] = 0.08
+    MAX_ABS_YAW_COMMAND_RAD_S: ClassVar[float] = 0.10
+    RESIDUAL_CAP_MIN_RAD_S: ClassVar[float] = 0.08
     LEG_ORDER: ClassVar[tuple[str, ...]] = (
         "right_front",
         "right_middle",
@@ -456,6 +474,24 @@ class ForwardResidualActionContractV2:
             if not math.isfinite(value) or value <= 0.0:
                 raise ContractError(f"{name} must be positive and finite")
             object.__setattr__(self, name, value)
+        try:
+            warmup_steps = float(self.action_warmup_steps)
+        except (TypeError, ValueError) as exc:
+            raise ContractError("action_warmup_steps must be a non-negative integer") from exc
+        if (
+            isinstance(self.action_warmup_steps, bool)
+            or not math.isfinite(warmup_steps)
+            or not warmup_steps.is_integer()
+            or warmup_steps < 0.0
+        ):
+            raise ContractError("action_warmup_steps must be a non-negative integer")
+        object.__setattr__(self, "action_warmup_steps", int(warmup_steps))
+        initial_main = _finite_tuple(
+            self.initial_main_position_rad,
+            6,
+            "initial_main_position_rad",
+        )
+        object.__setattr__(self, "initial_main_position_rad", initial_main)
         neutral = _finite_tuple(self.abad_neutral_position_rad, 6, "abad_neutral_position_rad")
         object.__setattr__(self, "abad_neutral_position_rad", neutral)
         for name in ("main_output_sign", "abad_output_sign"):
@@ -497,18 +533,45 @@ class ForwardResidualActionContractV2:
                 "frequency_hz": self.NOMINAL_GAIT_FREQUENCY_HZ,
                 "stance_phase_start_rad": self.STANCE_PHASE_START_RAD,
                 "stance_phase_end_rad": self.STANCE_PHASE_END_RAD,
+                "stance_duty_cycle": self.STANCE_DUTY_CYCLE,
                 "stance_velocity_ratio": self.STANCE_VELOCITY_RATIO,
                 "swing_velocity_ratio": self.SWING_VELOCITY_RATIO,
                 "phase_lock_gain": self.phase_lock_gain,
                 "phase_correction_limit_rad_s": self.phase_correction_limit_rad_s,
                 "forward_command_reference_m_s": self.forward_command_reference_m_s,
                 "forward_bias_scale": self.forward_bias_scale,
+                "phase_error_position_frame": "joint_position_times_leg_direction_multiplier",
+                "phase_clock": "motion_relative_command_scaled_startup_warmup",
+                "phase_reference": "uniform_time_piecewise_leg_angle",
+                "motion_counter_reset": "reset_to_zero_when_vx_is_inactive",
             },
             "main_residual_scale_rad_s": self.main_residual_scale_rad_s,
             "residual_cap_ratio": self.residual_cap_ratio,
+            "residual_cap_min_rad_s": self.RESIDUAL_CAP_MIN_RAD_S,
             "action_clip": self.action_clip,
+            "strict_forward_command_gate": {
+                "active_when_vx_greater_than_m_s": self.FORWARD_ACTIVE_MIN_M_S,
+                "max_abs_vy_m_s": self.MAX_ABS_LATERAL_COMMAND_M_S,
+                "max_abs_wz_rad_s": self.MAX_ABS_YAW_COMMAND_RAD_S,
+                "out_of_plane_boundary": "inclusive",
+            },
+            "action_warmup": {
+                "steps": self.action_warmup_steps,
+                "scale": "clip((motion_step+1)/steps,0,1)",
+                "scope": "nominal_plus_residual_main_target",
+            },
             "main_velocity_limit_rad_s": self.main_velocity_limit_rad_s,
+            "initial_main_position_rad": list(self.initial_main_position_rad),
             "abad_neutral_position_rad": list(self.abad_neutral_position_rad),
+            "target_layers": {
+                "raw_contract_target_slew_rate_rad_s2": None,
+                "hardware_safety_may_tighten": [
+                    "action_clip",
+                    "main_velocity_limit_rad_s",
+                    "main_drive_slew_rate_rad_s2",
+                ],
+                "parity_target": "raw_contract_target_before_hardware_safety",
+            },
         }
         if include_sha256:
             result["sha256"] = canonical_sha256(result)
@@ -525,6 +588,28 @@ class ForwardResidualActionContractV2:
     def decoder_sha256(self) -> str:
         return self.sha256
 
+    def command_scaled_cycle_steps(self, command_vx_m_s: float) -> int:
+        """Return the nearest whole policy samples in one procedural gait cycle.
+
+        Forward speed scales the hidden time clock, so acceptance must average
+        periodic body velocity over the same command-scaled cycle instead of
+        requiring every raw 60 Hz sample to satisfy a steady-state bound.
+        """
+
+        command_vx = float(command_vx_m_s)
+        if not math.isfinite(command_vx):
+            raise ContractError("command_vx_m_s must be finite")
+        if command_vx <= self.FORWARD_ACTIVE_MIN_M_S:
+            raise ContractError("command_vx_m_s must activate the forward gait")
+        command_scale = min(
+            max(command_vx / self.forward_command_reference_m_s, 0.0),
+            1.0,
+        )
+        samples = self.policy_rate_hz / (
+            self.NOMINAL_GAIT_FREQUENCY_HZ * command_scale
+        )
+        return max(1, int(math.floor(samples + 0.5)))
+
     def validate(self) -> "ForwardResidualActionContractV2":
         return self.from_dict(self.to_dict(include_sha256=True))
 
@@ -539,6 +624,9 @@ class ForwardResidualActionContractV2:
         gait = data.get("procedural_gait")
         if not isinstance(gait, Mapping):
             raise ContractError("procedural_gait must be an object")
+        warmup = data.get("action_warmup")
+        if not isinstance(warmup, Mapping):
+            raise ContractError("action_warmup must be an object")
         contract = cls(
             main_residual_scale_rad_s=float(data["main_residual_scale_rad_s"]),
             forward_command_reference_m_s=float(gait["forward_command_reference_m_s"]),
@@ -547,7 +635,9 @@ class ForwardResidualActionContractV2:
             phase_correction_limit_rad_s=float(gait["phase_correction_limit_rad_s"]),
             residual_cap_ratio=float(data["residual_cap_ratio"]),
             action_clip=float(data["action_clip"]),
+            action_warmup_steps=int(warmup["steps"]),
             main_velocity_limit_rad_s=float(data["main_velocity_limit_rad_s"]),
+            initial_main_position_rad=tuple(data["initial_main_position_rad"]),
             abad_neutral_position_rad=tuple(data["abad_neutral_position_rad"]),
             main_output_sign=tuple(data["main_output_sign"]),
             abad_output_sign=tuple(data["abad_output_sign"]),
@@ -681,6 +771,11 @@ class SensorCalibrationProfileV2:
         ):
             blockers.extend(f"{prefix}_{index}_evidence" for index, item in enumerate(evidence) if not item.strip())
         blockers.extend(
+            f"main_encoder_{index}_counts_per_rad"
+            for index, item in enumerate(self.main_counts_per_rad)
+            if item is None
+        )
+        blockers.extend(
             f"abad_encoder_{index}_counts_per_rad"
             for index, item in enumerate(self.abad_counts_per_rad)
             if item is None
@@ -795,3 +890,40 @@ class SensorCalibrationProfileV2:
         if supplied_hash is not None and supplied_hash != profile.sha256:
             raise ContractError("sha256 does not match canonical calibration profile")
         return profile
+
+
+def validate_calibration_lineage_v2(
+    training_calibration: SensorCalibrationProfileV2,
+    runtime_calibration: SensorCalibrationProfileV2,
+    *,
+    observation_contract: StudentObservationContractV2,
+    action_contract: ForwardResidualActionContractV2,
+    require_runtime_hardware_ready: bool = False,
+) -> tuple[SensorCalibrationProfileV2, SensorCalibrationProfileV2]:
+    """Validate checkpoint-time and deployment-time calibration ownership."""
+
+    observation = observation_contract.validate()
+    action = action_contract.validate()
+    training = training_calibration.validate(require_hardware_ready=False)
+    runtime = runtime_calibration.validate(
+        require_hardware_ready=require_runtime_hardware_ready
+    )
+    expected = {
+        "observation_contract_sha256": observation.sha256,
+        "action_contract_sha256": action.sha256,
+        "attitude_mode": observation.attitude_mode,
+        "imu_frame_id": observation.imu_frame_id,
+        "imu_to_body_wxyz": observation.imu_to_body_wxyz,
+    }
+    for label, profile in (("training", training), ("runtime", runtime)):
+        mismatches = [
+            name
+            for name, value in expected.items()
+            if getattr(profile, name) != value
+        ]
+        if mismatches:
+            raise ContractError(
+                f"{label} calibration lineage disagrees with shared contracts: "
+                + ", ".join(mismatches)
+            )
+    return training, runtime

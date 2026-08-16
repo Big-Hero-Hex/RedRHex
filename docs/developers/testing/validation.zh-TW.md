@@ -6,7 +6,7 @@ audience: developer
 type: how-to
 status: active
 owner: core
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-15
 ---
 
 <a id="tiers"></a>
@@ -17,13 +17,39 @@ last_reviewed: 2026-08-07
 <a id="cpu"></a>
 ## CPU 與元件測試
 
+從 repository root 執行下列 dependency-light contract，作為 merge 的最低門檻。目前 mainline code CI 涵蓋 Training Panel service、CPU sim-to-real subset、browser-independent JavaScript 與 desktop-launcher source test；在 CI coverage 擴充前，也要於本機執行 Reward Agent、Autopilot MCP 與 ROS contract。Autopilot MCP HTTP test 需要綁定 loopback socket 的權限，process test 可能使用 `tmux`。
+
 ```bash
 python -m unittest discover -s tools/documentation/tests -p 'test_*.py'
 python -m unittest discover -s tools/reward_agent/tests -p 'test_*.py'
-pytest -q tools/sim2real/tests tools/training_panel/tests
+python -m unittest discover -s plugins/redrhex-autopilot/tests -p 'test_*.py'
+python -m pytest -q tools/training_panel/tests
+python -m pytest -q tools/sim2real/tests \
+  --ignore=tools/sim2real/tests/test_abad_target_mapping.py \
+  --ignore=tools/sim2real/tests/test_physics_profile.py \
+  --ignore=tools/sim2real/tests/test_target_delay.py \
+  --ignore=tools/sim2real/tests/test_torsion_spring_model.py
+PYTHONPATH="$PWD:$PWD/source/redrhex_policy_io:$PWD/ros2_ws/src/redrhex_rl_controller:$PWD/ros2_ws/src/redrhex_lowlevel_bridge" \
+  python -m pytest -q ros2_ws/src/redrhex_lowlevel_bridge/test ros2_ws/src/redrhex_rl_controller/test
+node --check tools/training_panel/static/app.js
+node --check tools/training_panel/remote_web/remote_app.js
+node --test tools/training_panel/remote_web/*.test.mjs
 ```
 
-部分 Training Panel UI test 另有瀏覽器或執行環境需求；修改 UI 行為時必須執行。
+四個被排除的 sim-to-real module 需要較完整的 project runtime；其 contract 或 consumer 有變更時，這些 targeted test 仍是必要項。Lightweight suite 通過不能取代這些測試。
+
+<a id="ui-and-launchers"></a>
+## Browser 與 desktop launcher
+
+Mother 或 Child 的 markup、style、navigation、role 或 action 有變更時，必須執行完整 browser suite。請先安裝 repository 的 Playwright browser/runtime prerequisite。
+
+```bash
+python -m pytest -q tools/training_panel/ui_tests
+bash tools/macos/tests/test_redrhex_remote.sh
+pwsh -NoProfile -File tools/windows/tests/test_redrhex_remote.ps1
+```
+
+PowerShell source test 需要 `pwsh`；此外也必須在受支援的 Windows 與 macOS host 上執行 active launcher plan 的 interactive smoke checklist。Source 與 mocked browser test 不能證明 first-launch security、SSH authentication、tunnel lifetime 或 target-workstation behavior。
 
 <a id="isaac"></a>
 ## Isaac 驗證
@@ -43,4 +69,4 @@ python -m tools.documentation validate --all
 python -m tools.documentation inventory --format json
 ```
 
-Commit 前使用 `validate --staged`；PR 必須包含正確的 `Docs impact` 與 `Docs reason` 欄位。語意新鮮度仍由 review 負責。
+Publication 變更需先安裝 `docs/requirements-site.txt`，將 canonical source stage 到空的 temporary directory，再透過 `mkdocs.yml` 執行 strict bilingual MkDocs build。Commit 前使用 `validate --staged`；PR 必須包含正確的 `Docs impact` 與 `Docs reason` 欄位。語意新鮮度仍由 review 負責。

@@ -6,13 +6,13 @@ audience: operator
 type: troubleshooting
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-16
 ---
 
 <a id="imports"></a>
 ## Import 或 task 錯誤
 
-若無法 import `isaaclab`、`pxr` 或 RedRHex task，請透過 `isaaclab.sh -p` 執行，在該環境重新安裝 `source/RedRhex`，並用 `scripts/list_envs.py` 驗證。不要把一般 shell Python 與 Isaac Lab interpreter 混用。
+若無法 import `isaaclab`、`pxr`、`redrhex_policy_io` 或 RedRHex task，請執行 `isaaclab.sh -p scripts/install_redrhex.py`，再用 `scripts/list_envs.py` 驗證。Installer 會使用同一個 interpreter，並在擴充套件之前先安裝儲存庫內的共用 distribution。不要把一般 shell Python 與 Isaac Lab interpreter 混用。
 
 <a id="assets"></a>
 ## USD 資產遺失或過小

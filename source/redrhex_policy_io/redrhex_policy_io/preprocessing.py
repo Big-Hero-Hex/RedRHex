@@ -303,9 +303,11 @@ class SensorFrameBuilderV2:
             derived_main_velocity = wrapped_velocity(
                 main_position, self._previous_main_position_rad, dt
             )
-            abad_velocity = wrapped_velocity(
-                abad_position, self._previous_abad_position_rad, dt
-            )
+            # ABAD joints are bounded revolute joints, not continuous encoders.
+            # Wrapping their delta would hide a real out-of-range jump and would
+            # disagree with the simulator path.  Only the six main-drive
+            # encoders use the shortest wrapped difference.
+            abad_velocity = (abad_position - self._previous_abad_position_rad) / dt
 
         if main_velocity_rad_s is None:
             main_velocity = derived_main_velocity

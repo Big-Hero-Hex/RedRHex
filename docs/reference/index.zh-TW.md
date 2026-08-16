@@ -6,7 +6,7 @@ audience: shared
 type: index
 status: active
 owner: project
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-15
 ---
 
 <a id="current-references"></a>
@@ -16,6 +16,7 @@ last_reviewed: 2026-08-07
 - [執行路徑與產物](runtime-layout.zh-TW.md)
 - [訓練與部署策略契約](policy-contract.zh-TW.md)
 - [版本與相容性矩陣](compatibility.zh-TW.md)
+- [專案管理同步](project-management-sync.zh-TW.md)
 
 <a id="component-references"></a>
 ## 元件參考資料

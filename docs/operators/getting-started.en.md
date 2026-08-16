@@ -6,7 +6,7 @@ audience: operator
 type: tutorial
 status: active
 owner: training
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-16
 ---
 
 <a id="prerequisites"></a>
@@ -28,10 +28,10 @@ From the repository root:
 ```bash
 git lfs install
 git lfs pull
-"$ISAACLAB_ROOT/isaaclab.sh" -p -m pip install -e source/RedRhex
+"$ISAACLAB_ROOT/isaaclab.sh" -p scripts/install_redrhex.py
 ```
 
-The USD assets are stored through Git LFS. A tiny pointer file in place of `RedRhex.usd` means `git lfs pull` has not completed.
+The installer uses the active Isaac Python and installs the repository-local policy-I/O distribution before the RedRHex extension; `redrhex-policy-io` is not fetched from a package index. Add `--dry-run` to inspect both ordered pip commands. The USD assets are stored through Git LFS. A tiny pointer file in place of `RedRhex.usd` means `git lfs pull` has not completed.
 
 <a id="verify"></a>
 ## Verify the environment

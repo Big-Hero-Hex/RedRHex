@@ -10,6 +10,7 @@ from .contracts import (
     StudentObservationContractV2,
     canonical_json_bytes,
     canonical_sha256,
+    validate_calibration_lineage_v2,
 )
 from .freshness import ChannelFreshnessReportV2, ChannelFreshnessTrackerV2
 from .golden import generate_sensor_frame_golden_v2, load_sensor_frame_golden_v2
@@ -32,6 +33,12 @@ BUNDLE_CONTRACT_ID_V2 = "redrhex.sensor-policy-bundle.v2"
 
 def build_sensor_frame_torch(*args, **kwargs):
     from .torch_utils import build_sensor_frame_torch as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def decode_forward_residual_action_v2_torch(*args, **kwargs):
+    from .torch_utils import decode_forward_residual_action_v2_torch as implementation
 
     return implementation(*args, **kwargs)
 
@@ -61,6 +68,10 @@ def wrapped_velocity_torch(*args, **kwargs):
 
 
 def __getattr__(name):
+    if name == "DecodedForwardActionV2Torch":
+        from .torch_utils import DecodedForwardActionV2Torch
+
+        return DecodedForwardActionV2Torch
     if name == "BatchedCausalGyroAccelAttitudeV2":
         from .torch_utils import BatchedCausalGyroAccelAttitudeV2
 
@@ -79,6 +90,7 @@ __all__ = [
     "ChannelFreshnessTrackerV2",
     "ContractError",
     "DecodedForwardActionV2",
+    "DecodedForwardActionV2Torch",
     "FeatureSpecV2",
     "ForwardResidualActionContractV2",
     "SensorCalibrationProfileV2",
@@ -90,12 +102,14 @@ __all__ = [
     "canonical_json_bytes",
     "canonical_sha256",
     "decode_forward_residual_action_v2",
+    "decode_forward_residual_action_v2_torch",
     "generate_sensor_frame_golden_v2",
     "load_sensor_frame_golden_v2",
     "projected_gravity_from_quaternion_torch",
     "projected_gravity_from_validated_quaternion",
     "transform_imu_vector",
     "transform_imu_vector_torch",
+    "validate_calibration_lineage_v2",
     "wrap_angle",
     "wrap_angle_torch",
     "wrapped_velocity",

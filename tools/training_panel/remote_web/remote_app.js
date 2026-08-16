@@ -159,6 +159,14 @@ const state = {
     teacher_iterations: 1500,
     distillation_iterations: 800,
     ppo_iterations: 1500,
+    robust_iterations: 600,
+    seeds: "42,43,44",
+    f0_evidence: "",
+    f0_evidence_sha256: "",
+    f4_profile: "",
+    f4_profile_sha256: "",
+    f5_profile: "",
+    f5_profile_sha256: "",
   }),
   trainFolderCreating: false,
   selectedRunId: routeFromLocation().run,
@@ -1024,7 +1032,7 @@ function trainView() {
         <h2>Launch Training</h2>
         <p class="muted">Route-aware, idempotent queueing. Irrelevant fields are omitted before the request leaves this browser.</p>
         <div class="button-row wrap train-defaults"><button data-action="train-default-smoke">Smoke defaults</button><button data-action="train-default-debug">Debug defaults</button><span class="badge good">Native springs</span></div>
-        <label>Training Route <select id="training-route"><option value="standard" ${route === "standard" ? "selected" : ""}>Standard</option><option value="sensor_v2_full" ${route === "sensor_v2_full" ? "selected" : ""}>Full F1 → F2 → F3 Pipeline</option><option value="sensor_v2_teacher" ${route === "sensor_v2_teacher" ? "selected" : ""}>F1 Teacher</option><option value="sensor_v2_distillation" ${route === "sensor_v2_distillation" ? "selected" : ""}>F2 Distillation</option><option value="sensor_v2_ppo" ${route === "sensor_v2_ppo" ? "selected" : ""}>F3 PPO</option></select></label>
+        <label>Training Route <select id="training-route"><option value="standard" ${route === "standard" ? "selected" : ""}>Standard</option><option value="sensor_v2_full" ${route === "sensor_v2_full" ? "selected" : ""}>Evidence-Gated F0 → F5 Pipeline</option><option value="sensor_v2_ungated_debug" ${route === "sensor_v2_ungated_debug" ? "selected" : ""}>DEBUG F1 → F3 (non-promotable)</option><option value="sensor_v2_teacher" ${route === "sensor_v2_teacher" ? "selected" : ""}>F1 Teacher</option><option value="sensor_v2_distillation" ${route === "sensor_v2_distillation" ? "selected" : ""}>F2 Distillation</option><option value="sensor_v2_ppo" ${route === "sensor_v2_ppo" ? "selected" : ""}>F3 PPO</option></select></label>
         <label class="${route === "standard" ? "" : "hidden"}">Task <input id="task" value="${escapeHtml(form.task)}"></label>
         <div class="input-row ${route === "sensor_v2_full" ? "hidden" : ""}">
           <label>Run Name <input id="run-display-name" maxlength="120" placeholder="optional" value="${escapeHtml(form.display_name || "")}"></label>
@@ -1035,18 +1043,30 @@ function trainView() {
           </label>
         </div>
         ${folderCreateFields({ idPrefix: "run-folder-before-launch", value: currentFolder, hidden: !trainFolderCreating, placeholder: "New launch folder" })}
-        <div class="input-row">
+        <div class="input-row ${["sensor_v2_full", "sensor_v2_ungated_debug"].includes(route) ? "hidden" : ""}">
           <label>Envs <input id="num-envs" type="number" min="1" max="8192" value="${escapeHtml(form.num_envs)}"></label>
           <label>Iterations <input id="max-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.max_iterations)}"></label>
         </div>
-        <div class="input-row ${route === "sensor_v2_full" ? "" : "hidden"}">
+        <div class="input-row ${["sensor_v2_full", "sensor_v2_ungated_debug"].includes(route) ? "" : "hidden"}">
           <label>F1 iterations <input id="teacher-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.teacher_iterations)}"></label>
           <label>F2 iterations <input id="distillation-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.distillation_iterations)}"></label>
           <label>F3 iterations <input id="ppo-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.ppo_iterations)}"></label>
         </div>
+        <div class="${route === "sensor_v2_full" ? "" : "hidden"}">
+          <div class="input-row">
+            <label>F4 iterations <input id="robust-iterations" type="number" min="1" max="100000" value="${escapeHtml(form.robust_iterations || 600)}"></label>
+            <label>Seeds <input id="pipeline-seeds" value="${escapeHtml(form.seeds || "42,43,44")}"><small>At least three unique comma-separated seeds.</small></label>
+          </div>
+          <label>F0 evidence JSON <input id="f0-evidence" value="${escapeHtml(form.f0_evidence || "")}" placeholder="/absolute/path/f0.json"></label>
+          <label>F0 evidence SHA-256 <input id="f0-evidence-sha256" value="${escapeHtml(form.f0_evidence_sha256 || "")}" maxlength="64"></label>
+          <label>F4 training profile JSON <input id="f4-profile" value="${escapeHtml(form.f4_profile || "")}" placeholder="/absolute/path/f4.json"></label>
+          <label>F4 profile SHA-256 <input id="f4-profile-sha256" value="${escapeHtml(form.f4_profile_sha256 || "")}" maxlength="64"></label>
+          <label>F5 held-out profile JSON <input id="f5-profile" value="${escapeHtml(form.f5_profile || "")}" placeholder="/absolute/path/f5.json"></label>
+          <label>F5 profile SHA-256 <input id="f5-profile-sha256" value="${escapeHtml(form.f5_profile_sha256 || "")}" maxlength="64"></label>
+        </div>
         ${["standard", "sensor_v2_distillation", "sensor_v2_ppo"].includes(route) ? `<fieldset class="checkpoint-reference"><legend>${route === "standard" ? "Resume from checkpoint (optional)" : "Source checkpoint (required)"}</legend><label>Run <select id="resume-run"><option value="">${route === "standard" ? "Start a new run" : "Select a source run"}</option>${historyRunsForView().filter((run) => run.latest_checkpoint).map((run) => `<option value="${escapeHtml(run.id)}" ${run.id === form.resume_run_id ? "selected" : ""}>${escapeHtml(run.display_name || run.id)}</option>`).join("")}</select></label><label class="${needsSource ? "" : "hidden"}">Iteration <select id="resume-iteration">${sourceOptions.map((option) => `<option value="${escapeHtml(checkpointIteration(option.path) ?? "")}" ${String(checkpointIteration(option.path) ?? "") === String(form.resume_iteration ?? "") ? "selected" : ""}>${escapeHtml(option.label || `Iteration ${checkpointIteration(option.path)}`)}</option>`).join("")}</select></label><small>Only run ID and iteration are sent; Mother resolves and containment-checks the path.</small></fieldset>` : ""}
         <label>Device <input id="device" value="${escapeHtml(form.device)}"></label>
-        <label>Seed <input id="seed" type="number" placeholder="optional" value="${escapeHtml(form.seed ?? "")}"></label>
+        <label class="${route === "sensor_v2_full" ? "hidden" : ""}">Seed <input id="seed" type="number" placeholder="optional" value="${escapeHtml(form.seed ?? "")}"></label>
         <div class="train-preset-pickers">
           <label class="preset-select-card">Reward Preset
             <select id="train-preset">
@@ -2680,6 +2700,14 @@ async function queueTraining() {
     teacher_iterations: Number(document.querySelector("#teacher-iterations")?.value || state.trainForm.teacher_iterations || 1500),
     distillation_iterations: Number(document.querySelector("#distillation-iterations")?.value || state.trainForm.distillation_iterations || 800),
     ppo_iterations: Number(document.querySelector("#ppo-iterations")?.value || state.trainForm.ppo_iterations || 1500),
+    robust_iterations: Number(document.querySelector("#robust-iterations")?.value || state.trainForm.robust_iterations || 600),
+    seeds: document.querySelector("#pipeline-seeds")?.value || state.trainForm.seeds || "42,43,44",
+    f0_evidence: document.querySelector("#f0-evidence")?.value || "",
+    f0_evidence_sha256: document.querySelector("#f0-evidence-sha256")?.value || "",
+    f4_profile: document.querySelector("#f4-profile")?.value || "",
+    f4_profile_sha256: document.querySelector("#f4-profile-sha256")?.value || "",
+    f5_profile: document.querySelector("#f5-profile")?.value || "",
+    f5_profile_sha256: document.querySelector("#f5-profile-sha256")?.value || "",
   };
   localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
   const presetId = document.querySelector("#train-preset")?.value || state.selectedPresetId;
@@ -2710,6 +2738,14 @@ async function queueTraining() {
     teacher_iterations: state.trainForm.teacher_iterations,
     distillation_iterations: state.trainForm.distillation_iterations,
     ppo_iterations: state.trainForm.ppo_iterations,
+    robust_iterations: state.trainForm.robust_iterations,
+    seeds: state.trainForm.seeds,
+    f0_evidence: state.trainForm.f0_evidence,
+    f0_evidence_sha256: state.trainForm.f0_evidence_sha256,
+    f4_profile: state.trainForm.f4_profile,
+    f4_profile_sha256: state.trainForm.f4_profile_sha256,
+    f5_profile: state.trainForm.f5_profile,
+    f5_profile_sha256: state.trainForm.f5_profile_sha256,
   };
   if (state.trainForm.resume_run_id) {
     params.resume = state.trainForm.training_route === "standard";
@@ -2717,6 +2753,10 @@ async function queueTraining() {
   }
   if (["sensor_v2_distillation", "sensor_v2_ppo"].includes(state.trainForm.training_route) && !params.checkpoint_ref) {
     throw new Error("F2 and F3 require a source run and checkpoint iteration.");
+  }
+  if (state.trainForm.training_route === "sensor_v2_full") {
+    const missing = ["f0_evidence", "f0_evidence_sha256", "f4_profile", "f4_profile_sha256", "f5_profile", "f5_profile_sha256"].filter((key) => !String(params[key] || "").trim());
+    if (missing.length) throw new Error(`F0/F4/F5 evidence fields are required: ${missing.join(", ")}`);
   }
   if (state.trainForm.display_name) params.display_name = state.trainForm.display_name;
   if (state.trainForm.folder) params.folder = state.trainForm.folder;
@@ -3827,7 +3867,7 @@ document.addEventListener("change", (event) => {
     render();
     return;
   }
-  if (["training-route", "task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed", "resume-run", "resume-iteration", "teacher-iterations", "distillation-iterations", "ppo-iterations"].includes(event.target.id)) {
+  if (["training-route", "task", "run-display-name", "run-folder-before-launch", "run-folder-before-launch-new", "num-envs", "max-iterations", "device", "seed", "resume-run", "resume-iteration", "teacher-iterations", "distillation-iterations", "ppo-iterations", "robust-iterations", "pipeline-seeds", "f0-evidence", "f0-evidence-sha256", "f4-profile", "f4-profile-sha256", "f5-profile", "f5-profile-sha256"].includes(event.target.id)) {
     state.trainFolderCreating = document.querySelector("#run-folder-before-launch")?.value === "__new__";
     state.trainForm = {
       ...state.trainForm,
@@ -3844,6 +3884,14 @@ document.addEventListener("change", (event) => {
       teacher_iterations: Number(document.querySelector("#teacher-iterations")?.value || state.trainForm.teacher_iterations || 1500),
       distillation_iterations: Number(document.querySelector("#distillation-iterations")?.value || state.trainForm.distillation_iterations || 800),
       ppo_iterations: Number(document.querySelector("#ppo-iterations")?.value || state.trainForm.ppo_iterations || 1500),
+      robust_iterations: Number(document.querySelector("#robust-iterations")?.value || state.trainForm.robust_iterations || 600),
+      seeds: document.querySelector("#pipeline-seeds")?.value || state.trainForm.seeds || "42,43,44",
+      f0_evidence: document.querySelector("#f0-evidence")?.value || "",
+      f0_evidence_sha256: document.querySelector("#f0-evidence-sha256")?.value || "",
+      f4_profile: document.querySelector("#f4-profile")?.value || "",
+      f4_profile_sha256: document.querySelector("#f4-profile-sha256")?.value || "",
+      f5_profile: document.querySelector("#f5-profile")?.value || "",
+      f5_profile_sha256: document.querySelector("#f5-profile-sha256")?.value || "",
     };
     localStorage.setItem("redrhex_child_train_draft", JSON.stringify(state.trainForm));
     document.querySelector('[data-folder-create="run-folder-before-launch"]')?.classList.toggle("hidden", !state.trainFolderCreating);

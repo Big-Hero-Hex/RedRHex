@@ -27,6 +27,20 @@ def _require_last_dim(tensor: torch.Tensor, expected: int, name: str) -> None:
         raise ValueError(f"{name} must end in dimension {expected}; got {tuple(tensor.shape)}")
 
 
+def pad_main_actions_v2(main_actions: torch.Tensor) -> torch.Tensor:
+    """Pad the six physically effective forward actions with neutral ABAD commands."""
+
+    _require_last_dim(main_actions, MAIN_ACTION_DIM_V2, "main actions")
+    return torch.cat((main_actions, torch.zeros_like(main_actions)), dim=-1)
+
+
+def strict_forward_actions_v2(actions: torch.Tensor) -> torch.Tensor:
+    """Project an action tensor onto the executable strict-forward contract."""
+
+    _require_last_dim(actions, ACTION_DIM_V2, "actions")
+    return pad_main_actions_v2(actions[..., :MAIN_ACTION_DIM_V2].clamp(-1.0, 1.0))
+
+
 class FeaturewiseNormalizerV2(nn.Module):
     """Featurewise population-statistics normalizer with serializable state."""
 
@@ -235,14 +249,18 @@ class SensorStudentCoreV2(nn.Module):
         latent, normalized_command = self.encode(sensor_history, command)
         actor_input = torch.cat((latent, normalized_command), dim=-1)
         main_residuals = self.actor_head(actor_input)
-        neutral_abad = torch.zeros_like(main_residuals)
-        actions = torch.cat((main_residuals, neutral_abad), dim=-1)
+        actions = pad_main_actions_v2(main_residuals)
         base_velocity_estimate = self.base_velocity_head(latent)
         next_sensor_frame = self.next_frame_head(actor_input)
         return actions, base_velocity_estimate, next_sensor_frame
 
     def act(self, sensor_history: torch.Tensor, command: torch.Tensor) -> torch.Tensor:
         return self(sensor_history, command)[0]
+
+    def reset(self, dones: torch.Tensor | None = None) -> None:
+        """Match recurrent-policy playback interfaces; this feed-forward actor has no state."""
+
+        del dones
 
 
 class RolloutActionsV2(NamedTuple):
@@ -278,8 +296,7 @@ class SensorStudentTeacherV2(nn.Module):
             actions = actions[0]
         if not isinstance(actions, torch.Tensor):
             raise TypeError("teacher must return a tensor or a tuple whose first item is a tensor")
-        _require_last_dim(actions, ACTION_DIM_V2, "teacher actions")
-        return actions
+        return strict_forward_actions_v2(actions)
 
     def rollout(
         self,
@@ -310,7 +327,7 @@ class SensorStudentTeacherV2(nn.Module):
             ) * noise_std
         else:
             noise = torch.zeros_like(student_actions)
-        executed = torch.clamp(beta * teacher_actions + (1.0 - beta) * student_actions + noise, -1.0, 1.0)
-        # Strict forward V2 never executes learned/noisy ABAD outputs.
-        executed = torch.cat((executed[..., :MAIN_ACTION_DIM_V2], torch.zeros_like(executed[..., 6:12])), dim=-1)
+        executed = strict_forward_actions_v2(
+            beta * teacher_actions + (1.0 - beta) * student_actions + noise
+        )
         return RolloutActionsV2(teacher_actions, student_actions, executed, velocity, next_frame)

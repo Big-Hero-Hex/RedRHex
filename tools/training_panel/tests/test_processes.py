@@ -877,6 +877,7 @@ class ProcessRegistryTests(unittest.TestCase):
                     "params": {
                         "task": "Template-Redrhex-ForwardFast-Direct-v0",
                         "spring_backend": "native",
+                        "seed": 43,
                     },
                 }
             )
@@ -891,6 +892,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertIn("scripts/rsl_rl/play.py", debug["command"])
                 self.assertIn("--spring-backend native", debug["command"])
                 self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", debug["command"])
+                self.assertIn("--seed 43", debug["command"])
                 self.assertIn("--initial_command forward", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
@@ -942,6 +944,7 @@ class ProcessRegistryTests(unittest.TestCase):
                     "params": {
                         "task": "Template-Redrhex-ForwardFast-Direct-v0",
                         "spring_backend": "native",
+                        "seed": 43,
                     },
                 }
             )
@@ -966,6 +969,7 @@ class ProcessRegistryTests(unittest.TestCase):
                 self.assertIn("--video_fps 30", debug["command"])
                 self.assertIn("--rendering_mode quality", debug["command"])
                 self.assertIn("--task Template-Redrhex-ForwardFast-Direct-v0", debug["command"])
+                self.assertIn("--seed 43", debug["command"])
                 self.assertIn("--initial_command forward", debug["command"])
                 self.assertIn("--terrain_override_file", debug["command"])
                 self.assertIn("--camera_follow_robot", debug["command"])
@@ -1902,6 +1906,36 @@ class ProcessRegistryTests(unittest.TestCase):
         )
         self.assertTrue(ProcessRegistry._training_commands_match(recorded, observed))
 
+    def test_training_command_match_accepts_same_sensor_v2_full_pipeline(self):
+        recorded = (
+            "/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_sensor_v2_full_pipeline.py "
+            "--isaaclab-launcher /IsaacLab/isaaclab.sh --f0-evidence /tmp/f0.json "
+            f"--f0-evidence-sha256 {'a' * 64} --f4-profile /tmp/f4.json "
+            f"--f4-profile-sha256 {'b' * 64} --f5-profile /tmp/f5.json "
+            f"--f5-profile-sha256 {'c' * 64} --seeds 42 43 44 --num_envs 64 --device cuda:0"
+        )
+        observed = (
+            "python scripts/rsl_rl/train_sensor_v2_full_pipeline.py --device cuda:0 "
+            f"--f5-profile-sha256 {'c' * 64} --f5-profile /tmp/f5.json "
+            f"--f4-profile-sha256 {'b' * 64} --f4-profile /tmp/f4.json "
+            f"--f0-evidence-sha256 {'a' * 64} --f0-evidence /tmp/f0.json "
+            "--isaaclab-launcher /IsaacLab/isaaclab.sh --num_envs 64 --seeds 42 43 44"
+        )
+        self.assertTrue(ProcessRegistry._training_commands_match(recorded, observed))
+
+    def test_training_command_match_rejects_different_full_pipeline_seeds(self):
+        recorded = (
+            "python scripts/rsl_rl/train_sensor_v2_full_pipeline.py "
+            "--isaaclab-launcher /IsaacLab/isaaclab.sh --f0-evidence /tmp/f0.json "
+            f"--f0-evidence-sha256 {'a' * 64} --f4-profile /tmp/f4.json "
+            f"--f4-profile-sha256 {'b' * 64} --f5-profile /tmp/f5.json "
+            f"--f5-profile-sha256 {'c' * 64} --seeds 42 43 44 --num_envs 64 "
+            "--robust_iterations 600 --device cuda:0"
+        )
+        observed = recorded.replace("--seeds 42 43 44", "--seeds 42 43 45")
+
+        self.assertFalse(ProcessRegistry._training_commands_match(recorded, observed))
+
     def test_training_command_match_does_not_confuse_pipeline_with_child_stage(self):
         recorded = (
             "/IsaacLab/isaaclab.sh -p scripts/rsl_rl/train_sensor_v2_pipeline.py "
@@ -2271,6 +2305,17 @@ class ProcessRegistryTests(unittest.TestCase):
                 f"python {paths.repo_root}/scripts/rsl_rl/train_sensor_v2_pipeline.py "
                 "--num_envs 64 --teacher_iterations 1500 --distillation_iterations 800 "
                 "--ppo_iterations 1500 --device cuda:0"
+            )
+            self.assertTrue(registry._is_repo_training_process(command, "123"))
+
+    def test_sensor_v2_full_pipeline_counts_as_training_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            registry = ProcessRegistry(paths, HistoryStore(paths))
+            command = (
+                f"python {paths.repo_root}/scripts/rsl_rl/train_sensor_v2_full_pipeline.py "
+                "--isaaclab-launcher /IsaacLab/isaaclab.sh --f0-evidence /tmp/f0.json"
             )
             self.assertTrue(registry._is_repo_training_process(command, "123"))
 
@@ -3029,13 +3074,150 @@ class ProcessRegistryTests(unittest.TestCase):
                     "source": "training_panel",
                     "status": "running",
                     "process_log": str(process_log),
-                    "params": {"training_route": "sensor_v2_full"},
+                    "params": {"training_route": "sensor_v2_f1_f3"},
                 }
             )
             registry = ProcessRegistry(paths, history)
             parsed = registry._sensor_v2_pipeline_result("panel_pipeline")
             self.assertIsNotNone(parsed)
             self.assertEqual(parsed["ppo_log_dir"], str(final_dir.resolve()))
+            self.assertTrue(parsed["debug_only"])
+            self.assertFalse(parsed["deployment_eligible"])
+            self.assertFalse(parsed["promotion_eligible"])
+            self.assertEqual(
+                parsed["acceptance_screening"], "not_run_legacy_debug_only"
+            )
+
+    def test_sensor_v2_full_pipeline_result_resolves_primary_robust_seed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            runs = []
+            for seed in (42, 43, 44):
+                run_dir = (
+                    root
+                    / "logs/rsl_rl/redrhex_forward_v2_robust_ppo"
+                    / f"robust_seed_{seed}"
+                )
+                run_dir.mkdir(parents=True)
+                checkpoint = run_dir / "model_600.pt"
+                checkpoint.write_bytes(f"checkpoint-{seed}".encode())
+                runs.append(
+                    {
+                        "stage": "f4_robust_ppo",
+                        "seed": seed,
+                        "run_dir": str(run_dir),
+                        "checkpoint": str(checkpoint),
+                        "checkpoint_sha256": hashlib.sha256(
+                            checkpoint.read_bytes()
+                        ).hexdigest(),
+                    }
+                )
+            process_log = paths.process_log_dir / "panel_full_pipeline.log"
+            result = {
+                "schema": "redrhex.sensor-v2-full-pipeline.v2",
+                "status": "passed",
+                "seeds": [42, 43, 44],
+                "f0_evidence": {"path": "/tmp/f0.json", "sha256": "a" * 64},
+                "f4_profile": {"path": "/tmp/f4.json", "sha256": "b" * 64},
+                "f5_profile": {"path": "/tmp/f5.json", "sha256": "c" * 64},
+                "runs": runs,
+            }
+            process_log.write_text(
+                f"SENSOR_V2_FULL_PIPELINE_RESULT: {json.dumps(result)}\n",
+                encoding="utf-8",
+            )
+            history.add_run(
+                {
+                    "id": "panel_full_pipeline",
+                    "source": "training_panel",
+                    "status": "running",
+                    "process_log": str(process_log),
+                    "params": {
+                        "training_route": "sensor_v2_full",
+                        "seeds": [42, 43, 44],
+                        "f0_evidence": "/tmp/f0.json",
+                        "f0_evidence_sha256": "a" * 64,
+                        "f4_profile": "/tmp/f4.json",
+                        "f4_profile_sha256": "b" * 64,
+                        "f5_profile": "/tmp/f5.json",
+                        "f5_profile_sha256": "c" * 64,
+                    },
+                }
+            )
+            parsed = ProcessRegistry(paths, history)._sensor_v2_pipeline_result(
+                "panel_full_pipeline"
+            )
+            self.assertIsNotNone(parsed)
+            self.assertEqual(parsed["primary_seed"], 42)
+            self.assertEqual(parsed["ppo_log_dir"], runs[0]["run_dir"])
+
+            result["f5_profile"]["sha256"] = "d" * 64
+            process_log.write_text(
+                f"SENSOR_V2_FULL_PIPELINE_RESULT: {json.dumps(result)}\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                ProcessRegistry(paths, history)._sensor_v2_pipeline_result(
+                    "panel_full_pipeline"
+                )
+            )
+            result["f5_profile"]["sha256"] = "c" * 64
+            duplicate = {**runs[0], "checkpoint_sha256": runs[0]["checkpoint_sha256"]}
+            result["runs"].append(duplicate)
+            process_log.write_text(
+                f"SENSOR_V2_FULL_PIPELINE_RESULT: {json.dumps(result)}\n",
+                encoding="utf-8",
+            )
+            self.assertIsNone(
+                ProcessRegistry(paths, history)._sensor_v2_pipeline_result(
+                    "panel_full_pipeline"
+                )
+            )
+
+    def test_full_pipeline_monitor_fails_closed_without_valid_result(self):
+        class CompletedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self.make_paths(root)
+            history = HistoryStore(paths)
+            process_log = paths.process_log_dir / "panel_full_missing_result.log"
+            process_log.write_text("pipeline child output only\n", encoding="utf-8")
+            history.add_run(
+                {
+                    "id": "panel_full_missing_result",
+                    "source": "training_panel",
+                    "status": "running",
+                    "process_log": str(process_log),
+                    "params": {
+                        "training_route": "sensor_v2_full",
+                        "device": "cpu",
+                        "seeds": [42, 43, 44],
+                    },
+                }
+            )
+            registry = ProcessRegistry(paths, history)
+            registry.start_video_recording = Mock()
+
+            with patch.object(registry, "_refresh_tensorboard_summary"):
+                registry._monitor_training(
+                    "panel_full_missing_result",
+                    CompletedProcess(),
+                    0,
+                )
+
+            run = history.get_run("panel_full_missing_result")
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["failure_class"], "evidence")
+            self.assertIsNone(run["log_dir"])
+            registry.start_video_recording.assert_not_called()
 
 
 if __name__ == "__main__":

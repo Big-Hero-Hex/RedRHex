@@ -8,7 +8,7 @@
 import os
 import toml
 
-from setuptools import setup
+from setuptools import find_packages, setup
 
 # Obtain the extension data from the extension.toml file
 EXTENSION_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -17,14 +17,18 @@ EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extensio
 
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
-    # NOTE: Add dependencies
     "psutil",
+    # Sensor V2 simulator/action/export paths import the separately versioned
+    # policy-I/O package.  scripts/install_redrhex.py installs that local
+    # distribution first; keeping this pin makes any out-of-order install fail
+    # during dependency resolution instead of much later at gym.make().
+    "redrhex-policy-io==2.0.0",
 ]
 
 # Installation operation
 setup(
     name="RedRhex",
-    packages=["RedRhex"],
+    packages=find_packages(include=("RedRhex", "RedRhex.*")),
     author=EXTENSION_TOML_DATA["package"]["author"],
     maintainer=EXTENSION_TOML_DATA["package"]["maintainer"],
     url=EXTENSION_TOML_DATA["package"]["repository"],

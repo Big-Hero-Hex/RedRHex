@@ -94,6 +94,7 @@ class SensorDistillationV2:
 
         with torch.no_grad():
             disagreement = (actions - teacher_actions).abs()
+            velocity_error = base_velocity - base_velocity_target
             metrics = {
                 "loss/total": total.detach(),
                 "loss/main_drive_huber": main_loss.detach(),
@@ -104,6 +105,9 @@ class SensorDistillationV2:
                 "mae/main_drive": disagreement[..., :MAIN_ACTION_DIM_V2].mean(),
                 "mae/forward_abad": disagreement[..., MAIN_ACTION_DIM_V2:].mean(),
                 "mae/base_velocity": (base_velocity - base_velocity_target).abs().mean(),
+                "rmse/base_velocity_x": velocity_error[..., 0].square().mean().sqrt(),
+                "rmse/base_velocity_y": velocity_error[..., 1].square().mean().sqrt(),
+                "rmse/base_velocity_z": velocity_error[..., 2].square().mean().sqrt(),
                 "mae/next_frame": (next_frame - next_frame_target).abs().mean(),
                 "rollout/teacher_student_disagreement": disagreement.mean(),
                 "rollout/teacher_saturation": (teacher_actions.abs() >= 1.0).float().mean(),

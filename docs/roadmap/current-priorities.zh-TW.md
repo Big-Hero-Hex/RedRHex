@@ -6,8 +6,18 @@ audience: shared
 type: roadmap
 status: active
 owner: project
-last_reviewed: 2026-08-14
+last_reviewed: 2026-08-15
 ---
+
+<a id="integration"></a>
+## 整合與發布紀律
+
+- 以目前的 `origin/main` 為起點，將 Autopilot 與 Student V2 recovery snapshot 分別重建成可審查的變更；不可直接合併 recovery commit，也不可遺失它們的基底之後已進入 mainline 的 desktop remote、UI 與 code CI 修正。
+- 在繼續 integration 前，先讓 repository root 回到最新且 clean 的 `main`，並將每個 recovery reconstruction 放在各自的 `.worktrees/` checkout。
+- 維持 `main` 為唯一已發布 baseline。Training Panel 3.8 Autopilot 與 Student V2 follow-up 的重建 PR 在通過文件、service、browser 與 target-environment gate 前，都只視為 branch-local preview。
+- 在相依關係允許時，將 27,000 行的 Autopilot snapshot 拆成可審查的 contract、controller、connector、UI 與文件 concern。保留精確的跨層 identity，並在每個整合步驟前執行完整 combined suite。
+- 擴充 lightweight code CI，納入 Autopilot MCP adapter、Reward Agent 與 ROS contract suite。Mother 或 Child UI 行為有變更時，加入 browser job，或要求保存 local Playwright evidence。
+- 以單獨的 hygiene 變更移除已追蹤的 `.vscode/browse.vc.db-shm` 與 `.vscode/browse.vc.db-wal` generated database file，之後持續忽略這些檔案。
 
 <a id="validation"></a>
 ## 證據與移動驗證
@@ -35,7 +45,17 @@ Evidence gate 與解讀記錄於 [2026-08-13 研究就緒度稽核](../research/
 - 面板更廣泛暴露到 LAN 前，解決或明確接受 authentication 邊界。
 - 加入 deployed base-linear-velocity estimator，或採用有證據的 training alternative。
 - 完成 hardware bring-up 證據，並維持 ROS contract parity 為 60 Hz。
-- 依 active design 與 plan 實作並驗證已核准的 Windows remote launcher。
+- 完成剩餘的 Windows PowerShell 5.1+ 與受支援 macOS host smoke，涵蓋安裝、interactive SSH、fixed forward、browser capability state、timeout、tunnel shutdown 與 existing-tunnel reuse。Source-level launcher test 不能關閉這些 host gate。
+- 在接受 production remote job 前，以真實環境執行 Child 3.7 Supabase staging smoke，涵蓋 role/RLS rejection、old/new worker compatibility、queue 與 cancellation、media 與 Drive flow、deployment job、activity attribution 與 admin deletion。
+
+<a id="student-v2"></a>
+## Student Distillation V2
+
+- 以目前的 `main` 重建已保存的 Student V2 follow-up，保留其 simulator stop-point evidence，並與 Panel physics proposal 分開審查。
+- 使用 canonical hash、golden fixture、zero-residual/action mapping、causal observation 與 simulator-to-ROS trace parity 凍結 V1 compatibility 與共用 `redrhex_policy_io` contract。
+- 關閉 F1/F2/F3 evidence gate：三個 Teacher A seed、named two-input ONNX export 與 runtime parity、finite update/save/resume check、strict actor/normalizer transfer，以及三 seed forward screening。
+- 將每個 promoted artifact 綁定 measured sensor calibration 與 held-out raw-event replay；完成 V2 ROS builder、warm-up、validity/dropout behavior 與 offline inference parity，過程中不得啟用 motor。
+- 只有在同一 command protocol 下完成 Teacher A、legacy、distilled、PPO 與必要 ablation 的比較，三個 PPO seed 全部通過，且 provenance 與 teacher-gap evidence 完整時才能 promotion。
 
 <a id="reward-agent"></a>
 ## Reward Agent
@@ -54,6 +74,8 @@ Evidence gate 與解讀記錄於 [2026-08-13 研究就緒度稽核](../research/
 <a id="documentation"></a>
 ## 文件
 
+- 以 read-only 方式將 PM agent 連接到 GitHub `main`，並透過 deduplicated Update Log intake 將 repository change 投影到 PM Control Center。維持 Drive 中的 maintained Markdown 副本為 non-authoritative，並以 canonical GitHub link 取代會反覆更新的 snapshot link。
 - Operator/reference/roadmap 每 90 天 review，developer architecture 每 180 天 review。
 - 只有 evidence 改變 baseline、recommendation、decision 或 result 時才發布 experiment summary。
-- Documentation-system v1 checkpoint tag 完成後，才開始 Git history 與 branch reorganization。
+- 在重建工作經 review 進入 `main` 或被明確 archive 前，維持 branch-preservation manifest 與 local recovery bundle 的精確性；只有 reachability 與 clean-state check 通過後，才能移除 redundant branch 與 worktree。
+- Active design 與 plan 的真實 host、staging、simulation 或 hardware gate 關閉後，才將其解析為 durable architecture、release、audit 或 roadmap record。

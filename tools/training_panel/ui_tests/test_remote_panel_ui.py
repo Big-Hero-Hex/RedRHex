@@ -181,6 +181,7 @@ def test_child_deep_links_train_routes_more_views_and_themes(child_url):
         page.locator('.mobile-nav [data-action="view"][data-view="train"]').click()
         page.select_option("#training-route", "sensor_v2_full")
         expect(page.locator("#teacher-iterations")).to_be_visible()
+        expect(page.locator("#f0-evidence")).to_be_visible()
         expect(page.locator("#task")).to_be_hidden()
         page.select_option("#training-route", "sensor_v2_distillation")
         expect(page.locator("#resume-run")).to_be_visible()
